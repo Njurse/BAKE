@@ -331,6 +331,145 @@ def check_records(levels_dir, donor_city, donor_dir, cities=None):
     return 1 if problems else 0
 
 
+def make_lcf(records, pad=4096):
+    """The .LCF for one city: a 52-byte table, then 13 records, then padding.
+
+    The shape is the ENGINE's, not a guess. LoadCosmetics (cosmetic.c:148) reads
+    exactly 3120 bytes, and 3120 = 52 + 13 * 236 to the byte, so the table is 13
+    int32s and then the records. Driver 2's own files are exactly 4096 bytes on
+    disk - one 2048 sector plus a whole second one - so the tail is padding and
+    nothing reads it.
+    """
+    if len(records) != 13:
+        raise ValueError("%d records, a city's .LCF holds 13" % len(records))
+    out = bytearray(pad)
+    for i, rec in enumerate(records):
+        if len(rec) != RECORD_SIZE:
+            raise ValueError("record %d is %d bytes, not %d"
+                             % (i, len(rec), RECORD_SIZE))
+        struct.pack_into("<i", out, i * 4, LCF_TABLE + i * RECORD_SIZE)
+        out[LCF_TABLE + i * RECORD_SIZE:LCF_TABLE + (i + 1) * RECORD_SIZE] = rec
+    return bytes(out)
+
+
+def parse_lcf(blob):
+    """A .LCF -> its 13 records, with the table checked as it is read."""
+    offs = struct.unpack_from("<13i", blob, 0)
+    for i, o in enumerate(offs):
+        want = LCF_TABLE + i * RECORD_SIZE
+        if o != want:
+            raise ValueError("offset %d is %d, expected %d" % (i, o, want))
+    return [blob[o:o + RECORD_SIZE] for o in offs]
+
+
+def write_city_lcfs(levels_dir, out_dir, donor_city, donor_dir=None, cities=None):
+    """Write one .LCF per D1 city. Returns {city: path}.
+
+    A D1 city may ship fewer than 13 car models, and an .LCF always holds 13. The
+    empty slots get the DONOR's record for that same slot index: a complete,
+    non-zero record that nothing ever reads, rather than a run of zeros for the
+    engine to trip over if it ever does.
+    """
+    donors = load_donors(donor_dir or levels_dir)
+    donor_recs = donors[donor_city]
+    got = build_records(levels_dir, donor_city, cities, show=False,
+                        donor_dir=donor_dir)
+    if not got:
+        return None
+    if not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    out = {}
+    for city in sorted(got):
+        by_slot = {slot: rec for slot, rec, _di, _r, _t in got[city]}
+        # An .LCF always holds 13, but a D1 city may ship fewer cars. The empty
+        # slots are filled with THIS city's own first record - a valid record for a
+        # car of this city, which nothing reads - rather than a run of zeros for the
+        # engine to trip over, or a borrowed bus from a city that needed one.
+        filled = [rec for _s, rec, _d, _r, _t in got[city] if rec]
+        spare = filled[0] if filled else _donor_bytes(donor_recs, 0)
+        records = [by_slot.get(slot) or spare for slot in range(13)]
+        path = os.path.join(out_dir, city + ".LCF")
+        blob = make_lcf(records)
+        with open(path, "wb") as f:
+            f.write(blob)
+        out[city] = path
+    return out
+
+
+def _donor_bytes(donor_recs, slot):
+    """A donor record re-packed to bytes, for filling an unused slot."""
+    r = donor_recs[slot]
+    out = bytearray(RECORD_SIZE)
+    for o, p in zip(POS_OFFSETS[:9], r["anchors"]):
+        struct.pack_into("<3h", out, o, *p)
+    for i, p in enumerate(r["cPoints"]):
+        struct.pack_into("<3h", out, 116 + i * 8, *p)
+    struct.pack_into("<3h", out, 212, *r["colBox"])
+    struct.pack_into("<3h", out, 220, *r["cog"])
+    for i, d in enumerate(r["wheelDisp"]):
+        struct.pack_into("<3h", out, OFF_WHEELDISP + i * 8, *d)
+    struct.pack_into("<6h", out, OFF_SCALARS_A, *r["sA"])
+    struct.pack_into("<4h", out, OFF_SCALARS_B, *r["sB"])
+    return bytes(out)
+
+
+def dump_lcf(path):
+    """Print a .LCF the way a person can check it."""
+    blob = open(path, "rb").read()
+    print("%s: %d bytes" % (os.path.basename(path), len(blob)))
+    try:
+        recs = parse_lcf(blob)
+    except ValueError as e:
+        print("  BAD TABLE: %s" % e)
+        return 1
+    print("  table ok: 13 offsets at 52 + n*236, records end at %d"
+          % (LCF_TABLE + 13 * RECORD_SIZE))
+    for i, rec in enumerate(recs):
+        r = read_record(rec)
+        nz = sum(1 for b in rec if b)
+        print("  [%2d] colBox %-14s cog %-13s wheelSize %3d  whDisp %-16s (%d/%d bytes set)"
+              % (i, r["colBox"], r["cog"], r["sA"][5], r["wheelDisp"][0], nz,
+                 RECORD_SIZE))
+    return 0
+
+
+def verify_lcfs(out_dir):
+    """Re-read every written .LCF and check it against the engine's shape."""
+    problems = []
+    files = sorted(f for f in os.listdir(out_dir) if f.upper().endswith(".LCF"))
+    if not files:
+        print("no .LCF files under %s" % out_dir)
+        return 1
+    for fn in files:
+        blob = open(os.path.join(out_dir, fn), "rb").read()
+        if len(blob) != 4096:
+            problems.append("%s: %d bytes, not 4096" % (fn, len(blob)))
+        # the engine reads exactly this much, so the records must end here
+        if LCF_TABLE + 13 * RECORD_SIZE != 3120:
+            problems.append("the table + records is not the 3120 the engine reads")
+        try:
+            recs = parse_lcf(blob)
+        except ValueError as e:
+            problems.append("%s: %s" % (fn, e))
+            continue
+        if len(recs) != 13:
+            problems.append("%s: %d records, not 13" % (fn, len(recs)))
+        for i, rec in enumerate(recs):
+            r = read_record(rec)
+            if r["colBox"] == (0, 0, 0):
+                problems.append("%s slot %d: colBox is zero" % (fn, i))
+            if r["sA"][5] <= 0:
+                problems.append("%s slot %d: wheelSize %d" % (fn, i, r["sA"][5]))
+            if not any(rec):
+                problems.append("%s slot %d: all zeros" % (fn, i))
+    print("%d .LCF files re-read: table 52 + 13*236 = %d, each 4096 bytes"
+          % (len(files), LCF_TABLE + 13 * RECORD_SIZE))
+    for p in problems[:12]:
+        print("  PROBLEM: %s" % p)
+    print("VERDICT: %s" % ("clean" if not problems else "%d problem(s)" % len(problems)))
+    return 1 if problems else 0
+
+
 def selftest():
     """Invert the engine's wheel arithmetic and check it returns D2's own numbers.
 
@@ -375,6 +514,11 @@ def main(argv=None):
                     help="derive the records for each D1 city and print them")
     ap.add_argument("--check", action="store_true",
                     help="hold the derived records against Driver 2's own ranges")
+    ap.add_argument("--write", metavar="DIR",
+                    help="write one .LCF per D1 city into DIR")
+    ap.add_argument("--verify", metavar="DIR",
+                    help="re-read the .LCF files in DIR and check the engine's shape")
+    ap.add_argument("--dump", metavar="FILE", help="print one .LCF")
     ap.add_argument("--cities", default="",
                     help="comma-separated subset of %s" % (D1_CITIES,))
     args = ap.parse_args(argv)
@@ -387,6 +531,18 @@ def main(argv=None):
     if args.check:
         want = tuple(x for x in args.cities.split(",") if x) or None
         return check_records(args.levels, "CHICAGO", args.donor, want)
+    if args.dump:
+        return dump_lcf(args.dump)
+    if args.verify:
+        return verify_lcfs(args.verify)
+    if args.write:
+        want = tuple(x for x in args.cities.split(",") if x) or None
+        got = write_city_lcfs(args.levels, args.write, "CHICAGO", args.donor, want)
+        if not got:
+            return 1
+        for city in sorted(got):
+            print("%s -> %s (%d bytes)" % (city, got[city], os.path.getsize(got[city])))
+        return verify_lcfs(args.write)
     ap.print_help()
     return 0
 
