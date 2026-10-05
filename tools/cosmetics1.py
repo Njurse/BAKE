@@ -520,6 +520,91 @@ def verify_lcfs(out_dir):
     return 1 if problems else 0
 
 
+# The fields the RUNTIME cannot do without. A zero here is not a cosmetic
+# blemish: colBox zero is a car that cannot collide, mass/powerRatio zero is one
+# that cannot move, traction zero is one that cannot turn, wheelDisp zero puts all
+# four wheels on the origin, and wheelSize zero drops the axle to the body centre.
+CRITICAL = ("colBox", "wheelDisp", "wheelSize", "mass", "powerRatio", "traction",
+            "susCoeff")
+
+
+def simulate_engine_read(path, verbose=False):
+    """Read a .LCF the way the ENGINE reads it, not the way we wrote it.
+
+    ProcessCosmeticsLump (cosmetic.c:48) does not walk the file in order. It walks
+    the resident slots, takes each slot's MODEL number, uses that as an index into
+    the int table, and jumps to the record at that offset. Two consequences that a
+    writer-side parse cannot catch:
+
+      * the table is indexed by MODEL (0..12), so a file whose table is in slot
+        order but whose records are in model order would put the wrong car on the
+        wrong slot - and it would look correct to anything that reads it back the
+        way it wrote it;
+      * the ENABLE_GAME_FIXES block reads models 8..12 as well, so all thirteen
+        offsets must be live even though only twelve slots exist.
+
+    It then does what the engine does next: FixCarCos's delta.vz. Returns a list of
+    problems, empty when the file is importable.
+    """
+    blob = open(path, "rb").read()
+    name = os.path.basename(path)
+    problems = []
+    end = LCF_TABLE + 13 * RECORD_SIZE          # the 3120 LoadCosmetics reads
+    offs = struct.unpack_from("<13i", blob, 0)
+    for model in range(13):
+        o = offs[model]
+        if o < LCF_TABLE or o + RECORD_SIZE > end:
+            problems.append("%s model %d: offset %d is outside the records the "
+                            "engine reads (%d..%d)"
+                            % (name, model, o, LCF_TABLE, end - RECORD_SIZE))
+            continue
+        r = read_record(blob, o)
+        tag = "%s model %d" % (name, model)
+        if r["colBox"] == (0, 0, 0):
+            problems.append("%s: colBox is zero" % tag)
+        if r["sA"][5] <= 0:
+            problems.append("%s: wheelSize %d" % (tag, r["sA"][5]))
+        if all(d == (0, 0, 0) for d in r["wheelDisp"]):
+            problems.append("%s: all four wheelDisp are the origin" % tag)
+        for i, fname in ((0, "extraInfo"), (1, "powerRatio"), (3, "susCoeff"),
+                         (4, "traction")):
+            if r["sA"][i] == 0 and fname in CRITICAL:
+                problems.append("%s: %s is 0" % (tag, fname))
+        if r["sB"][3] == 0:
+            problems.append("%s: mass is 0" % tag)
+        d = fix_car_cos_delta_z(r)
+        if abs(d) > DELTA_Z_CAR_BOUND:
+            problems.append("%s: FixCarCos delta.vz %d exceeds %d"
+                            % (tag, d, DELTA_Z_CAR_BOUND))
+        if verbose:
+            print("  model %2d at %4d: colBox %-14s wheelSize %3d  delta.vz %4d"
+                  % (model, o, r["colBox"], r["sA"][5], d))
+    # our writer lays the records out in slot order, so the two orders coincide;
+    # if that ever stops being true this is the check that says so.
+    if list(offs) != [LCF_TABLE + i * RECORD_SIZE for i in range(13)]:
+        problems.append("%s: the table is not 52 + n*236 - the table order and the "
+                        "record order have diverged" % name)
+    return problems
+
+
+def simulate_all(out_dir, verbose=False):
+    """Every .LCF in a directory, read the way the engine reads it."""
+    files = sorted(f for f in os.listdir(out_dir) if f.upper().endswith(".LCF"))
+    if not files:
+        print("no .LCF files under %s" % out_dir)
+        return 1
+    bad = []
+    for fn in files:
+        p = simulate_engine_read(os.path.join(out_dir, fn), verbose)
+        print("%-14s %s" % (fn, "importable" if not p else "%d problem(s)" % len(p)))
+        bad.extend(p)
+    print()
+    for b in bad[:12]:
+        print("  PROBLEM: %s" % b)
+    print("VERDICT: %s" % ("clean" if not bad else "%d problem(s)" % len(bad)))
+    return 1 if bad else 0
+
+
 def selftest():
     """Invert the engine's wheel arithmetic and check it returns D2's own numbers.
 
@@ -569,6 +654,9 @@ def main(argv=None):
     ap.add_argument("--verify", metavar="DIR",
                     help="re-read the .LCF files in DIR and check the engine's shape")
     ap.add_argument("--dump", metavar="FILE", help="print one .LCF")
+    ap.add_argument("--simulate", metavar="DIR",
+                    help="read the .LCF files in DIR the way the ENGINE reads them")
+    ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--cities", default="",
                     help="comma-separated subset of %s" % (D1_CITIES,))
     args = ap.parse_args(argv)
@@ -583,6 +671,8 @@ def main(argv=None):
         return check_records(args.levels, "CHICAGO", args.donor, want)
     if args.dump:
         return dump_lcf(args.dump)
+    if args.simulate:
+        return simulate_all(args.simulate, args.verbose)
     if args.verify:
         return verify_lcfs(args.verify)
     if args.write:
