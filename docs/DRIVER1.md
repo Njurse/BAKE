@@ -124,6 +124,13 @@ the import path is reused unchanged, and "a fifth source" reduces to a fifth row
 in the tables that path already iterates. That is the whole reason the pipeline
 is *offline bake → synthetic fifth city*.
 
+**Winding — measured, and it agrees.** `cross(u, v)` on a car poly points
+**inward** for both games (every FRISCO / MIAMI and every CHICAGO model comes out
+negative), i.e. Driver 1 and Driver 2 share the same winding convention. So the
+bake needs **no index reversal**: the engine's backface culling will treat a
+baked Driver 1 car exactly as it treats Driver 2's own cars. (This is also why
+`tools/preview.py` had to negate the normal before shading — see its comment.)
+
 ---
 
 ## 5. `DT*.BIN` — what they are (and are not)

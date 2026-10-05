@@ -107,16 +107,18 @@ def render(items, path, cols, cell=128, pad=10):
         order.sort(reverse=True)                       # back to front
 
         for _depth, _fi, f in order:
-            # flat shading from the face normal
+            # MEASURED: cross(u, v) points INWARD for both games' winding (D1 and
+            # D2 agree), so swap the operands to get the outward normal and shade
+            # directionally - no abs(), which was hiding the inversion.
             a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
             u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
             v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
-            n = (u[1] * v[2] - u[2] * v[1],
-                 u[2] * v[0] - u[0] * v[2],
-                 u[0] * v[1] - u[1] * v[0])
+            n = (v[1] * u[2] - v[2] * u[1],
+                 v[2] * u[0] - v[0] * u[2],
+                 v[0] * u[1] - v[1] * u[0])
             ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) or 1.0
-            d = abs((n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) / ln)
-            shade = int(60 + 175 * d)
+            d = max(0.0, (n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) / ln)
+            shade = int(38 + 200 * d)
             rgb = (shade, shade, min(255, shade + 20))
             for tri in ((f[0], f[1], f[2]),) + (((f[0], f[2], f[3]),) if len(f) == 4 else ()):
                 _fill(pix, w, h, [scr[tri[0]], scr[tri[1]], scr[tri[2]]], rgb)
