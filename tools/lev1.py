@@ -210,17 +210,40 @@ class Poly(object):
 
 class Model(object):
     __slots__ = ("shape_flags", "flags2", "bounding_sphere", "tri_verts",
-                 "vertices", "polys", "errors")
+                 "vertices", "polys", "normals", "face_normals", "errors")
 
     def __init__(self, shape_flags, flags2, bounding_sphere, tri_verts,
-                 vertices, polys, errors):
+                 vertices, polys, normals, face_normals, errors):
         self.shape_flags = shape_flags
         self.flags2 = flags2
         self.bounding_sphere = bounding_sphere
         self.tri_verts = tri_verts
         self.vertices = vertices      # list of (x, y, z)
         self.polys = polys            # list of Poly
+        self.normals = normals        # per-VERTEX table (point_normals), or None
+        self.face_normals = face_normals   # per-POLY table, npol entries, or None
         self.errors = errors          # list of (index, reason)
+
+    def poly_normals(self, poly):
+        """The three normals for a texturing poly's vertices.
+
+        Preferred source is the model's own per-vertex table, which is what the
+        GT record's normal indices index (cars.c:650). Many models ship no such
+        table (num_point_normals == 0) and then there is nothing for the indices
+        to mean, so fall back to the poly's own geometric normal.
+        """
+        if self.normals and poly.n and all(i < len(self.normals) for i in poly.n):
+            return [self.normals[i] for i in poly.n]
+        return [self._geo_normal(poly)] * len(poly.v)
+
+    def _geo_normal(self, poly):
+        a, b, c = (self.vertices[i] for i in poly.v[:3])
+        u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+        v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+        n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+             u[0] * v[1] - u[1] * v[0])
+        L = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) ** 0.5 or 1.0
+        return (n[0] / L, n[1] / L, n[2] / L)
 
     def bbox(self):
         if not self.vertices:
@@ -288,7 +311,7 @@ def decode_model(blob, model_off, polys_from=None):
     with 0 errors for every model). So damaged := clean polys + damaged vertices.
     """
     (shape_flags, flags2, _inst, tri_verts, _zb, bounding_sphere,
-     _npn, num_vertices, num_polys) = struct.unpack_from(MODEL_FMT, blob, model_off)
+     num_point_normals, num_vertices, num_polys) = struct.unpack_from(MODEL_FMT, blob, model_off)
     (vofs, _pblk, _nofs, _pno, _c) = struct.unpack_from(MODEL_OFFSETS_FMT,
                                                         blob, model_off + 16)
     vertices = []
@@ -297,13 +320,36 @@ def decode_model(blob, model_off, polys_from=None):
         vertices.append((x, y, z))
 
     src = model_off if polys_from is None else polys_from
-    (_sf, _f2, _in, _tv, _zb, _bs, _npn, src_nv, src_npol) = \
+    (_sf, _f2, _in, _tv, _zb, _bs, src_npn, src_nv, src_npol) = \
         struct.unpack_from(MODEL_FMT, blob, src)
-    (_vo, src_pblk, _no, _pn, _co) = \
+    (_vo, src_pblk, _no, src_pno, _co) = \
         struct.unpack_from(MODEL_OFFSETS_FMT, blob, src + 16)
+
+    # Two normal tables, measured, and they are not interchangeable:
+    #
+    #   normals       npol entries, one per poly, and exactly the poly's own
+    #                 geometric normal (148/148, 200/200, 242/242 on FRISCO,
+    #                 zero flipped). Indexing THIS with the GT normal indices
+    #                 gives frac(dot>0) ~ 0.6 - i.e. it is not what they mean.
+    #   point_normals npn entries, the per-VERTEX table the GT indices really
+    #                 index: frac(dot>0) = 1.000 on the models that have one,
+    #                 and max(GT index) == npn - 1 exactly.
+    #
+    # A model may ship no point_normals at all (npn == 0, e.g. FRISCO models
+    # 0/1/2), in which case the GT indices have nothing to resolve against.
+    face_normals = []
+    for i in range(max(0, src_npol)):
+        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, src + _nofs + i * 8)
+        face_normals.append((nx, ny, nz))
+
+    normals = []
+    for i in range(max(0, src_npn)):
+        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, src + src_pno + i * 8)
+        normals.append((nx, ny, nz))
+
     polys, errors = decode_polys(blob, src + src_pblk, src_npol, src_nv)
     return Model(shape_flags, flags2, bounding_sphere, tri_verts,
-                 vertices, polys, errors)
+                 vertices, polys, normals or None, face_normals or None, errors)
 
 
 def car_models(blob):
