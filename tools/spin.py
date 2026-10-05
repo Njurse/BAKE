@@ -38,8 +38,41 @@ def project(v, cy, sy, cp, sp):
     return cx, (y * cp - cz * sp), cz
 
 
-def frame(items, pages, yaw, pitch, cols, cell, pad=10):
-    """One RGB frame: every item drawn at this yaw."""
+def refs_for(items, pitch, cell, pad, samples=48):
+    """A fixed (centre3d, scale) per item, so a turning model does not breathe.
+
+    A car is long and thin, so its PROJECTED span changes with the yaw: wide
+    seen from the side, narrow seen head-on. Scaling each frame to its own span
+    therefore zooms the model in as it comes round to face the camera. Measure
+    the worst case over a full turn once and use it for every frame, and centre
+    on the model's own 3D middle rather than on each frame's projected box.
+    """
+    out = []
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    for item in items:
+        verts = item[2]
+        if not verts:
+            out.append(None)
+            continue
+        lo = [min(v[i] for v in verts) for i in range(3)]
+        hi = [max(v[i] for v in verts) for i in range(3)]
+        centre = [(lo[i] + hi[i]) / 2.0 for i in range(3)]
+        worst = 1
+        for k in range(samples):
+            cy, sy = math.cos(2 * math.pi * k / samples), math.sin(2 * math.pi * k / samples)
+            xs = []
+            ys = []
+            for v in verts:
+                px, py, _pz = project(v, cy, sy, cp, sp)
+                xs.append(px)
+                ys.append(py)
+            worst = max(worst, max(xs) - min(xs), max(ys) - min(ys))
+        out.append((centre, (cell - 2 * pad) / float(worst)))
+    return out
+
+
+def frame(items, pages, refs, yaw, pitch, cols, cell, pad=10):
+    """One RGB frame: every item drawn at this yaw with its fixed framing."""
     rows = (len(items) + cols - 1) // cols
     w, h = cols * cell, rows * cell
     pix = bytearray(w * h * 3)
@@ -48,16 +81,17 @@ def frame(items, pages, yaw, pitch, cols, cell, pad=10):
 
     for idx, item in enumerate(items):
         _label, _key, verts, faces = item[0], item[1], item[2], item[3]
-        if not verts:
+        if not verts or refs[idx] is None:
             continue
+        centre, sc = refs[idx]
         proj = [project(v, cy, sy, cp, sp) for v in verts]
-        xs = [q[0] for q in proj]
-        ys = [q[1] for q in proj]
-        span = max(max(xs) - min(xs), max(ys) - min(ys), 1)
-        sc = (cell - 2 * pad) / float(span)
-        ox = (idx % cols) * cell + cell / 2.0 - (min(xs) + max(xs)) / 2.0 * sc
-        oy = (idx // cols) * cell + cell / 2.0 - (min(ys) + max(ys)) / 2.0 * sc
-        scr = [(ox + q[0] * sc, oy + q[1] * sc) for q in proj]
+        # the model's own middle, projected - a constant anchor, so the car does
+        # not drift around its cell as it turns
+        anchor = project(centre, cy, sy, cp, sp)
+        ccx = (idx % cols) * cell + cell / 2.0
+        ccy = (idx // cols) * cell + cell / 2.0
+        scr = [(ccx + (q[0] - anchor[0]) * sc, ccy + (q[1] - anchor[1]) * sc)
+               for q in proj]
 
         order = sorted(range(len(faces)),
                        key=lambda fi: -sum(proj[i][2] for i in faces[fi][0]))
@@ -136,9 +170,10 @@ def main(argv=None):
 
     # one grid GIF, every model turning together
     grid = []
+    grefs = refs_for(items, pitch, args.cell, 10)
     for i in range(args.frames):
         yaw = 2.0 * math.pi * i / args.frames
-        pix, w, h = frame(items, pages, yaw, pitch, args.cols, args.cell)
+        pix, w, h = frame(items, pages, grefs, yaw, pitch, args.cols, args.cell)
         grid.append(_image(pix, w, h))
     g = save_gif(os.path.join(args.out, "spin_baked.gif"), grid, duration)
     print("grid: %s (%dx%d, %d frames, %d shapes)"
@@ -150,10 +185,11 @@ def main(argv=None):
         os.makedirs(d)
     for n, item in enumerate(items):
         label = "%d_%s" % (n, str(item[0]).replace("/", "_").replace(" ", ""))
+        irefs = refs_for([item], pitch, args.cell, 14)
         fr = []
         for i in range(args.frames):
             yaw = 2.0 * math.pi * i / args.frames
-            pix, w, h = frame([item], pages, yaw, pitch, 1, args.cell, pad=14)
+            pix, w, h = frame([item], pages, irefs, yaw, pitch, 1, args.cell, pad=14)
             fr.append(_image(pix, w, h))
         save_gif(os.path.join(d, label + ".gif"), fr, duration)
     print("per model: %d GIFs in %s" % (len(items), d))

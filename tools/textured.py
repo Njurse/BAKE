@@ -220,10 +220,17 @@ def pool_items(pool_path, want_levels, first):
         verts = [(v[0] * k, v[1] * k, v[2] * k) for v in g["vertices"]]
         faces = []
         for p in g["polys"]:
-            if p["v"] and p["uv"]:
-                faces.append((tuple(p["v"]), tuple(tuple(q) for q in p["uv"]), p["set"]))
+            v = tuple(p["v"])
+            uv = tuple(tuple(q) for q in p.get("uv") or [])
+            if len(v) == 3 and uv:
+                faces.append((v, uv, p["set"], p.get("id", -1)))
+            elif len(v) == 4 and uv:
+                faces.append(((v[0], v[1], v[2]), (uv[0], uv[1], uv[2]),
+                              p["set"], p.get("id", -1)))
+                faces.append(((v[0], v[2], v[3]), (uv[0], uv[2], uv[3]),
+                              p["set"], p.get("id", -1)))
             else:
-                faces.append((tuple(p["v"]), ((0, 0),) * len(p["v"]), -1))
+                faces.append((v, ((0, 0),) * len(v), -1))
         items.append(("%s/%d" % (level, g["sources"][0][1]), level, verts, faces))
         if first and len(items) >= first:
             break
@@ -287,14 +294,25 @@ def baked_items(lev_path):
             continue
         faces = []
         for p in model.polys:
-            if len(p.v) != 3 or p.kind not in ("FT3", "GT3"):
+            if p.kind not in ("FT3", "FT4", "GT3", "GT4"):
                 continue
+            v = tuple(p.v)
+            uv = tuple(tuple(q) for q in p.uv)
             ns = model.poly_normals(p)
             sx = sum(q[0] for q in ns) / len(ns)
             sy = sum(q[1] for q in ns) / len(ns)
             sz = sum(q[2] for q in ns) / len(ns)
-            faces.append((tuple(p.v), tuple(tuple(q) for q in p.uv),
-                          p.texture_set, p.texture_id, (sx, sy, sz)))
+            n = (sx, sy, sz)
+            if len(v) == 3:
+                faces.append((v, uv, p.texture_set, p.texture_id, n))
+            elif len(v) == 4:
+                # A GT4 is a QUAD and the fill only takes triangles, so split it
+                # along v0-v2. Dropping these instead is what lost the hood and
+                # roof panels: 323 of the blob's 2161 polys are quads.
+                faces.append(((v[0], v[1], v[2]), (uv[0], uv[1], uv[2]),
+                              p.texture_set, p.texture_id, n))
+                faces.append(((v[0], v[2], v[3]), (uv[0], uv[2], uv[3]),
+                              p.texture_set, p.texture_id, n))
         items.append(("model %d" % m, "baked", list(model.vertices), faces))
     return items
 
