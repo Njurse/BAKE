@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""spin.py - rotating previews of the baked pool.
+
+Two sets of GIFs, both a full turn at a slight elevation, textured and lit the
+same way the static previews are:
+
+    out/spin_baked.gif        every model in one grid, turning together
+    out/spin/<n>_<level>_<m>.gif   one GIF per model
+
+The turn is around the vertical axis; the elevation is fixed and small, so the
+roof stays visible and the shape reads as a car rather than a plan view.
+
+Usage:
+    python spin.py [--baked FILE] [--frames 32] [--cell 200] [--elev 20]
+"""
+
+import argparse
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import preview     # noqa: E402  (LIGHT, _png)
+import textured    # noqa: E402  (baked_pages, baked_items, _fill_tex)
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def project(v, cy, sy, cp, sp):
+    """The static previews' projection with the yaw and pitch supplied.
+
+    Same convention throughout: the game's y is DOWN-positive, so screen y
+    follows +y and must not be negated, or every car renders upside down.
+    """
+    x, y, z = v
+    cx = x * cy + z * sy
+    cz = -x * sy + z * cy
+    return cx, (y * cp - cz * sp), cz
+
+
+def frame(items, pages, yaw, pitch, cols, cell, pad=10):
+    """One RGB frame: every item drawn at this yaw."""
+    rows = (len(items) + cols - 1) // cols
+    w, h = cols * cell, rows * cell
+    pix = bytearray(w * h * 3)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+
+    for idx, item in enumerate(items):
+        _label, _key, verts, faces = item[0], item[1], item[2], item[3]
+        if not verts:
+            continue
+        proj = [project(v, cy, sy, cp, sp) for v in verts]
+        xs = [q[0] for q in proj]
+        ys = [q[1] for q in proj]
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 1)
+        sc = (cell - 2 * pad) / float(span)
+        ox = (idx % cols) * cell + cell / 2.0 - (min(xs) + max(xs)) / 2.0 * sc
+        oy = (idx // cols) * cell + cell / 2.0 - (min(ys) + max(ys)) / 2.0 * sc
+        scr = [(ox + q[0] * sc, oy + q[1] * sc) for q in proj]
+
+        order = sorted(range(len(faces)),
+                       key=lambda fi: -sum(proj[i][2] for i in faces[fi][0]))
+        for fi in order:
+            entry = faces[fi]
+            ind, uv, setid = entry[0], entry[1], entry[2]
+            texid = entry[3] if len(entry) > 3 else -1
+            n = entry[4] if len(entry) > 4 else None
+            if len(ind) != 3 or setid < 0:
+                continue
+            page = pages.get(setid)
+            if not page:
+                continue
+            if n is None:
+                a, b, c = verts[ind[0]], verts[ind[1]], verts[ind[2]]
+                u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+                v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+                n = (v[1] * u[2] - v[2] * u[1], v[2] * u[0] - v[0] * u[2],
+                     v[0] * u[1] - v[1] * u[0])
+            # the normal turns with the model, so the shading stays put as it spins
+            nx = n[0] * cy + n[2] * sy
+            ny = n[1]
+            nz = -n[0] * sy + n[2] * cy
+            ln = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+            L = preview.LIGHT
+            d = max(0.0, (nx * L[0] + ny * L[1] + nz * L[2]) / ln)
+            shade = 0.45 + 0.75 * d
+
+            idx_img, crows = page
+            pal = crows[texid] if 0 <= texid < len(crows) else crows[0]
+            textured._fill_tex(pix, w, h,
+                               [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
+                               uv, idx_img, 256, 256, pal=pal, shade=shade)
+    return pix, w, h
+
+
+def _image(pix, w, h):
+    from PIL import Image
+    im = Image.frombytes("RGB", (w, h), bytes(pix))
+    return im.convert("P", palette=Image.ADAPTIVE, colors=255)
+
+
+def save_gif(path, frames, duration):
+    from PIL import Image
+    frames[0].save(path, save_all=True, append_images=frames[1:],
+                   duration=duration, loop=0, disposal=2,
+                   optimize=False)
+    return path
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--baked", default=os.path.join(HERE, "out", "bake", "D1POOL.LEV"))
+    ap.add_argument("--frames", type=int, default=32)
+    ap.add_argument("--cell", type=int, default=200)
+    ap.add_argument("--elev", type=float, default=20.0,
+                    help="elevation in degrees (the plan asked for a slight one)")
+    ap.add_argument("--cols", type=int, default=5)
+    ap.add_argument("--out", default=os.path.join(HERE, "out"))
+    args = ap.parse_args(argv)
+
+    if not os.path.exists(args.baked):
+        print("no baked blob at %s - run bake.py first" % args.baked)
+        return 1
+
+    blob = open(args.baked, "rb").read()
+    pages = textured.baked_pages(blob)
+    items = textured.baked_items(args.baked)
+    if not items or not pages:
+        print("the baked blob has no models or no pages")
+        return 1
+
+    pitch = math.radians(args.elev)
+    duration = max(40, int(1000 / max(args.frames / 1.5, 1)))
+
+    # one grid GIF, every model turning together
+    grid = []
+    for i in range(args.frames):
+        yaw = 2.0 * math.pi * i / args.frames
+        pix, w, h = frame(items, pages, yaw, pitch, args.cols, args.cell)
+        grid.append(_image(pix, w, h))
+    g = save_gif(os.path.join(args.out, "spin_baked.gif"), grid, duration)
+    print("grid: %s (%dx%d, %d frames, %d shapes)"
+          % (g, grid[0].size[0], grid[0].size[1], len(grid), len(items)))
+
+    # and one per model
+    d = os.path.join(args.out, "spin")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    for n, item in enumerate(items):
+        label = "%d_%s" % (n, str(item[0]).replace("/", "_").replace(" ", ""))
+        fr = []
+        for i in range(args.frames):
+            yaw = 2.0 * math.pi * i / args.frames
+            pix, w, h = frame([item], pages, yaw, pitch, 1, args.cell, pad=14)
+            fr.append(_image(pix, w, h))
+        save_gif(os.path.join(d, label + ".gif"), fr, duration)
+    print("per model: %d GIFs in %s" % (len(items), d))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
