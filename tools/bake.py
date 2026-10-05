@@ -195,20 +195,55 @@ def build_file(items):
 
 
 def verify(blob):
-    """Re-read the blob the way the engine's D2 reader would (scalemodels')."""
+    """Re-read the blob the way the engine's D2 reader would (scalemodels'), and
+    check the normal half of it: every GT index must resolve inside the model's
+    point_normals table, and the table must face the same way as the geometry.
+
+    Returns (problem_or_None, stats).
+    """
+    import math
+    import lev1
     import scalemodels as sm
+
     got = sm.d2_car_lump(blob)
     if not got:
-        return "no car-models segment found"
-    body, size = got
+        return "no car-models segment found", {}
+    body, _size = got
     n = 0
+    ngt = 0
+    same = 0
     for m in range(MAX_CAR_MODELS):
         st = sm.d2_model_stats(blob, body, m)
-        if st:
-            n += 1
-            if st["npol"] == 0 or st["nv"] == 0:
-                return "model %d decoded but is empty" % m
-    return None if n else "no models decoded"
+        if not st:
+            continue
+        n += 1
+        if st["npol"] == 0 or st["nv"] == 0:
+            return "model %d decoded but is empty" % m, {}
+
+        model = lev1.decode_model(blob, body + 164 +
+                                  struct.unpack_from("<i", blob, body + 4 + m * 12)[0])
+        if model.errors:
+            return "model %d decoded with %d poly errors" % (m, len(model.errors)), {}
+        if not model.normals:
+            return "model %d ships no point_normals table" % m, {}
+        table = model.normals
+        for p in model.polys:
+            if not p.n:
+                continue
+            ngt += 1
+            if any(i >= len(table) for i in p.n):
+                return "model %d: a GT normal index is outside the table" % m, {}
+            ns = model.poly_normals(p)
+            tx = sum(x[0] for x in ns) / len(ns)
+            ty = sum(x[1] for x in ns) / len(ns)
+            tz = sum(x[2] for x in ns) / len(ns)
+            tl = math.sqrt(tx * tx + ty * ty + tz * tz) or 1.0
+            g = model._geo_normal(p)
+            if (tx * g[0] + ty * g[1] + tz * g[2]) / tl > 0:
+                same += 1
+    if not n:
+        return "no models decoded", {}
+    return None, {"models": n, "gt": ngt, "hemisphere": same}
 
 
 def main(argv=None):
@@ -251,7 +286,10 @@ def main(argv=None):
         g = it["geom"]
         print("   model %2d <- pool %2d (%s): %d verts, %d tris"
               % (n, it["pool_index"], g["sources"][0][0], g["verts"], g["tris"]))
-    problem = verify(blob)
+    problem, stats = verify(blob)
+    if stats:
+        print("   normals: %d GT polys, table faces the geometry in %.1f%%"
+              % (stats["gt"], 100.0 * stats["hemisphere"] / max(stats["gt"], 1)))
     print("   self-check: %s" % (problem if problem else "the blob re-reads cleanly"))
     return 1 if problem else 0
 
