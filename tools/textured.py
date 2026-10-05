@@ -73,13 +73,15 @@ def _line(pix, w, h, x0, y0, x1, y1, rgb):
             y0 += sy
 
 
-def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None):
+def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None, shade=1.0):
     """Affine-map a triangle's uvs onto a page.
 
     `tex` is the page's RGB bytes when `pal` is None (a tool TGA, already
     CLUT-applied), or a 256x256 INDEX image when `pal` is given - which is the
     baked path, because there the page is 4bpp and the palette is one of the
     entry's own CLUT rows, chosen per poly by its texture_id.
+
+    `shade` scales the sampled colour, so the lit render can be directional.
     """
     x0 = max(0, int(min(v[0] for v in p)))
     x1 = min(w - 1, int(max(v[0] for v in p)) + 1)
@@ -109,15 +111,22 @@ def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None):
             if pal is not None:
                 if o >= len(tex):
                     continue
-                pix[d], pix[d + 1], pix[d + 2] = pal[tex[o]]
+                c = pal[tex[o]]
+                pix[d] = min(255, int(c[0] * shade))
+                pix[d + 1] = min(255, int(c[1] * shade))
+                pix[d + 2] = min(255, int(c[2] * shade))
             else:
                 o3 = o * 3
-                pix[d] = tex[o3]
-                pix[d + 1] = tex[o3 + 1]
-                pix[d + 2] = tex[o3 + 2]
+                pix[d] = min(255, int(tex[o3] * shade))
+                pix[d + 1] = min(255, int(tex[o3 + 1] * shade))
+                pix[d + 2] = min(255, int(tex[o3 + 2] * shade))
 
 
-def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None):
+def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None,
+           wireframe=False, lit=True):
+    """`wireframe` is off by default: the thin outline was there to make a page
+    miss visible while the page path was being built, and on a textured render it
+    just draws a grid over the car. `lit` shades each face from its normal."""
     rows = (len(items) + cols - 1) // cols
     w, h = cols * cell, rows * cell
     pix = bytearray(w * h * 3)
@@ -142,8 +151,26 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None):
             entry = faces[fi]
             ind, uv, setid = entry[0], entry[1], entry[2]
             texid = entry[3] if len(entry) > 3 else -1
+            nrm = entry[4] if len(entry) > 4 else None
             if len(ind) != 3 or setid < 0:
                 continue                       # only textured triangles here
+
+            if lit:
+                if nrm is not None:
+                    n = nrm
+                else:
+                    a, b, c = verts[ind[0]], verts[ind[1]], verts[ind[2]]
+                    u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+                    v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+                    n = (v[1] * u[2] - v[2] * u[1], v[2] * u[0] - v[0] * u[2],
+                         v[0] * u[1] - v[1] * u[0])
+                L = preview.LIGHT
+                ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) or 1.0
+                d = max(0.0, (n[0] * L[0] + n[1] * L[1] + n[2] * L[2]) / ln)
+                shade = 0.45 + 0.75 * d
+            else:
+                shade = 1.0
+
             page = pages.get((level, setid))
             if page is None:
                 if baked is not None:
@@ -160,19 +187,19 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None):
                 idx, crows = page
                 pal = crows[texid] if 0 <= texid < len(crows) else crows[0]
                 _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
-                          uv, idx, 256, 256, pal=pal)
+                          uv, idx, 256, 256, pal=pal, shade=shade)
             else:
                 tw, th, teximg = page
                 _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
-                          uv, teximg, tw, th)
-        # a thin outline so a miss is visible rather than a hole
-        for ind, _uv, _s in ((f[0], f[1], f[2]) for f in faces):
-            pts = [scr[i] for i in ind]
-            for a in range(len(pts) - 1):
-                _line(pix, w, h, int(pts[a][0]), int(pts[a][1]),
-                      int(pts[a + 1][0]), int(pts[a + 1][1]), (32, 32, 32))
-            _line(pix, w, h, int(pts[-1][0]), int(pts[-1][1]),
-                  int(pts[0][0]), int(pts[0][1]), (32, 32, 32))
+                          uv, teximg, tw, th, shade=shade)
+        if wireframe:
+            for ind in (f[0] for f in faces):
+                pts = [scr[i] for i in ind]
+                for a in range(len(pts) - 1):
+                    _line(pix, w, h, int(pts[a][0]), int(pts[a][1]),
+                          int(pts[a + 1][0]), int(pts[a + 1][1]), (32, 32, 32))
+                _line(pix, w, h, int(pts[-1][0]), int(pts[-1][1]),
+                      int(pts[0][0]), int(pts[0][1]), (32, 32, 32))
 
     preview._png(path, w, h, pix)
     print("  %s  (%dx%d, %d shapes, %d polys with no page)"
@@ -262,8 +289,12 @@ def baked_items(lev_path):
         for p in model.polys:
             if len(p.v) != 3 or p.kind not in ("FT3", "GT3"):
                 continue
+            ns = model.poly_normals(p)
+            sx = sum(q[0] for q in ns) / len(ns)
+            sy = sum(q[1] for q in ns) / len(ns)
+            sz = sum(q[2] for q in ns) / len(ns)
             faces.append((tuple(p.v), tuple(tuple(q) for q in p.uv),
-                          p.texture_set, p.texture_id))
+                          p.texture_set, p.texture_id, (sx, sy, sz)))
         items.append(("model %d" % m, "baked", list(model.vertices), faces))
     return items
 
@@ -282,6 +313,9 @@ def main(argv=None):
     ap.add_argument("--first", type=int, default=0, help="limit to the first N shapes")
     ap.add_argument("--cell", type=int, default=170)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--wireframe", action="store_true",
+                    help="draw the face outlines (off by default)")
+    ap.add_argument("--unlit", action="store_true", help="skip the directional shading")
     args = ap.parse_args(argv)
 
     if args.baked:
@@ -292,7 +326,8 @@ def main(argv=None):
             print("the baked blob has no models")
             return 1
         out = args.out or os.path.join(here, "out", "textured_baked.png")
-        render(items, "", out, cols=5, cell=args.cell, baked=baked)
+        render(items, "", out, cols=5, cell=args.cell, baked=baked,
+               wireframe=args.wireframe, lit=not args.unlit)
         printed = sum(1 for _v in baked)
         print("  (pages read from the blob itself: %d sets)" % printed)
         return 0
