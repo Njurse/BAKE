@@ -349,6 +349,47 @@ def compare_pages(blob, path, tga_dir):
         print("  pages the tool did not export: %s" % sorted(set(missing)))
 
 
+def write_pages(blob, path, out_root):
+    """Emit a level's pages as PNGs plus a JSON index, so nothing downstream
+    needs DriverLevelTool to have run.
+
+    out_root/<LEVEL>/PAGE_<set>.png    the page through CLUT row 0
+    out_root/<LEVEL>.json              per page: set, offset, size, ncluts,
+                                       every CLUT row (hex) and the png path
+    """
+    import json
+    from PIL import Image
+
+    name = os.path.basename(path).rsplit(".", 1)[0]
+    ofs, entries, ti = level_pages(blob)
+    if ti is None:
+        return None
+    d = os.path.join(out_root, name)
+    os.makedirs(d, exist_ok=True)
+    info = {"level": name, "tpage_offset": ofs, "tpage_amount": ti["tpage_amount"],
+            "nperms": ti["nperms"], "nspecpages": ti["nspecpages"], "pages": []}
+    for s, o, z in entries:
+        rows, page = read_page(blob, o, z)
+        idx = []
+        for y in range(256):
+            for xb in page[y * 128:(y + 1) * 128]:
+                idx.append(xb & 0xF)
+                idx.append(xb >> 4)
+        pal = clut_rgb(rows[0]) if rows else [(0, 0, 0)] * 16
+        im = Image.new("RGB", (256, 256))
+        im.putdata([pal[v] for v in idx])
+        png = "PAGE_%d.png" % s
+        im.save(os.path.join(d, png))
+        info["pages"].append({
+            "set": s, "offset": o, "size": z, "ncluts": len(rows),
+            "png": "%s/%s" % (name, png),
+            "cluts": [r.hex() for r in rows],
+        })
+    with open(os.path.join(out_root, name + ".json"), "w") as f:
+        json.dump(info, f, indent=1)
+    return info
+
+
 def _selftest():
     import random
     rng = random.Random(1234)
@@ -408,9 +449,17 @@ def main(argv=None):
                     help="print the level's LUMP_PALLET records")
     ap.add_argument("--compare", metavar="TGA_DIR",
                     help="cross-check pages against DriverLevelTool's TGA exports")
+    ap.add_argument("--write", metavar="OUT_DIR",
+                    help="emit PNGs + a JSON index for the level's pages")
     args = ap.parse_args(argv)
     if args.selftest:
         return _selftest()
+    if args.lev and args.write:
+        info = write_pages(open(args.lev, "rb").read(), args.lev, args.write)
+        if info:
+            print("%s: wrote %d pages to %s" % (info["level"], len(info["pages"]),
+                                                args.write))
+        return 0
     if args.lev and args.compare:
         compare_pages(open(args.lev, "rb").read(), args.lev, args.compare)
         return 0
