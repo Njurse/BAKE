@@ -27,7 +27,11 @@ import scalemodels   # noqa: E402
 
 YAW = math.radians(34.0)
 PITCH = math.radians(18.0)
-LIGHT = (0.36, 0.86, -0.36)
+# The game's y axis is DOWN-positive (REDRIVER2 convention: smaller y is higher),
+# so the light that comes from above has a NEGATIVE y here, and the projection
+# must not negate y. Getting either backwards renders the cars upside down and
+# lit from below.
+LIGHT = (0.36, -0.86, -0.36)
 
 
 def _png(path, w, h, pix):
@@ -51,9 +55,11 @@ def _png(path, w, h, pix):
 
 def _project(v):
     x, y, z = v
+    # y is down-positive in the data, so screen y follows +y (no leading minus -
+    # with one, the cars render upside down)
     cx = x * math.cos(YAW) + z * math.sin(YAW)
     cz = -x * math.sin(YAW) + z * math.cos(YAW)
-    return cx, -(y * math.cos(PITCH) - cz * math.sin(PITCH)), cz
+    return cx, (y * math.cos(PITCH) - cz * math.sin(PITCH)), cz
 
 
 def _fill(pix, w, h, pts, rgb):
