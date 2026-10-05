@@ -144,6 +144,80 @@ def car_models_lump(blob):
                      LUMP_CAR_MODELS)
 
 
+def model_names(blob):
+    """The level's model names (LUMP_MODELNAMES), in slot order."""
+    got = model_names_lump(blob)
+    if not got:
+        return []
+    off, size = got
+    return [s.decode("ascii", "replace") for s in blob[off:off + size].split(b"\x00") if s]
+
+
+def models_lump(blob):
+    """(body offset, size) of LUMP_MODELS (the level's model table) in DATA2."""
+    hdr = read_header(blob)
+    return find_lump(blob, hdr["inmem_offset"], LUMP_INMEMORY_DATA, LUMP_MODELS)
+
+
+def level_model_slots(blob):
+    """[(index, offset, block_size)] for every POPULATED slot of LUMP_MODELS.
+
+    Layout, measured against ProcessMDSLump (models.c:105):
+
+        [int32 modelAmts]
+        per slot: [int32 size][MODEL(36) + vertices + normals + point_normals + polys]
+
+    `size` is the MODEL block's byte size; 0 is an absent slot. The same MODEL
+    shape the car-models lump holds, so only the container walk is new. On
+    FRISCO this consumes 164980 of 164980 bytes with 274 of 534 slots populated.
+    """
+    got = models_lump(blob)
+    if not got:
+        return []
+    body, size = got
+    n = struct.unpack_from("<i", blob, body)[0]
+    out = []
+    o = body + 4
+    for i in range(n):
+        if o + 4 > body + size:
+            break
+        blk = struct.unpack_from("<i", blob, o)[0]
+        o += 4
+        if blk > 0:
+            out.append((i, o, blk))
+            o += blk
+    return out
+
+
+def level_models(blob):
+    """[(index, name_or_None, Model)] for the level's populated model slots.
+
+    An INSTANCE model's arrays are addressed relative to its PARENT, not to
+    itself - ProcessMDSLump relocates them after the table is read (models.c:158)
+    - so the parent's offset is passed down as the decode base. The wheels are
+    not instances (instance_number == -1), but the table does contain them.
+    """
+    slots = level_model_slots(blob)
+    by_index = {i: off for i, off, _sz in slots}
+    names = model_names(blob)
+    out = []
+    for i, off, _sz in slots:
+        inst = struct.unpack_from("<h", blob, off + 4)[0]
+        base = by_index.get(inst, off) if inst != -1 else off
+        model = decode_model(blob, off, base=base)
+        out.append((i, names[i] if i < len(names) else None, model))
+    return out
+
+
+def level_model(blob, name):
+    """The Model a level names, or None. This is how the engine finds the
+    wheels: FindModelPtrWithName("CLEANWHEEL") / ("FASTWHEEL"), main.c:192-193."""
+    for _i, n, model in level_models(blob):
+        if n == name:
+            return model
+    return None
+
+
 def model_names_lump(blob):
     hdr = read_header(blob)
     for container, etype in ((hdr["loadtime_offset"], LUMP_LOADTIME_DATA),
@@ -275,8 +349,20 @@ class Model(object):
 
 def _uvs(rec, kind, n):
     """UV pairs. A GT record carries per-vertex normals before the UVs, so its
-    UVs start at byte 12; an FT record's start at byte 8. UV_INFO is two
-    UNSIGNED bytes (u, v) in 0..255 into the 256x256 page."""
+    UVs start at byte 12; an FT record's at byte 8. UV_INFO is two UNSIGNED bytes
+    (u, v) in 0..255 into the 256x256 page.
+
+    Clamped to the record: the car-model table below is the CAR model's, and the
+    level's geometry models carry poly types it does not describe, so a short
+    record must yield fewer uvs rather than raise.
+    """
+    off = 12 if kind in NORMALLED else 8
+    out = []
+    for i in range(n):
+        if off + i * 2 + 2 > len(rec):
+            break
+        out.append(struct.unpack_from("<BB", rec, off + i * 2))
+    return tuple(out)
     off = 12 if kind in NORMALLED else 8
     return tuple(struct.unpack_from("<BB", rec, off + i * 2) for i in range(n))
 
@@ -302,10 +388,15 @@ def decode_polys(blob, base, n_polys, num_vertices):
             continue
         kind, ioff, nind, coff = layout
         rec = blob[p:p + size]
-        v = tuple(rec[ioff:ioff + nind])
-        n = tuple(rec[8:8 + nind]) if kind in NORMALLED else ()
-        uv = _uvs(rec, kind, nind) if kind in TEXTURED else ()
-        color = (rec[coff], rec[coff + 1], rec[coff + 2])
+        try:
+            v = tuple(rec[ioff:ioff + nind])
+            n = tuple(rec[8:8 + nind]) if kind in NORMALLED else ()
+            uv = _uvs(rec, kind, nind) if kind in TEXTURED else ()
+            color = (blob[p + coff], blob[p + coff + 1], blob[p + coff + 2])
+        except IndexError:
+            errors.append((i, "poly type %d record too short (%d bytes)" % (pt, size)))
+            p += size
+            continue
         setid, texid = (rec[1], rec[2]) if kind in TEXTURED else (0, 0)
 
         bad = [x for x in v if x >= num_vertices]
@@ -318,31 +409,44 @@ def decode_polys(blob, base, n_polys, num_vertices):
     return polys, errors
 
 
-def decode_model(blob, model_off, polys_from=None):
+def decode_model(blob, model_off, polys_from=None, base=None):
     """`model_off` points at the MODEL struct (not the 4-byte size that precedes
     it). Returns a Model.
 
-    `polys_from` names a second MODEL whose poly stream should be used instead of
-    this one's. MEASURED: a D1 *damaged* model is a MODEL header + its own (dented)
-    vertex array only - its block is exactly 36 + num_vertices*8 bytes and its
-    poly_block lands outside it. Its poly_block/normals fields are stale; the
-    polys are the clean model's (identical num_polys, and the clean stream walks
-    with 0 errors for every model). So damaged := clean polys + damaged vertices.
+    `base` owns the ARRAYS. An instance model in the level's model table has none
+    of its own: ProcessMDSLump relocates vertices / normals / point_normals onto
+    its PARENT (models.c:158) - and ONLY those three, so poly_block stays the
+    instance's own. That is why an instance's block is just 36 + its polys.
+
+    `polys_from` owns the POLY STREAM. MEASURED: a D1 *damaged* model is a MODEL
+    header plus its own (dented) vertices only - its block is exactly
+    36 + num_vertices*8 bytes and its poly_block lands outside it. Its polys are
+    the clean model's (same num_polys, and the clean stream walks with 0 errors
+    for every model). So damaged := clean polys + damaged vertices.
+
+    The counts follow their owner: num_vertices / num_point_normals come from the
+    array owner, num_polys and poly_block from the poly stream's model.
     """
+    arr_base = model_off if base is None else base
+    poly_base = model_off if polys_from is None else polys_from
+    norm_base = arr_base if polys_from is None else polys_from
+
     (shape_flags, flags2, _inst, tri_verts, _zb, bounding_sphere,
-     num_point_normals, num_vertices, num_polys) = struct.unpack_from(MODEL_FMT, blob, model_off)
-    (vofs, _pblk, _nofs, _pno, _c) = struct.unpack_from(MODEL_OFFSETS_FMT,
-                                                        blob, model_off + 16)
+     _hdr_npn, _hdr_nv, _hdr_npol) = struct.unpack_from(MODEL_FMT, blob, model_off)
+
+    # the arrays and their counts, from whoever owns them
+    (npn, nv, _anpol) = struct.unpack_from(MODEL_FMT, blob, arr_base)[6:9]
+    (_av, _apb, nofs, pno, _ac) = \
+        struct.unpack_from(MODEL_OFFSETS_FMT, blob, arr_base + 16)
     vertices = []
-    for i in range(num_vertices):
-        x, y, z, _pad = struct.unpack_from("<hhhh", blob, model_off + vofs + i * 8)
+    for i in range(nv):
+        x, y, z, _pad = struct.unpack_from("<hhhh", blob, arr_base + _av + i * 8)
         vertices.append((x, y, z))
 
-    src = model_off if polys_from is None else polys_from
-    (_sf, _f2, _in, _tv, _zb, _bs, src_npn, src_nv, src_npol) = \
-        struct.unpack_from(MODEL_FMT, blob, src)
-    (_vo, src_pblk, _no, src_pno, _co) = \
-        struct.unpack_from(MODEL_OFFSETS_FMT, blob, src + 16)
+    # the poly stream and its count, from its own model
+    npol = struct.unpack_from(MODEL_FMT, blob, poly_base)[8]
+    (_pv, pblk, _pn, _pp, _pc) = \
+        struct.unpack_from(MODEL_OFFSETS_FMT, blob, poly_base + 16)
 
     # Two normal tables, measured, and they are not interchangeable:
     #
@@ -357,16 +461,16 @@ def decode_model(blob, model_off, polys_from=None):
     # A model may ship no point_normals at all (npn == 0, e.g. FRISCO models
     # 0/1/2), in which case the GT indices have nothing to resolve against.
     face_normals = []
-    for i in range(max(0, src_npol)):
-        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, src + _nofs + i * 8)
+    for i in range(max(0, npol)):
+        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, norm_base + nofs + i * 8)
         face_normals.append((nx, ny, nz))
 
     normals = []
-    for i in range(max(0, src_npn)):
-        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, src + src_pno + i * 8)
+    for i in range(max(0, npn)):
+        nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, norm_base + pno + i * 8)
         normals.append((nx, ny, nz))
 
-    polys, errors = decode_polys(blob, src + src_pblk, src_npol, src_nv)
+    polys, errors = decode_polys(blob, poly_base + pblk, npol, nv)
     return Model(shape_flags, flags2, bounding_sphere, tri_verts,
                  vertices, polys, normals or None, face_normals or None, errors)
 
