@@ -328,23 +328,69 @@ Every scaled D1 model lands within a few percent of an existing D2 car, which is
 the practical check that 2048/3000 is right. (CREDITS model 0, 52x49x48 →
 35x33x33, is the non-car outlier; the pool excludes it.)
 
-**Cosmetics (`CAR_COSMETICS`) — decided.** Driver 1 has no equivalent table, so
-the pool **synthesizes** one per item:
+**Cosmetics (`CAR_COSMETICS`) — built; `tools/cosmetics1.py`.** Driver 1 has no
+equivalent table at all, so every field is **derived**, one 236-byte record per
+car.
 
-- `colBox` and `cog` come from the model's **scaled bbox**, so the collision box
-  and the centre of gravity match the shape;
-- the rest — `wheelSize` / `wheelDisp`, the `cPoints` shadow corners, the light
-  anchors (`headLight`/`brakeLight`/`revLight`/…), `susCoeff` / `powerRatio` /
-  `mass` / twist — is cloned from a **donor Driver 2 car** picked by nearest
-  scaled length.
+**The record.** `dr2types.h:211` fixes the layout, and it is exactly 236 bytes:
 
-It is emitted as an **`.LCF`-shaped blob** (`LEVELS\<pool>.LCF`), which is
-exactly what the import path already reads: `LoadCarImport` pulls a city's
-`.LCF` beside its car data (`models.c:429`), `GetCarImportCosmetics(slot)` hands
-it to `ProcessCosmeticsLump` (`cosmetic.c:71`) and `JerHotLoadCarCosmetics`.
-So the pool's cosmetics ride the existing cross-city machinery with **no engine
-change**. An individual item can later be hand-tuned through the per-model
-override `LEVELS\<CarDataFolder>\CARMODEL_<n>.COS` (`LoadCustomCarCosmetics`,
+| offset | bytes | field |
+|---|---|---|
+| 0..71 | 72 | `headLight frontInd backInd brakeLight revLight policeLight exhaust smoke fire` (9 × `SVECTOR`) |
+| 72..103 | 32 | `wheelDisp[4]` |
+| 104..115 | 12 | `extraInfo powerRatio cbYoffset susCoeff traction wheelSize` |
+| 116..211 | 96 | `cPoints[12]` |
+| 212..235 | 24 | `colBox cog twistRateX twistRateY twistRateZ mass` |
+
+**The file.** `LoadCosmetics` (`cosmetic.c:148`) reads exactly **3120** bytes, and
+`3120 = 52 + 13 × 236` to the byte — a 13-entry int32 offset table at 52, then the
+records. Driver 2's own `.LCF`s are **4096** bytes on disk, zero-filled sector
+padding that nothing reads, and this writer's output is *structurally identical*
+to one: same 4096 size, offsets `52..2884`, zero tail (checked by diffing the
+shape, not by assuming it). A D1 city ships fewer than 13 car models — FRISCO has
+7 — so unused slots repeat **that city's own** first record rather than borrowing
+a record from a city that needed a bus.
+
+**Measured vs inherited.** Three groups are measured from the car itself: `colBox`
+is its scaled bbox, `cog` is that box's centre, and `cPoints[12]` is its own
+footprint — three heights (ground, belt, roof) by four corners, in Driver 2's own
+order. `wheelDisp[4]` and `wheelSize` come from the wheel placement (§7). The nine
+light/exhaust/smoke/fire anchors are the donor's, **re-proportioned per axis**
+rather than cloned, which keeps each where Driver 2 authored it — headlight at the
+front, exhaust at the rear — but at this car's own front/rear/height. The handling
+scalars (`powerRatio` / `mass` / `traction` / `susCoeff` / twist) come from the
+nearest-scaled-length donor.
+
+**The wheel arithmetic is the one part that can be proved.** `cars.c:1273` places a
+wheel as
+
+```
+x = ±17 - wheelDisp.vx      z = -wheelDisp.vz
+y = -wheelSize - wheelDisp.vy - susCompression + 14
+```
+
+so `wheelDisp` is that inverted. Feeding Driver 2's own records through the forward
+form and back returns Driver 2's own numbers for **all 208** of its wheel entries,
+which settles the convention and the inversion together. Note what `wheelSize` is
+**not**: it does not scale the wheel. `DrawWheelObject` draws the model at its
+native size (`cars.c:1264`); the radius only sets the axle height.
+
+**`FixCarCos` corrects the body's off-centre placement on load** (`handling.c:180`):
+`delta.vz = -(wheelDisp[0].vz + wheelDisp[1].vz - 14) / 2`. With a placement
+symmetric about the car's bbox z centre this reduces to `z_centre + 7`, so it is a
+direct readout of how far off centre the body sits. Ours run −11..37 against
+Driver 2's ordinary cars' −34..+6, so the engine has very little to correct.
+`tools/cosmetics1.py --check` prints every field against Driver 2's own ranges side
+by side.
+
+**Routing.** An `.LCF` is the natural home because it is exactly what the import
+path already reads: `LoadCarImport` pulls a city's `.LCF` beside its car data
+(`models.c:429`), `GetCarImportCosmetics(slot)` hands it to `ProcessCosmeticsLump`
+(`cosmetic.c:71`) and `JerHotLoadCarCosmetics`. So the cosmetics ride the existing
+cross-city machinery with **no engine change**. One file per D1 city is written —
+`MIAMI.LCF`, `FRISCO.LCF`, `LA.LCF`, `NEWYORK.LCF` — and an individual car can
+later be hand-tuned through the per-model override
+`LEVELS\<CarDataFolder>\CARMODEL_<n>.COS` (`LoadCustomCarCosmetics`,
 `cosmetic.c:33`).
 
 ---
