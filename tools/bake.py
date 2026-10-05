@@ -320,6 +320,25 @@ def build_pallet(page_list, levels_dir):
     return bytes(body)
 
 
+def _compact_page_entry(entry, texmap):
+    """Reorder a page entry's CLUT rows so texture id `old` sits at row `new`.
+
+    texmap is {old_id: new_id}. Rows not in the map are dropped; the decomp stream
+    (the page image) that follows the rows is carried through unchanged - only the
+    CLUT row ORDER changes. That is safe because the id selects the CLUT row only
+    (cars.c:1075 texture_cluts[set][id]); the tile image comes from the poly's UVs.
+    """
+    npal = struct.unpack_from("<i", entry, 0)[0]
+    rows = [entry[4 + i * 32:4 + i * 32 + 32] for i in range(npal)]
+    page = entry[4 + npal * 32:]
+    by_new = sorted((new, old) for old, new in texmap.items())
+    out = struct.pack("<i", len(by_new))
+    for _new, old in by_new:
+        out += rows[old] if old < len(rows) else b"\x00" * 32
+    out += page
+    return out
+
+
 def build_page_plan(items, levels_dir):
     """Assign every distinct (source level, texture set) a fresh set number.
 
@@ -333,9 +352,34 @@ def build_page_plan(items, levels_dir):
     lists separately (gCarImportPerms vs gCarImportSpecs) and layers their page
     data one after the other, so the plan keeps them apart too.
 
-    Returns (remap, perms, specs).
+    Also compacts each set's texture ids to 0..N-1 when a page carries an id the
+    engine cannot hold: Driver 1 pages have up to 33 CLUT rows (texture ids
+    0..32), but texture_cluts and civ_clut are [..][32], so id 32 reads out of
+    bounds. The ids are remapped and the CLUT rows reordered to match (the tile
+    image is untouched - it comes from the UVs). The blanket rule, not a one-off.
+
+    Returns (remap, tex_remap, perms, specs).
     """
     import pages1
+
+    # First pass: every texture id each (level, set) actually uses, across all the
+    # city's models, so the compaction is the union of what the cars reference.
+    used_ids = {}
+    for it in items:
+        g = it["geom"]
+        if g is None:               # a slot the city has no car in
+            continue
+        level = g["sources"][0][0]
+        for p in g["polys"]:
+            if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
+                continue
+            used_ids.setdefault((level, p["set"]), set()).add(p["id"])
+
+    tex_remap = {}
+    for key, ids in used_ids.items():
+        if max(ids) < 32:
+            continue                    # already fits in the engine's 32 rows
+        tex_remap[key] = {old: new for new, old in enumerate(sorted(ids))}
 
     remap = {}
     perms = []
@@ -375,8 +419,12 @@ def build_page_plan(items, levels_dir):
             else:
                 continue
             remap[key] = len(perms) + len(specs)
-            target.append((remap[key], level, p["set"], blob[o:o + z], z))
-    return remap, perms, specs
+            entry = blob[o:o + z]
+            tm = tex_remap.get(key)
+            if tm:
+                entry = _compact_page_entry(entry, tm)
+            target.append((remap[key], level, p["set"], entry, len(entry)))
+    return remap, tex_remap, perms, specs
 
 
 def build_file(items, perms, specs, levels_dir):
@@ -550,7 +598,7 @@ def bake_one_city(args, levels_dir):
                              "data for - the engine could never address it"
                              % (args.city, gap))
 
-    remap, perms, specs = build_page_plan(items, levels_dir)
+    remap, tex_remap, perms, specs = build_page_plan(items, levels_dir)
     for it in items:
         if it["geom"] is None:
             continue
@@ -558,6 +606,8 @@ def bake_one_city(args, levels_dir):
             key = (args.city, p["set"])
             if key in remap:
                 p["set"] = remap[key]
+            if key in tex_remap:
+                p["id"] = tex_remap[key].get(p["id"], p["id"])
 
     out = build_file(items, perms, specs, levels_dir)
 
@@ -628,13 +678,15 @@ def main(argv=None):
     # One set number means a different page in another level, so a pool that
     # flattens seven levels has to renumber - otherwise two cities' cars would
     # share a page. Do it before anything reads the polys.
-    remap, perms, specs = build_page_plan(items, levels_dir)
+    remap, tex_remap, perms, specs = build_page_plan(items, levels_dir)
     for it in items:
         level = it["geom"]["sources"][0][0]
         for p in it["geom"]["polys"]:
             key = (level, p["set"])
             if key in remap:
                 p["set"] = remap[key]
+            if key in tex_remap:
+                p["id"] = tex_remap[key].get(p["id"], p["id"])
 
     blob = build_file(items, perms, specs, levels_dir)
 
