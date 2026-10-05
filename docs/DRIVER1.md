@@ -237,6 +237,25 @@ above behind it, and it travels in the pool record (`scale`) so an item can be
 re-tuned without touching code. The damaged/low variants land in the same band
 and use the same factor.
 
+**Cosmetics (`CAR_COSMETICS`) — decided.** Driver 1 has no equivalent table, so
+the pool **synthesizes** one per item:
+
+- `colBox` and `cog` come from the model's **scaled bbox**, so the collision box
+  and the centre of gravity match the shape;
+- the rest — `wheelSize` / `wheelDisp`, the `cPoints` shadow corners, the light
+  anchors (`headLight`/`brakeLight`/`revLight`/…), `susCoeff` / `powerRatio` /
+  `mass` / twist — is cloned from a **donor Driver 2 car** picked by nearest
+  scaled length.
+
+It is emitted as an **`.LCF`-shaped blob** (`LEVELS\<pool>.LCF`), which is
+exactly what the import path already reads: `LoadCarImport` pulls a city's
+`.LCF` beside its car data (`models.c:429`), `GetCarImportCosmetics(slot)` hands
+it to `ProcessCosmeticsLump` (`cosmetic.c:71`) and `JerHotLoadCarCosmetics`.
+So the pool's cosmetics ride the existing cross-city machinery with **no engine
+change**. An individual item can later be hand-tuned through the per-model
+override `LEVELS\<CarDataFolder>\CARMODEL_<n>.COS` (`LoadCustomCarCosmetics`,
+`cosmetic.c:33`).
+
 ---
 
 ## 9. Roadmap
