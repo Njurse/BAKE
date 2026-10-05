@@ -183,7 +183,7 @@ def build_car_models_lump(items):
     return bytes(body)
 
 
-def build_textureinfo(page_list):
+def build_textureinfo(perms, specs):
     """LUMP_TEXTUREINFO for the pool, in the layout ProcessTextureInfo and
     ParseImportedTextureInfoForCity both walk:
 
@@ -194,16 +194,21 @@ def build_textureinfo(page_list):
         [int nspecpages][XYPAIR speclist[nspecpages]]
 
     tpage_amount is 0: the pool's pages need no TEXINF detail lists, because the
-    bake has no name table. The generated sets are the permlist.
+    bake has no name table. The generated sets are the two lists.
     """
     body = bytearray()
     body += struct.pack("<ii", 0, 0)                 # tpage_amount, texamount
     body += b"\x00" * 8 * (0 + 1)                    # tpage_position[tpage_amount+1]
-    body += struct.pack("<i", len(page_list))        # nperms
-    for new_set, _lvl, _old, _bytes, size in page_list:
+    body += struct.pack("<i", len(perms))            # nperms
+    for new_set, _lvl, _old, _bytes, size in perms:
         body += struct.pack("<ii", new_set, size)    # XYPAIR {int x; int y}
-    body += b"\x00" * (16 * 8)                       # the fixed 16-entry region
-    body += struct.pack("<i", 0)                     # nspecpages
+    # The permanent list occupies a FIXED 16-entry region - the engine reaches the
+    # special list via &permlist[16], not &permlist[nperms] (texture.c:1220), so
+    # the slots nperms does not use are padding, not extra bytes.
+    body += b"\x00" * (16 - len(perms)) * 8
+    body += struct.pack("<i", len(specs))            # nspecpages
+    for new_set, _lvl, _old, _bytes, size in specs:
+        body += struct.pack("<ii", new_set, size)
     return bytes(body)
 
 
@@ -243,12 +248,22 @@ def build_page_plan(items, levels_dir):
 
     Set numbers are per-level, so the same number means a different page in
     another level - a pool that flattens seven levels must renumber, or two
-    cities' cars would share a page. Returns (remap, page_list).
+    cities' cars would share a page.
+
+    A set can live in EITHER of a level's two page lists, and the car pages are
+    almost always the SPECIAL ones (FRISCO's car polys paint with sets 61..66 and
+    3/4, its special list; only 67/68 are permanent). The engine resolves the two
+    lists separately (gCarImportPerms vs gCarImportSpecs) and layers their page
+    data one after the other, so the plan keeps them apart too.
+
+    Returns (remap, perms, specs).
     """
     import pages1
 
     remap = {}
-    page_list = []
+    perms = []
+    specs = []
+    listed = {}
     for it in items:
         g = it["geom"]
         level = g["sources"][0][0]
@@ -258,27 +273,41 @@ def build_page_plan(items, levels_dir):
             key = (level, p["set"])
             if key in remap:
                 continue
-            blob = open(os.path.join(levels_dir, level + ".LEV"), "rb").read()
-            ofs, entries, _ti = pages1.level_pages(blob)
-            ent = {s: (o, z) for s, o, z in entries}
-            if p["set"] not in ent:
+            if level not in listed:
+                blob = open(os.path.join(levels_dir, level + ".LEV"), "rb").read()
+                ofs, entries, ti = pages1.level_pages(blob)
+                # The special pages carry no offset of their own: their data runs
+                # on from the end of the permanent pages, sector-aligned, in
+                # speclist order (LoadPermanentTPages loads the two lists in that
+                # sequence). So build their offsets here.
+                off = sum((z + 2047) & ~2047 for _s, _o, z in entries)
+                spec = {}
+                for s, z in (ti["speclist"] if ti else []):
+                    spec[s] = (ofs + off, z)
+                    off += (z + 2047) & ~2047
+                listed[level] = (blob, {s: (o, z) for s, o, z in entries}, spec)
+            blob, perm, spec = listed[level]
+            if p["set"] in perm:
+                o, z = perm[p["set"]]
+                target = perms
+            elif p["set"] in spec:
+                o, z = spec[p["set"]]
+                target = specs
+            else:
                 continue
-            o, z = ent[p["set"]]
-            entry = blob[o:o + z]
-            new_set = len(page_list)
-            remap[key] = new_set
-            page_list.append((new_set, level, p["set"], entry, z))
-    return remap, page_list
+            remap[key] = len(perms) + len(specs)
+            target.append((remap[key], level, p["set"], blob[o:o + z], z))
+    return remap, perms, specs
 
 
-def build_file(items, page_list, levels_dir):
+def build_file(items, perms, specs, levels_dir):
     car = build_car_models_lump(items)
 
     segs = bytearray()
-    tex = build_textureinfo(page_list)
+    tex = build_textureinfo(perms, specs)
     segs += struct.pack("<ii", LUMP_TEXTUREINFO, len(tex)) + tex
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
-    pal = build_pallet(page_list, levels_dir)
+    pal = build_pallet(perms + specs, levels_dir)
     segs += struct.pack("<ii", LUMP_PALLET, len(pal)) + pal
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
 
@@ -299,7 +328,7 @@ def build_file(items, page_list, levels_dir):
     # (data1Off/2048 + data1Size/2048)*2048 (models.c:391), i.e. the sector after
     # DATA1. Each entry is sector-aligned and they run in permlist order, which
     # is exactly how ProcessTextureInfo's callers carve them.
-    for _new_set, _lvl, _old, entry, _size in page_list:
+    for _new_set, _lvl, _old, entry, _size in perms + specs:
         out += entry
         out += b"\x00" * ((2048 - len(entry) % 2048) % 2048)
     return bytes(out)
@@ -390,7 +419,7 @@ def main(argv=None):
     # One set number means a different page in another level, so a pool that
     # flattens seven levels has to renumber - otherwise two cities' cars would
     # share a page. Do it before anything reads the polys.
-    remap, page_list = build_page_plan(items, levels_dir)
+    remap, perms, specs = build_page_plan(items, levels_dir)
     for it in items:
         level = it["geom"]["sources"][0][0]
         for p in it["geom"]["polys"]:
@@ -398,7 +427,7 @@ def main(argv=None):
             if key in remap:
                 p["set"] = remap[key]
 
-    blob = build_file(items, page_list, levels_dir)
+    blob = build_file(items, perms, specs, levels_dir)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
@@ -412,8 +441,9 @@ def main(argv=None):
         print("   model %2d <- pool %2d (%s): %d verts, %d tris, normals %s"
               % (n, it["pool_index"], g["sources"][0][0], g["verts"], g["tris"],
                  g.get("normals_source")))
-    print("   texture sets: %d, from %d source levels"
-          % (len(page_list), len({lvl for _s, lvl, _o, _b, _z in page_list})))
+    print("   texture sets: %d permanent + %d special, from %d source levels"
+          % (len(perms), len(specs),
+             len({lvl for _s, lvl, _o, _b, _z in perms + specs})))
     problem, stats = verify(blob)
     if stats:
         print("   normals: %d GT polys, table faces the geometry in %.1f%%"
