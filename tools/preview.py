@@ -117,7 +117,8 @@ def attach_wheels(items, levels_dir, pool_path):
         # this renderer's items are (label, verts, faces[, normals]), NOT the
         # textured path's (label, key, verts, faces) - so the tuple is rebuilt
         # here rather than through wheelrender.wheeled_item.
-        wv, wtris, _wtex = wheelrender.wheel_copies(model, r["centres"], r["scale"])
+        wv, wtris, _wtex = wheelrender.wheel_copies(
+            model, r.get("render_centres") or r["centres"], r["scale"])
         off = len(item[1])
         faces = list(item[2]) + [tuple(off + i for i in t) for t in wtris]
         if len(item) > 3 and item[3] is not None:

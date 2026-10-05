@@ -88,18 +88,50 @@ def wheel_disp_from(centres, wheel_size):
     return out
 
 
-def donor_index(half_len, donor_halves):
-    """The D2 model whose own half-length is closest to ours."""
-    return min(range(len(donor_halves)),
-               key=lambda m: abs(donor_halves[m] - half_len))
+def donor_bodies(level_path):
+    """{model: (bbox_min, bbox_max)} for a Driver 2 car level.
+
+    A donor record carries the scalars and wheelDisp; the placement also needs the
+    BODY those belong to, because both numbers the placement takes are proportions
+    of it. Decoded rather than taken from colBox, which is a collision box and
+    only close to the body.
+    """
+    blob = open(level_path, "rb").read()
+    body, _size = scalemodels.d2_car_lump(blob)
+    out = {}
+    for m in range(scalemodels.MAX_CAR_MODELS):
+        clean, _d, _l = struct.unpack_from("<3i", blob, body + 4 + m * 12)
+        if clean == -1:
+            continue
+        mo = lev1.decode_model(blob, body + 164 + clean)
+        if mo.vertices:
+            out[m] = wheelgeom.body_bbox(mo.vertices)
+    return out
 
 
-def build_record(verts, scale, centres, radius, donor, donor_half):
+def donor_index(half, donor_halves):
+    """The D2 model whose own 3D size is closest to ours.
+
+    Length alone used to decide this, and length alone cannot tell a van from a
+    saloon of the same length - which is exactly the case that matters, because
+    the van is the one whose axle height is raised. All three axes vote.
+    """
+    def dist(h):
+        return sum(((half[i] / h[i]) - 1.0) ** 2 for i in range(3) if h[i])
+    return min(range(len(donor_halves)), key=lambda m: dist(donor_halves[m]))
+
+
+def halves_from_bbox(bb):
+    """(min, max) -> the three half-extents."""
+    return [(bb[1][i] - bb[0][i]) / 2.0 for i in range(3)]
+
+
+def build_record(verts, scale, centres, radius, donor, donor_bbox):
     """One car's CAR_COSMETICS.
 
     `verts` is the car's own (unscaled) vertices, `scale` the bake scale,
-    `centres`/`radius` come from the wheel placement, and `donor`/`donor_half`
-    are the nearest-length Driver 2 record and its colBox.
+    `centres`/`radius` come from the wheel placement, and `donor`/`donor_bbox`
+    are the matched Driver 2 record and that car's own body box.
     """
     xs = [v[0] for v in verts]
     ys = [v[1] for v in verts]
@@ -107,9 +139,9 @@ def build_record(verts, scale, centres, radius, donor, donor_half):
     half = ((max(xs) - min(xs)) / 2.0 * scale,
             (max(ys) - min(ys)) / 2.0 * scale,
             (max(zs) - min(zs)) / 2.0 * scale)
-    # per-axis proportion, guarding the odd axis a donor may have at zero
-    ratio = tuple((half[i] / donor_half[i]) if donor_half[i] else 1.0
-                  for i in range(3))
+    # per-axis proportion against the donor's OWN BODY, guarded for a flat axis
+    dh = halves_from_bbox(donor_bbox)
+    ratio = tuple((half[i] / dh[i]) if dh[i] else 1.0 for i in range(3))
 
     def scaled(p):
         return tuple(int(round(p[i] * ratio[i])) for i in range(3))
@@ -167,7 +199,8 @@ def load_donors(levels_dir):
     return out
 
 
-def records_for_city(levels_dir, city, donor_recs, wheel_model, cities=None):
+def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
+                     cities=None):
     """A 236-byte record for every car model a D1 city ships.
 
     Mirrors the shape Driver 2 uses: each city's .LCF covers that city's own 13
@@ -175,7 +208,8 @@ def records_for_city(levels_dir, city, donor_recs, wheel_model, cities=None):
     with a record of None for a slot the city leaves empty.
     """
     blob = open(os.path.join(levels_dir, city + ".LEV"), "rb").read()
-    donor_halves = [d["colBox"][2] for d in donor_recs]
+    donors = sorted(donor_bb)          # only the models that have a body
+    donor_halves = [halves_from_bbox(donor_bb[m]) for m in donors]
     out = []
     for m, variants in lev1.car_models(blob):
         model = variants.get("clean")
@@ -184,15 +218,27 @@ def records_for_city(levels_dir, city, donor_recs, wheel_model, cities=None):
         if model is None or not model.vertices:
             out.append((m, None, None, None, None))
             continue
-        centres, radius, track = wheelgeom.placement(
-            model.vertices, wheel_model.vertices, SCALE)
-        zs = [v[2] for v in model.vertices]
-        half_len = (max(zs) - min(zs)) / 2.0 * SCALE
-        di = donor_index(half_len, donor_halves)
-        rec = build_record(model.vertices, SCALE, centres, radius,
-                           donor_recs[di], donor_recs[di]["colBox"])
-        out.append((m, rec, di, radius, track))
+        bmin, bmax = wheelgeom.body_bbox(model.vertices)
+        half = [(bmax[i] - bmin[i]) / 2.0 * SCALE for i in range(3)]
+        di = donors[donor_index(half, donor_halves)]
+        drec = donor_recs[di]
+        # the donor's own four wheel centres, then re-proportioned onto this car
+        dcentres = engine_wheel_positions(drec["wheelDisp"], drec["sA"][5])
+        centres = wheelgeom.placement_from_donor(model.vertices, donor_bb[di],
+                                                 dcentres, SCALE)
+        zs = sorted(c[2] for c in centres)
+        track = (max(c[0] for c in centres) - min(c[0] for c in centres)) / 2.0
+        rec = build_record(model.vertices, SCALE, centres,
+                           _wheel_radius(wheel_model, SCALE), drec, donor_bb[di])
+        out.append((m, rec, di, zs[-1] - zs[0], track))
     return out
+
+
+def _wheel_radius(wheel_model, scale):
+    """The shared D1 wheel's radius at the bake scale - the axle HEIGHT."""
+    wy = [v[1] for v in wheel_model.vertices]
+    wz = [v[2] for v in wheel_model.vertices]
+    return max(max(wy) - min(wy), max(wz) - min(wz)) / 2.0 * scale
 
 
 def build_records(levels_dir, donor_city, cities=None, show=True, donor_dir=None):
@@ -202,13 +248,18 @@ def build_records(levels_dir, donor_city, cities=None, show=True, donor_dir=None
         print("no donor city %s among %s" % (donor_city, sorted(donors)))
         return None
     donor_recs = donors[donor_city]
+    level_path = os.path.join(donor_dir or levels_dir, donor_city + ".LEV")
+    donor_bb = donor_bodies(level_path)
+    if not donor_bb:
+        print("no decodable car bodies in %s" % level_path)
+        return None
     _lvl, wheel_model = wheelgeom.canonical_wheel(levels_dir)
     if wheel_model is None:
         print("no wheel model under %s" % levels_dir)
         return None
     out = {}
     for city in (cities or D1_CITIES):
-        recs = records_for_city(levels_dir, city, donor_recs, wheel_model)
+        recs = records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model)
         out[city] = recs
         if show:
             print("%-8s %d slots, %d with data"
@@ -219,9 +270,8 @@ def build_records(levels_dir, donor_city, cities=None, show=True, donor_dir=None
                     continue
                 r = read_record(rec)
                 print("   slot %2d: donor %2d  colBox %-14s cog %-13s wheelSize %3d"
-                      " track %5.1f  whDisp %s"
-                      % (slot, di, r["colBox"], r["cog"], r["sA"][5], track,
-                         r["wheelDisp"][0]))
+                      " wheelbase %4.0f  track %4.0f"
+                      % (slot, di, r["colBox"], r["cog"], r["sA"][5], radius, track))
     return out
 
 

@@ -360,8 +360,9 @@ def attach_wheels(items, baked, levels_dir, pool_path):
         if not rec:
             out.append(item)
             continue
-        out.append(wheelrender.wheeled_item(item, model, rec["centres"],
-                                            rec["scale"]))
+        out.append(wheelrender.wheeled_item(
+            item, model, rec.get("render_centres") or rec["centres"],
+            rec["scale"]))
     print("  (wheels from %s, set %d)" % (level, wheelrender.WHEEL_SET_BASE))
     return out
 

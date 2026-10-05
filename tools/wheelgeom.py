@@ -55,6 +55,29 @@ DONOR_TRACK_CENTRE = 105    # |x| of the effective wheel centre
 WHEEL_PROUD = 0.35
 
 
+def donor_spread(levels_dir):
+    """Every model of every Driver 2 city -> (city, m, colBox, wheelbase, vy, radius).
+
+    The evidence for the two numbers the placement needs, and the reason neither
+    is a constant: the wheelbase is a FRACTION OF THE BODY (wb / colBox.z), and
+    the axle height is carried by vy, which the vans have raised.
+    """
+    out = []
+    for fn in sorted(os.listdir(levels_dir)):
+        if not fn.upper().endswith(".LCF"):
+            continue
+        blob = open(os.path.join(levels_dir, fn), "rb").read()
+        for m, o in enumerate(struct.unpack_from("<13i", blob, 0)):
+            cb = struct.unpack_from("<3h", blob, o + 212)
+            wd = [struct.unpack_from("<3h", blob, o + OFF_WHEELDISP + i * 8)
+                  for i in range(4)]
+            ws = struct.unpack_from("<h", blob, o + OFF_WHEELSIZE)[0]
+            out.append((fn[:-4], m, cb,
+                        max(w[2] for w in wd) - min(w[2] for w in wd),
+                        wd[0][1], ws))
+    return out
+
+
 def donor_from_lcfs(levels_dir):
     """Derive the donor numbers from Driver 2's own .LCF files.
 
@@ -131,6 +154,57 @@ def canonical_wheel(levels_dir, name="CLEANWHEEL"):
     return pick, lev1.level_model(blob, name)
 
 
+def wheel_radius(model, scale=1.0):
+    """A wheel model's radius at a scale - which is the axle HEIGHT, not a size.
+
+    DrawWheelObject draws the wheel at its native size (cars.c:1264); the radius
+    only sets where the axle sits. Note this is the wheel MODEL's own radius, so it
+    is the same for every car that shares the one D1 wheel.
+    """
+    wy = [v[1] for v in model.vertices]
+    wz = [v[2] for v in model.vertices]
+    return max(max(wy) - min(wy), max(wz) - min(wz)) / 2.0 * scale
+
+
+def body_bbox(verts):
+    """((xmin,ymin,zmin), (xmax,ymax,zmax)) for a vertex list."""
+    return (tuple(min(v[i] for v in verts) for i in range(3)),
+            tuple(max(v[i] for v in verts) for i in range(3)))
+
+
+def placement_from_donor(body_verts, donor_bbox, donor_centres, scale):
+    """The four wheel centres, re-proportioned from a Driver 2 car.
+
+    BOTH numbers come from the donor, per axis: a long car gets a long wheelbase
+    and a tall car gets the ride height of a car that shape. That replaces a
+    single shared wheelbase and a constant "sill on the tyre contact", neither of
+    which is what Driver 2 does - measured, its own wheelbase runs 1.04..1.28 of
+    the body's half-length on ordinary cars against a single 431 here, and its
+    axle height is raised (vy -116) on the vans and dropped (vy -30) on the
+    saloons.
+
+    The mapping is the same one the cosmetics use for the light anchors - scale by
+    the ratio between the two bodies about each body's own centre - so there is
+    one rule for "put this thing where Driver 2 put it, on a car this size".
+
+    `donor_bbox` is the donor body's (min, max) triple, `donor_centres` its four
+    wheel centres in its own space (engine_wheel_positions).
+    """
+    bmin, bmax = body_bbox(body_verts)
+    dmin, dmax = donor_bbox
+    our_c = [(bmin[i] + bmax[i]) / 2.0 * scale for i in range(3)]
+    our_h = [(bmax[i] - bmin[i]) / 2.0 * scale for i in range(3)]
+    don_c = [(dmin[i] + dmax[i]) / 2.0 for i in range(3)]
+    don_h = [(dmax[i] - dmin[i]) / 2.0 for i in range(3)]
+    ratio = [(our_h[i] / don_h[i]) if don_h[i] else 1.0 for i in range(3)]
+    out = []
+    for (x, y, z) in donor_centres:
+        out.append((our_c[0] + (x - don_c[0]) * ratio[0],
+                    our_c[1] + (y - don_c[1]) * ratio[1],
+                    our_c[2] + (z - don_c[2]) * ratio[2]))
+    return out
+
+
 def placement(body_verts, wheel_verts, scale, wheelbase=DONOR_WHEELBASE):
     """The four wheel centres for one car, and the wheel's own radius.
 
@@ -203,6 +277,22 @@ def main(argv=None):
     print("all share 397 - and it only applies to the wheel-less D1 traffic: a")
     print("real per-car value would come from a D1 cosmetics table, which does")
     print("not exist.")
+    print()
+    print("But a single wheelbase is NOT what Driver 2 does, which is why the")
+    print("per-car placement takes both numbers from a matched Driver 2 car:")
+    print()
+    spread = donor_spread(args.donor)
+    cars = [r for r in spread if r[1] < 8]
+    print("  wheelbase / colBox.z, ordinary cars (slots 0-7): %.2f .. %.2f"
+          % (min(r[3] / float(r[2][2]) for r in cars),
+             max(r[3] / float(r[2][2]) for r in cars)))
+    print("  wheelbase / colBox.z, all 13 slots:             %.2f .. %.2f"
+          % (min(r[3] / float(r[2][2]) for r in spread),
+             max(r[3] / float(r[2][2]) for r in spread)))
+    vys = sorted({r[4] for r in spread})
+    print("  wheelDisp.vy, i.e. the axle height, distinct values: %s" % vys)
+    print("    ...of which the raised ones are slots %s"
+          % sorted({r[1] for r in spread if r[4] < -50}))
     return 0
 
 

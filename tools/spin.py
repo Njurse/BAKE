@@ -210,7 +210,8 @@ def main(argv=None):
         out = []
         for n, it in enumerate(items):
             r = recs.get(n)
-            out.append(wheelrender.wheeled_item(it, wm, r["centres"], r["scale"],
+            c = r.get("render_centres") or r["centres"]
+            out.append(wheelrender.wheeled_item(it, wm, c, r["scale"],
                                                 spin=spin) if r else it)
         return out
 

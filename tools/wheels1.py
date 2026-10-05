@@ -31,6 +31,10 @@ import d1pool     # noqa: E402  (the .obj writer, so both exports match)
 import lev1       # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DONOR_DIR = "src_rebuild/bin/Release_dev/DRIVER2/LEVELS"
+
+import cosmetics1   # noqa: E402
+import wheelgeom    # noqa: E402
 
 # The names the engine looks up. TRAIN spells one HUBCAP without the 1; MIAMI's
 # TEXTURENAMES carry NEWWHEEL/NEWWHCAP, which are textures rather than models,
@@ -243,40 +247,81 @@ def verify(levels_dir, out_root):
     return problems
 
 
-def placements(levels_dir, pool_path, out_root):
+def _render_push(centres, body_verts, scale, half_tyre,
+                 proud=wheelgeom.WHEEL_PROUD):
+    """Push the wheels out for the RENDER only.
+
+    The cosmetics put the wheels where Driver 2 puts its own - which assumes the
+    body has wheel arches. A D1 body does not: it is a solid shell, so a tyre
+    placed there is covered by the body's own side face and cannot be seen at all.
+    The preview needs them visible; the records must stay faithful. So the record
+    keeps both, and only the renderer uses this one.
+    """
+    bmin, bmax = wheelgeom.body_bbox(body_verts)
+    xc = (bmin[0] + bmax[0]) / 2.0 * scale
+    half_w = (bmax[0] - bmin[0]) / 2.0 * scale
+    out = []
+    for (x, y, z) in centres:
+        side = 1.0 if x >= xc else -1.0
+        want = half_w + half_tyre * proud
+        out.append((side * max(abs(x), want), y, z))
+    return out
+
+
+def placements(levels_dir, pool_path, out_root, donor_dir=None):
     """Per pool item: which wheel model it wears and where the four wheels go.
 
-    Anchored on each car's OWN bbox (wheelgeom.placement), so the tyres sit on the
-    ground line rather than wherever the model origin happens to be. The
-    wheelbase is the one shared constant; the track is per car, from its own
-    width. This is also the record the cosmetics need, since a CAR_COSMETICS
-    carries wheelDisp and wheelSize.
+    Two sets of centres, because two things need them and they differ on purpose:
+    `centres` is where the COSMETICS put the wheel, re-proportioned from the
+    matched Driver 2 car so the wheelbase, the track and the ride height all come
+    from a car of that shape; `render_centres` is that pushed out to the body's
+    side so a preview can see it at all. See _render_push.
     """
     import wheelgeom
 
-    index = {"version": 1, "wheelbase": wheelgeom.DONOR_WHEELBASE,
-             "donor_radius": wheelgeom.DONOR_WHEEL_RADIUS, "items": []}
     pool = json.load(open(pool_path))
     pd = os.path.dirname(pool_path)
-    # ONE wheel model for the whole pool: the shared D1 wheel, not each level's,
-    # because CREDITS/IVIEW ship display-scale versions (see canonical_wheel).
     canonical, wheel = wheelgeom.canonical_wheel(levels_dir)
-    index["wheel_model"] = "CLEANWHEEL"
-    index["wheel_level"] = canonical
-    index["wheel_radii_raw"] = wheelgeom.wheel_radii(levels_dir)
+    index = {"version": 2, "wheel_model": "CLEANWHEEL", "wheel_level": canonical,
+             "wheel_radii_raw": wheelgeom.wheel_radii(levels_dir), "items": []}
     if wheel is None:
         return index
+    radius = wheelgeom.wheel_radius(wheel, 1.0)
+    half_tyre = max(abs(v[0]) for v in wheel.vertices)
+
+    donor_dir = donor_dir or DEFAULT_DONOR_DIR
+    donors = cosmetics1.load_donors(donor_dir)
+    donor_city = "CHICAGO" if "CHICAGO" in donors else sorted(donors)[0]
+    donor_recs = donors[donor_city]
+    donor_bb = cosmetics1.donor_bodies(
+        os.path.join(donor_dir, donor_city + ".LEV"))
+    slots = sorted(donor_bb)
+    donor_halves = [cosmetics1.halves_from_bbox(donor_bb[k]) for k in slots]
+    index["donor"] = "%s/%s" % (os.path.basename(donor_dir.rstrip("/\\")), donor_city)
+
     for it in pool["items"]:
         g = json.load(open(os.path.join(pd, it["geom"])))
-        centres, radius, track = wheelgeom.placement(
-            g["vertices"], wheel.vertices, g["scale"])
+        body = g["vertices"]
+        scale = g["scale"]
+        bmin, bmax = wheelgeom.body_bbox(body)
+        half = [(bmax[i] - bmin[i]) / 2.0 * scale for i in range(3)]
+        di = slots[cosmetics1.donor_index(half, donor_halves)]
+        drec = donor_recs[di]
+        dcentres = cosmetics1.engine_wheel_positions(drec["wheelDisp"],
+                                                     drec["sA"][5])
+        centres = wheelgeom.placement_from_donor(body, donor_bb[di], dcentres,
+                                                 scale)
         index["items"].append({
             "pool_index": it["pool_index"],
             "level": g["sources"][0][0], "model": g["sources"][0][1],
             "wheel_model": "CLEANWHEEL", "wheel_level": canonical,
-            "scale": g["scale"], "radius": radius, "track": track,
-            "wheelbase": wheelgeom.DONOR_WHEELBASE,
+            "donor": di, "scale": scale, "radius": radius,
+            "half_tyre": half_tyre,
+            "wheelbase": max(c[2] for c in centres) - min(c[2] for c in centres),
+            "track": (max(c[0] for c in centres) - min(c[0] for c in centres)) / 2.0,
             "centres": [list(c) for c in centres],
+            "render_centres": [list(c) for c in _render_push(
+                centres, body, scale, half_tyre)],
         })
     d = os.path.join(out_root, "wheels")
     if not os.path.isdir(d):
@@ -286,15 +331,36 @@ def placements(levels_dir, pool_path, out_root):
     return index
 
 
-def check_placement(pool_path, out_root):
-    """Every car gets four wheels: two axles, two sides, all on the ground line.
+def _clusters(vals):
+    """How many distinct groups a few near-equal values fall into.
 
-    Pins the plan's invariants per pool item - four centres present; two distinct
-    z values exactly the wheelbase apart (BOTH axles, and the wheelbase identical
-    across every shape, since it is the one chosen constant); two distinct x
-    values symmetric about the car; one shared y; and that y such that the tyre's
-    bottom meets the car's own ground line. The track is per car by design and is
-    expected to vary - everything else is not.
+    Driver 2's own wheelDisp is NOT perfectly symmetric - its model 0 has x of 122,
+    125, -123 and -126 - so re-proportioning a donor faithfully gives four distinct
+    x values rather than two. What has to hold is that they form two SIDES, not that
+    the two are identical.
+    """
+    vs = sorted(vals)
+    tol = max(1.0, (vs[-1] - vs[0]) * 0.06)
+    n = 1
+    for a, b in zip(vs, vs[1:]):
+        if b - a > tol:
+            n += 1
+    return n
+
+
+def check_placement(pool_path, out_root):
+    """Every car gets four wheels: two axles, two sides, all on its own ground.
+
+    The invariants the per-car placement is held to. Two of them are bands taken
+    from Driver 2's own cars rather than chosen here:
+
+      * the wheelbase is a FRACTION OF THE BODY - 1.04..1.28 of the half-length on
+        Driver 2's ordinary cars, 0.97..1.60 over all its slots - so a check that
+        demanded one shared value was checking for the bug;
+      * the body sits BELOW the wheel contact on Driver 2's cars too: on its model
+        0 the sill is 0.90 of a tyre radius past the contact point, across its five
+        ordinary cars -0.66..-1.17. A car whose wheels hang below the body instead
+        is the "sill on the ground" bug coming back.
     """
     pl = os.path.join(out_root, "wheels", "placement.json")
     if not os.path.exists(pl):
@@ -305,43 +371,60 @@ def check_placement(pool_path, out_root):
     pd = os.path.dirname(pool_path)
     pool = {i["pool_index"]: i for i in json.load(open(pool_path))["items"]}
 
+    WB_MIN, WB_MAX = 0.95, 1.60          # D2: 1.04..1.28 cars, 0.97..1.60 all
+    DROP_MIN, DROP_MAX = -1.45, -0.35    # D2's ordinary cars: -1.17..-0.66
+
     problems = []
-    bases = set()
-    tracks = []
+    ratios = []
+    drops = []
     for i in items:
         c = i["centres"]
         tag = "pool %d (%s)" % (i["pool_index"], i["level"])
         if len(c) != 4:
             problems.append("%s: %d centres, not 4" % (tag, len(c)))
             continue
-        zs = sorted({round(q[2], 3) for q in c})
-        xs = sorted({round(q[0], 3) for q in c})
-        ys = sorted({round(q[1], 3) for q in c})
-        if len(zs) != 2:
-            problems.append("%s: %d distinct axle z, not 2 (both axles?)"
-                            % (tag, len(zs)))
-        else:
-            bases.add(round(zs[1] - zs[0], 3))
-        if len(xs) != 2:
-            problems.append("%s: %d distinct track x, not 2 (both sides?)"
-                            % (tag, len(xs)))
-        if len(ys) != 1:
-            problems.append("%s: wheels at %d different heights" % (tag, len(ys)))
-        # on the ground: the tyre's bottom meets the car's own bbox ground line
+        zs = [q[2] for q in c]
+        xs = [q[0] for q in c]
+        ys = [q[1] for q in c]
+        if _clusters(zs) != 2:
+            problems.append("%s: %d axle groups at z, not 2 (both axles?)"
+                            % (tag, _clusters(zs)))
+        if _clusters(xs) != 2:
+            problems.append("%s: %d side groups at x, not 2 (both sides?)"
+                            % (tag, _clusters(xs)))
+        if _clusters(ys) != 1:
+            problems.append("%s: wheels at %d different heights"
+                            % (tag, _clusters(ys)))
+        if len(i.get("render_centres") or []) != 4:
+            problems.append("%s: no render_centres" % tag)
         g = json.load(open(os.path.join(pd, pool[i["pool_index"]]["geom"])))
-        ground = max(v[1] for v in g["vertices"]) * i["scale"]
-        if abs((c[0][1] + i["radius"]) - ground) > 0.5:
-            problems.append("%s: tyre bottom %.1f, car ground %.1f"
-                            % (tag, c[0][1] + i["radius"], ground))
-        tracks.append(i["track"])
+        scale = i["scale"]
+        half_len = (max(v[2] for v in g["vertices"])
+                    - min(v[2] for v in g["vertices"])) / 2.0 * scale
+        wb = i["wheelbase"]
+        if half_len:
+            ratios.append(wb / half_len)
+            if not (WB_MIN <= wb / half_len <= WB_MAX):
+                problems.append("%s: wheelbase/body %.2f outside %.2f..%.2f"
+                                % (tag, wb / half_len, WB_MIN, WB_MAX))
+        # the body must reach BELOW the tyre contact, as Driver 2's does
+        drop = (c[0][1] + i["radius"] * scale
+                - max(v[1] for v in g["vertices"]) * scale) / (i["radius"] * scale)
+        drops.append(drop)
+        if not (DROP_MIN <= drop <= DROP_MAX):
+            problems.append("%s: tyre sits %.2f radii from the sill, outside %.2f..%.2f"
+                            % (tag, drop, DROP_MIN, DROP_MAX))
 
     print("%d items checked" % len(items))
-    print("  distinct wheelbases across all of them: %s" % sorted(bases))
-    print("  shared wheelbase constant:               %d" % doc["wheelbase"])
-    print("  track (per car, expected to vary):       %.1f .. %.1f"
-          % (min(tracks), max(tracks)) if tracks else "  no tracks")
-    if bases != {float(doc["wheelbase"])}:
-        problems.append("wheelbase not identical across shapes: %s" % sorted(bases))
+    print("  wheelbase        %.0f .. %.0f  (%d distinct - per car, not one value)"
+          % (min(i["wheelbase"] for i in items),
+             max(i["wheelbase"] for i in items),
+             len({round(i["wheelbase"]) for i in items})))
+    print("  wheelbase / body %.2f .. %.2f  (D2's ordinary cars 1.04 .. 1.28)"
+          % (min(ratios), max(ratios)) if ratios else "  no ratios")
+    print("  sill vs contact  %.2f .. %.2f radii below  (D2's cars -1.17 .. -0.66)"
+          % (min(drops), max(drops)) if drops else "  no drops")
+    print("  donors used      %s" % sorted({i["donor"] for i in items}))
     for p in problems[:12]:
         print("  PROBLEM: %s" % p)
     print("VERDICT: %s" % ("clean" if not problems else "%d problem(s)"
@@ -354,6 +437,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--levels",
                     default="src_rebuild/bin/Release_dev/DRIVER/LEVELS")
+    ap.add_argument("--donor", default=DEFAULT_DONOR_DIR,
+                    help="Driver 2 LEVELS, for the cars the wheelbase and ride height come from")
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     ap.add_argument("--verify", action="store_true",
                     help="check what has been exported instead of writing it")
@@ -371,16 +456,23 @@ def main(argv=None):
         return 1 if verify(args.levels, args.out) else 0
 
     if args.place:
-        idx = placements(args.levels, args.pool, args.out)
+        idx = placements(args.levels, args.pool, args.out, args.donor)
         if not idx["items"]:
             print("no placeable pool items")
             return 1
         rad = [i["radius"] for i in idx["items"]]
         trk = [i["track"] for i in idx["items"]]
-        print("%d items placed; wheelbase %d (shared); wheel from %s"
-              % (len(idx["items"]), idx["wheelbase"], idx.get("wheel_level")))
-        print("  radius  %.1f .. %.1f" % (min(rad), max(rad)))
-        print("  track   %.1f .. %.1f  (per car, from its own width)" % (min(trk), max(trk)))
+        wbs = [i["wheelbase"] for i in idx["items"]]
+        dons = sorted({i["donor"] for i in idx["items"]})
+        print("%d items placed; wheel from %s; donors from %s" %
+              (len(idx["items"]), idx.get("wheel_level"), idx.get("donor")))
+        print("  wheelbase %.0f .. %.0f  (per car, from the matched Driver 2 car)"
+              % (min(wbs), max(wbs)))
+        print("  track     %.0f .. %.0f  (per car, from its own width)"
+              % (min(trk), max(trk)))
+        print("  radius    %.1f raw (%.1f at the bake scale - the axle height)"
+              % (rad[0], rad[0] * idx["items"][0]["scale"]))
+        print("  Driver 2 donor slots used: %s" % dons)
         print("  per-level raw wheel radii: %s" %
               {k: int(v) for k, v in sorted(idx["wheel_radii_raw"].items())})
         print("wrote %s" % os.path.join(args.out, "wheels", "placement.json"))
