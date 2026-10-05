@@ -286,6 +286,69 @@ def placements(levels_dir, pool_path, out_root):
     return index
 
 
+def check_placement(pool_path, out_root):
+    """Every car gets four wheels: two axles, two sides, all on the ground line.
+
+    Pins the plan's invariants per pool item - four centres present; two distinct
+    z values exactly the wheelbase apart (BOTH axles, and the wheelbase identical
+    across every shape, since it is the one chosen constant); two distinct x
+    values symmetric about the car; one shared y; and that y such that the tyre's
+    bottom meets the car's own ground line. The track is per car by design and is
+    expected to vary - everything else is not.
+    """
+    pl = os.path.join(out_root, "wheels", "placement.json")
+    if not os.path.exists(pl):
+        print("no %s - run --place first" % pl)
+        return 1
+    doc = json.load(open(pl))
+    items = doc["items"]
+    pd = os.path.dirname(pool_path)
+    pool = {i["pool_index"]: i for i in json.load(open(pool_path))["items"]}
+
+    problems = []
+    bases = set()
+    tracks = []
+    for i in items:
+        c = i["centres"]
+        tag = "pool %d (%s)" % (i["pool_index"], i["level"])
+        if len(c) != 4:
+            problems.append("%s: %d centres, not 4" % (tag, len(c)))
+            continue
+        zs = sorted({round(q[2], 3) for q in c})
+        xs = sorted({round(q[0], 3) for q in c})
+        ys = sorted({round(q[1], 3) for q in c})
+        if len(zs) != 2:
+            problems.append("%s: %d distinct axle z, not 2 (both axles?)"
+                            % (tag, len(zs)))
+        else:
+            bases.add(round(zs[1] - zs[0], 3))
+        if len(xs) != 2:
+            problems.append("%s: %d distinct track x, not 2 (both sides?)"
+                            % (tag, len(xs)))
+        if len(ys) != 1:
+            problems.append("%s: wheels at %d different heights" % (tag, len(ys)))
+        # on the ground: the tyre's bottom meets the car's own bbox ground line
+        g = json.load(open(os.path.join(pd, pool[i["pool_index"]]["geom"])))
+        ground = max(v[1] for v in g["vertices"]) * i["scale"]
+        if abs((c[0][1] + i["radius"]) - ground) > 0.5:
+            problems.append("%s: tyre bottom %.1f, car ground %.1f"
+                            % (tag, c[0][1] + i["radius"], ground))
+        tracks.append(i["track"])
+
+    print("%d items checked" % len(items))
+    print("  distinct wheelbases across all of them: %s" % sorted(bases))
+    print("  shared wheelbase constant:               %d" % doc["wheelbase"])
+    print("  track (per car, expected to vary):       %.1f .. %.1f"
+          % (min(tracks), max(tracks)) if tracks else "  no tracks")
+    if bases != {float(doc["wheelbase"])}:
+        problems.append("wheelbase not identical across shapes: %s" % sorted(bases))
+    for p in problems[:12]:
+        print("  PROBLEM: %s" % p)
+    print("VERDICT: %s" % ("clean" if not problems else "%d problem(s)"
+                           % len(problems)))
+    return 1 if problems else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -296,8 +359,13 @@ def main(argv=None):
                     help="check what has been exported instead of writing it")
     ap.add_argument("--place", action="store_true",
                     help="write the per-car wheel placement record and stop")
+    ap.add_argument("--check", action="store_true",
+                    help="check the placement record against the plan's invariants")
     ap.add_argument("--pool", default=os.path.join(HERE, "out", "pool.json"))
     args = ap.parse_args(argv)
+
+    if args.check:
+        return check_placement(args.pool, args.out)
 
     if args.verify:
         return 1 if verify(args.levels, args.out) else 0
