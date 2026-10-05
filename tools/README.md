@@ -1,33 +1,61 @@
 # d1cars tools
 
 The offline pipeline: read the Driver 1 disc, extract the traffic shapes, bake
-them into an engine-shaped blob. All read-only against the game data, run from
-the repo root. `tools/out/` is ignored.
+them into an engine-shaped blob, and preview the result. Everything is read-only
+against the game data and runs from the repo root. `tools/out/` is gitignored.
 
 | tool | what it does |
 |---|---|
 | `lev1.py` | reads a Driver 1 `LEVELS/*.LEV` — `--lumps` the section table, `--names` the level-model names, `--models` every car-model variant, `--verify` its invariants |
+| `pages1.py` | the texture half of the same file: `--selftest` the RLE, `--info` the permanent page list, `--pallet` the car palette records, `--compare DIR` a structural cross-check against DriverLevelTool's TGAs, `--write DIR` PNGs + a JSON index |
 | `scalemodels.py` | measures D1 vs D2 car-model sizes; `--plan` prints the per-item plan (D1 bbox -> scaled bbox -> nearest D2 car) |
-| `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`; `--render` a wireframe sheet |
-| `bake.py` | bakes pool items into an engine-shaped car-data blob (`out/bake/D1POOL.LEV`) |
+| `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`, carrying each poly's texture naming and both normal tables; `--render` a wireframe sheet |
+| `bake.py` | bakes pool items into an engine-shaped blob (`out/bake/D1POOL.LEV`): car models, `LUMP_PALLET`, `LUMP_TEXTUREINFO` and the texture pages. Self-checks by re-reading what it wrote |
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
-| `textured.py` | textured 3/4 renders from the level's own pages -> `out/textured_pool.png` |
+| `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
+| `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
 
 Typical run (both level directories are gitignored local data):
 
 ```sh
 LEV=src_rebuild/bin/Release_dev/DRIVER/LEVELS     # Driver 1
 D2=src_rebuild/bin/Release_dev/DRIVER2/LEVELS     # Driver 2
+T=JERICHO/MODS/d1cars/tools
 
-python JERICHO/MODS/d1cars/tools/lev1.py $LEV/*.LEV --verify
-python JERICHO/MODS/d1cars/tools/scalemodels.py --d1 $LEV --d2 $D2 --plan
-python JERICHO/MODS/d1cars/tools/d1pool.py --levels $LEV --render
-python JERICHO/MODS/d1cars/tools/bake.py --pool JERICHO/MODS/d1cars/tools/out/pool.json --first 13
-python JERICHO/MODS/d1cars/tools/preview.py
+python $T/lev1.py $LEV/*.LEV --verify
+python $T/pages1.py $LEV/FRISCO.LEV --info
+python $T/pages1.py $LEV/FRISCO.LEV --pallet
+python $T/pages1.py $LEV/FRISCO.LEV --write $T/out/pages
+python $T/scalemodels.py --d1 $LEV --d2 $D2 --plan
+python $T/d1pool.py --levels $LEV --render
+python $T/bake.py --pool $T/out/pool.json --first 13
+python $T/preview.py
+python $T/textured.py --baked $T/out/bake/D1POOL.LEV
+python $T/spin.py
 ```
 
-Current results: 43 unique clean shapes across the seven car-bearing levels;
-scale 2048/3000; `bake.py --first 13` fills the 13-model car-data table.
+`pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
+it is the cheapest thing to run after a change to the page decoder.
+
+## Current results
+
+* **43** unique clean shapes across the seven car-bearing levels (they share
+  none), from `--first 13` baked into the 13-model car-data table.
+* Scale `2048/3000`; every level's palette lump is an exact `4 + n*44` fit.
+* `bake.py` writes 13/13 models with 0 poly errors and **2161 GT polys**, every
+  normal index inside its table, and 19 texture sets (9 permanent + 10 special)
+  whose pages it carries itself.
+* `textured.py --baked` renders those with **0 polys missing a page**.
+
+## The two things that bite
+
+* **Set numbers are per-level.** The same number means a different page in
+  another level, so the bake renumbers each distinct (source level, set) and
+  rewrites the polys. Skipping this makes two cities' cars share a page.
+* **A level's car pages are usually the SPECIAL ones**, not the permanent ones —
+  on FRISCO the car polys paint with sets 3, 4 and 61..66, all special; only
+  67/68 are permanent. Both lists must be resolved, and they are laid out one
+  after the other.
 
 See [`../docs/DRIVER1.md`](../docs/DRIVER1.md) for the format work and the
 roadmap, and [`../docs`](../docs) for the phase status.

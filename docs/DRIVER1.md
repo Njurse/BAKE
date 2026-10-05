@@ -16,8 +16,12 @@ engine source; each claim says which. Line references are into
 Lift the **civilian traffic car shapes** out of the original Driver 1 (1999, PSX)
 level files and offer them to REDRIVER2 as a car-data source that sits
 **alongside** the four Driver 2 cities (Chicago / Havana / Rio / Vegas) — a fifth
-bucket, not a replacement for one. First milestone is a geometry-only "blockout"
-pool: the shapes render, untextured.
+bucket, not a replacement for one.
+
+The offline side now goes past the first geometry-only "blockout" milestone: the
+shapes render **textured**, lit, and smooth-shaded, and a baked blob carries its
+own texture pages and palettes. What is left is the engine wiring and the test
+rig (§9).
 
 Two questions had to be answered before any code: **where D1 keeps its car
 geometry**, and **how far its format is from the one the engine eats**. Both are
@@ -78,6 +82,65 @@ and dedupe.
 the body at `0x800` is `(type 35, size 86876)`. Driver 2 was built by the same
 studio on the Driver 1 engine, so the **container** is shared — but the **car
 records** inside are not.
+
+### The texture page, the palette and the normal tables (measured)
+
+Three more pieces of the same file, all decoded now (`tools/pages1.py` and
+`lev1.py`), because a car that carries its own textures needs them.
+
+**A page entry**, as the engine's `LoadTPageAndCluts` reads one, is
+
+    [int npalettes][npalettes x 32-byte CLUT rows][a decomp_asm stream]
+
+and the pages are carved out of the tpage region (citylump 3) in the order of
+the page list, each occupying `(size + 2047) & ~2047` bytes. `decomp_asm` is a
+two-op RLE filling exactly `0x8000` bytes — 256x256 at 4bpp — writing BACKWARDS
+from the end of the buffer. It is small enough to reimplement exactly: its
+control byte copies `n+1` literal bytes below `0x80` and repeats the next byte
+`258-n` times at or above it. The buffer is used as decoded, so the texel at
+(x, y) is the `y*128 + x/2`th byte, low nibble for even x.
+
+**`LUMP_TEXTUREINFO` (34)** is the page list. Its body is
+`[tpage_amount][texamount][TP tpage_amount+1]`, then one length-prefixed `TEXINF`
+array per page, then `[nperms][permlist]`, a **fixed 16-entry region**, then
+`[nspecpages][speclist]`. The fixed region is the trap: the engine reaches the
+special list through `&permlist[16]`, not `&permlist[nperms]`, so the slots a
+short list does not use are padding.
+
+**`LUMP_PALLET` (25)** is where Driver 1 and Driver 2 genuinely differ, so the
+bake translates rather than copies. D1's record is **44 bytes**:
+
+    int palette       colour-variety index (traffic cars use 0..3)
+    int texnum        texture number within the page
+    int tpageindex    the texture set (the page)
+    32 bytes          16 RGB555 entries
+
+and the header int is the RECORD count (`4 + n*44` equals the lump size on all
+seven levels). D2's record is four ints whose fourth is a `clut_number`: `-1`
+selects an inline CLUT, anything else references an earlier one, and the run ends
+on a lone `-1`. D1 has no reference form and no terminator, because its count is
+already exact.
+
+**Two normal tables** sit between the vertices and the poly block, and they are
+not interchangeable:
+
+* the `normals` field points at `npol` entries, one per poly, each exactly that
+  poly's geometric normal (measured 148/148, 200/200, 242/242 on FRISCO, zero
+  flipped);
+* the `point_normals` field points at `npn` entries, and **that** is the
+  per-vertex table the GT record's normal indices index (`cars.c:650` indexes
+  `nlist = point_normals` with them).
+
+A model may ship no `point_normals` at all — 65 of the 111 variants do not — in
+which case its GT indices have nothing to resolve against; the pool synthesises
+one normal per vertex for those, indexed by the vertex, which is what smooth
+shading means.
+
+The stored normals are **inward** — `cross(u, v)`, pointing into the surface.
+Measured rather than assumed: every FRISCO model's roof polys carry y = +1
+(4096) and y is down-positive, so a stored roof normal points down into the car.
+Negating is what makes the renderers agree with the geometry (dot > 0 on 96.5%
+of samples, against 1.2% for the raw sign).
 
 ---
 
@@ -202,11 +265,17 @@ items belong.
   car models walk the same way (all 111 variants, 0 errors). `FORMATS.md` has
   been corrected. The only real caveat is to **bound the walk to `num_polys`**;
   walking past it is what produces a zero-size step, not compression.
-- **Textures.** A D1 poly carries a raw `page` byte; an engine poly carries
-  `texture_set`, an *index* resolved per level through `texture_pages[128]` /
-  `texture_cluts[128][32]` (`FORMATS.md` §2). A geometry-only blockout can
-  sidestep this; real colour cannot, and the CLUT column is the known
-  single-source limit (`MODS/carhacks/docs/CROSS_CITY.md`, `VRAM.md`).
+- **Textures — decoded, and carried by the bake.** A D1 poly carries a raw
+  `page` byte; an engine poly carries `texture_set`, an *index* resolved through
+  `texture_pages[128]` / `texture_cluts[128][32]` (`FORMATS.md` §2). A
+  geometry-only blockout sidestepped that; it no longer does. `tools/pages1.py`
+  decodes the page entries and the palettes themselves (§3), `bake.py` emits
+  them next to the models along with the page list, and `textured.py --baked`
+  renders a baked blob from its own contents. What remains is the ENGINE side's
+  two limits: the CLUT column is a single-source budget
+  (`MODS/carhacks/docs/CROSS_CITY.md`, `VRAM.md`), and `carTpages[city]` holds
+  only **8** sets while a full pool names **19** — so the engine wiring has to
+  decide what a pool set maps onto.
 - **`exports.def`.** Any exported array whose dimension changes needs the
   matching `exports.def` line in the same commit (the export-generation rule).
 
@@ -282,8 +351,9 @@ override `LEVELS\<CarDataFolder>\CARMODEL_<n>.COS` (`LoadCustomCarCosmetics`,
 
 ## 9. Roadmap
 
-The approved phases. **Phases 1–4 are done, and Phase 5's offline half is done;
-the engine wiring and the test rig are NOT started.**
+The approved phases. The **offline half is done end to end**; **the engine
+wiring and the test rig are NOT started** — everything described below runs
+inside this submodule and touches no engine file.
 
 1. **Stand up the submodule + this doc.** — *done.* The module builds, registers
    its metadata and does nothing else.
@@ -298,28 +368,55 @@ the engine wiring and the test rig are NOT started.**
 4. **Build the pool** (`tools/d1pool.py`). — *done.* 43 unique clean shapes from
    43 sources across the seven car-bearing levels (the levels share no shapes),
    emitted as `.obj` + `geom.json` + `pool.json`, with a preview sheet
-   (`--render`) and a non-car outlier (CREDITS model 0) dropped.
-5. **Bake to a synthetic fifth city** — *offline half done* (`tools/bake.py`):
-   emits a blob in the exact shape the cross-city import reads (`models.c`
-   `LoadCarImport`), flat F3/F4 polys so it is geometry-only, verified by
-   re-reading it with an independent reader. **Still to do:** the engine wiring —
-   a fifth row in `LevelNames`/`LevelFiles`/`CosmeticFiles`, `gCarImports[4]` to
-   `[5]`, `CHK_CITY_COUNT_LIMIT`/`CHK_CAR_CITY_COUNT`, the `carTpages`/
-   `specTpages` arrays, and every frozen `[4]` in `exports.def` — all in ONE
-   commit (§6).
+   (`--render`) and a non-car outlier (CREDITS model 0) dropped. Each item now
+   also carries, per poly, its texture naming (set, id, uv) and its normal
+   indices and, per model, both normal tables with their provenance.
+5. **Bake to a synthetic fifth city** — *offline half done* (`tools/bake.py`).
+   It emits a blob in the exact shape the cross-city import reads (`models.c`
+   `LoadCarImport`): the car models, `LUMP_PALLET` (translated into the engine's
+   record shape, not copied), `LUMP_TEXTUREINFO` (the renumbered page list) and
+   the page bytes themselves after DATA1, which is where `pageBase` looks. Every
+   poly is emitted as GT3/GT4 carrying its texture set, id and uv **and** its
+   normal indices, and every model ships both normal tables, so a baked car is
+   smooth-shaded rather than faceted. Set numbers are renumbered per
+   (source level, set) because a set number is per-level. Verified by re-reading
+   the blob with an independent reader and rendering it textured from its own
+   pages. **Still to do:** the engine wiring — a fifth row in
+   `LevelNames`/`LevelFiles`/`CosmeticFiles`, `gCarImports[4]` to `[5]`,
+   `CHK_CITY_COUNT_LIMIT`/`CHK_CAR_CITY_COUNT`, the `carTpages`/`specTpages`
+   arrays, and every frozen `[4]` in `exports.def` — all in ONE commit (§6).
+   One thing that wiring must decide, and the bake cannot: `carTpages[city]`
+   holds **8** slots while a full pool names **19** sets, so the engine side has
+   to say what a pool set maps onto, exactly as the CLUT column is the palette
+   side's limit (§7).
 6. **Category it separately** — its own roster row so the pool is grouped apart
    from the four cities — plus a test rig on top of carhacks' checks
    (`crosscheck.py`, `hostdiff.py`, the identity line) and headless acceptance.
    **Not started.**
 
+### Previewing a baked blob
+
+`preview.py`, `textured.py` and `spin.py` all read the baked blob directly.
+`textured.py --baked` and `spin.py` take their pages from that blob's own
+`LUMP_TEXTUREINFO` and page data — no DriverLevelTool export and no source level
+read — so the baked path is self-supporting and is the one to trust when asking
+"does the thing we would ship actually look right?". `spin.py` writes a rotating
+GIF of every shape in one grid plus one GIF per model, textured and lit.
+
 ### Picking this up in a fresh session
 
-1. The superproject gitlink was left one commit behind this submodule's HEAD at
-   hand-off (`fix-car-switch-release`) — bump it first.
+1. The superproject gitlink is behind this submodule's HEAD (the superproject
+   was deliberately left alone in the texture session) — bump it first.
 2. Phase 5's engine wiring as a single commit (§6 lists every site, and
-   `exports.def` must move with it), then `premake5.exe vs2019` and a build.
+   `exports.def` must move with it), then `premake5.exe vs2019` and a build. The
+   wiring also has to answer the two budget questions §7 raises: what a pool set
+   maps onto given `carTpages[city]`'s 8 slots, and the CLUT column.
 3. Phase 6: make a pool item selectable through carhacks, add the roster row,
    and drive it through the existing harnesses.
+
+The offline side needs nothing: `bake.py` produces a blob that already carries
+its own textures, palettes and page lists, and `textured.py --baked` / `spin.py`
+show it.
 
 ---
 
@@ -335,6 +432,23 @@ struct.unpack_from('<ii',  b, 0x800) # (35, 86876)                       LUMP_LE
 ```bash
 stat -c '%s %n' DT*.BIN              # 6484 each
 ```
+
+```bash
+T=JERICHO/MODS/d1cars/tools
+L=src_rebuild/bin/Release_dev/DRIVER/LEVELS
+
+python $T/pages1.py --selftest                    # the RLE, no game data needed
+python $T/pages1.py $L/FRISCO.LEV --info          # page list + CLUT row counts
+python $T/pages1.py $L/FRISCO.LEV --pallet        # 4 + n*44 == the lump size
+python $T/pages1.py $L/FRISCO.LEV --write $T/out/pages
+
+python $T/bake.py --pool $T/out/pool.json --first 13   # self-checks the normals
+python $T/textured.py --baked $T/out/bake/D1POOL.LEV   # 0 polys missing a page
+python $T/spin.py
+```
+
+Run from the repo root. Those three `pages1.py` modes are the page/palette facts
+in §3 re-derived from the data rather than trusted.
 
 Run from `src_rebuild/bin/Release_dev/DRIVER` (gitignored, local-only — §1).
 
