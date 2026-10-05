@@ -232,7 +232,27 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
         rec = build_record(model.vertices, SCALE, centres,
                            _wheel_radius(wheel_model, SCALE), drec, donor_bb[di])
         out.append((m, rec, di, zs[-1] - zs[0], track))
-    return out
+
+    # REMAP onto the same models the .LEV bake uses. The .LEV and the .LCF are two
+    # halves of ONE description: the .LCF's table is indexed by MODEL NUMBER, so a
+    # record left at Driver 1's own number describes the wrong car - and for models
+    # 5/6/7 a car Driver 2 cannot address at all. Both halves must read the same
+    # mapping, so it is imported from bake rather than copied: a second literal is
+    # exactly how these two drift apart, silently, with the colours landing on the
+    # wrong bodies.
+    import bake
+    filled = [e for e in out if e[1] is not None]
+    if len(filled) > len(bake.D2_COMPLIANT_MODELS):
+        raise SystemExit("%s ships %d cars but only %d D2-compliant models exist"
+                         % (city, len(filled), len(bake.D2_COMPLIANT_MODELS)))
+    remapped = [(m, None, None, None, None) for m in range(scalemodels.MAX_CAR_MODELS)]
+    for (src_m, rec, di, r, t), dst_m in zip(filled, bake.D2_COMPLIANT_MODELS):
+        remapped[dst_m] = (dst_m, rec, di, r, t)
+    for gap in bake.D2_GAP_MODELS:
+        if remapped[gap][1] is not None:
+            raise SystemExit("%s would put a record on model %d, which no Driver 2 "
+                             "city holds data for" % (city, gap))
+    return remapped
 
 
 def _wheel_radius(wheel_model, scale):
