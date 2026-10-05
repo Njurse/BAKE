@@ -39,6 +39,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WHEEL_NAMES = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL",
                "HUBCAP", "HUBCAP1", "NEWWHEEL", "NEWWHCAP")
 
+# The wheel TEXTURES. These are the names as FRISCO spells them; MIAMI uses
+# NEWWHEEL / NEWWHCAP for the same job, so both spellings are looked up.
+WHEEL_TEXTURE_NAMES = ("WHEEL1", "WHEEL2", "NEWWHEEL", "NEWWHCAP")
+
 
 def wheels_in(blob):
     """[(slot, name, Model)] for every wheel-named model in a level."""
@@ -118,6 +122,57 @@ def export(levels_dir, out_root):
     return index
 
 
+def texture_exports(levels_dir, out_root, scale=4):
+    """Crop each level's wheel TEXTURES out of its own texture pages.
+
+    A wheel texture is a named detail rect on a page - on FRISCO `WHEEL1` and
+    `WHEEL2` sit on page 0 - found through the TEXINF nameoffset into the level's
+    TEXTURENAMES. They are exported beside the models and, like them, are NOT
+    wired into the bake yet.
+    """
+    import pages1
+
+    index = {"version": 1, "textures": []}
+    base = os.path.join(out_root, "wheels", "textures")
+    for fn in sorted(os.listdir(levels_dir)):
+        if not fn.upper().endswith(".LEV"):
+            continue
+        level = fn[:-4]
+        blob = open(os.path.join(levels_dir, fn), "rb").read()
+        if pages1.texture_info_lump(blob) is None:
+            continue
+        for name in WHEEL_TEXTURE_NAMES:
+            for page_index, det in pages1.find_texture(blob, name):
+                got = pages1.crop_detail(blob, page_index, det, 0)
+                if not got or got[0] == 0 or got[1] == 0:
+                    continue
+                w, h, rgb = got
+                d = os.path.join(base, level)
+                if not os.path.isdir(d):
+                    os.makedirs(d)
+                png = os.path.join(d, "%s_%s_p%d.png" % (level, name, page_index))
+                big = bytearray()
+                for y in range(h):
+                    row = rgb[y * w * 3:(y + 1) * w * 3]
+                    row = b"".join(row[i:i + 3] * scale
+                                   for i in range(0, len(row), 3))
+                    for _ in range(scale):
+                        big += row
+                d1pool._png(png, w * scale, h * scale, big)
+                index["textures"].append({
+                    "level": level, "name": name, "page": page_index,
+                    "id": det["id"],
+                    "rect": [det["x"], det["y"], det["width"], det["height"]],
+                    "png": os.path.relpath(png, out_root).replace("\\", "/"),
+                    "scale": scale,
+                })
+    if not os.path.isdir(out_root):
+        os.makedirs(out_root)
+    with open(os.path.join(out_root, "wheel_textures.json"), "w") as f:
+        json.dump(index, f, indent=1)
+    return index
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -127,8 +182,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     index = export(args.levels, args.out)
-    if not index["wheels"]:
-        print("no wheel models found under %s" % args.levels)
+    tex = texture_exports(args.levels, args.out)
+    if not index["wheels"] and not tex["textures"]:
+        print("no wheel models or wheel textures found under %s" % args.levels)
         return 1
     by_level = {}
     for w in index["wheels"]:
@@ -139,6 +195,14 @@ def main(argv=None):
               [(w["name"], w["verts"], w["tris"]) for w in ws]))
     print("wrote %d wheel models to %s" % (len(index["wheels"]),
                                            os.path.join(args.out, "wheels")))
+    tby = {}
+    for t in tex["textures"]:
+        tby.setdefault(t["level"], []).append(t)
+    for level in sorted(tby):
+        print("%-9s %d wheel textures: %s" % (level, len(tby[level]),
+              [(t["name"], "%dx%d" % (t["rect"][2], t["rect"][3]), "p%d" % t["page"])
+               for t in tby[level]]))
+    print("wrote %d wheel texture crops" % len(tex["textures"]))
     return 0
 
 

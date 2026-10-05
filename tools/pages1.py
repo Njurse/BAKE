@@ -37,6 +37,8 @@ LUMP_TEXTUREINFO = lev1.LUMP_TEXTUREINFO
 
 PAGE_BYTES = 0x8000          # 256x256 at 4bpp
 CLUT_ROW_BYTES = 32          # 16 x RGB555
+TEXINF_FMT = "<HHBBBB"       # id, nameoffset, x, y, width, height
+LUMP_TEXTURENAMES = 5        # the level's texture-name buffer, for TEXINF nameoffsets
 
 
 def decomp_asm(src, out_bytes=PAGE_BYTES):
@@ -104,12 +106,21 @@ def parse_texture_info(body):
 
     n = i32(0)
     o = 8 + 8 * (n + 1)
+    # per page: [int texamount][TEXINF x texamount]. A TEXINF is
+    # {u_short id; u_short nameoffset; u_char x, y, width, height} and its
+    # nameoffset points into a name buffer (the level's TEXTURENAMES lump), which
+    # is how a detail's rect gets its name.
     tpage_ids = []
     for _ in range(n):
         cnt = i32(o)
         o += 4
-        tpage_ids.append(cnt)
-        o += 8 * cnt
+        recs = []
+        for _k in range(cnt):
+            tid, noff, x, y, w, h = struct.unpack_from(TEXINF_FMT, body, o)
+            recs.append({"id": tid, "nameoffset": noff, "x": x, "y": y,
+                         "width": w, "height": h})
+            o += 8
+        tpage_ids.append(recs)
     nperms = i32(o)
     permlist = [(i32(o + 4 + 8 * k), i32(o + 4 + 8 * k + 4)) for k in range(nperms)]
     o2 = o + 4 + 16 * 8
@@ -388,6 +399,70 @@ def write_pages(blob, path, out_root):
     with open(os.path.join(out_root, name + ".json"), "w") as f:
         json.dump(info, f, indent=1)
     return info
+
+
+def texture_names(blob):
+    """The level's texture-name buffer, which the TEXINF nameoffsets point into."""
+    hdr = lev1.read_header(blob)
+    got = lev1.find_lump(blob, hdr["loadtime_offset"], lev1.LUMP_LOADTIME_DATA,
+                         LUMP_TEXTURENAMES)
+    if not got:
+        return b""
+    off, size = got
+    return blob[off:off + size]
+
+
+def details(blob):
+    """[(page_index, detail)] for the whole level, each detail named.
+
+    A detail's page_index is the same number the page lists use and the one a
+    poly's texture_set names, so this is how a NAME (WHEEL1, ROAD1) becomes a rect
+    on a page.
+    """
+    got = texture_info_lump(blob)
+    if not got:
+        return []
+    ti = parse_texture_info(blob[got[0]:got[0] + got[1]])
+    buf = texture_names(blob)
+    out = []
+    for pi, recs in enumerate(ti["tpage_ids"]):
+        for r in recs:
+            o = r["nameoffset"]
+            end = buf.find(b"\x00", o) if 0 <= o < len(buf) else -1
+            d = dict(r)
+            d["name"] = buf[o:end].decode("ascii", "replace") if end > 0 else None
+            out.append((pi, d))
+    return out
+
+
+def find_texture(blob, name):
+    """[(page_index, detail)] for every detail carrying this name."""
+    return [(pi, d) for pi, d in details(blob) if d.get("name") == name]
+
+
+def crop_detail(blob, page_index, detail, clut_row=0):
+    """A detail's rect out of its own page -> (width, height, rgb bytes).
+
+    The page is 4bpp, so the texel at (x, y) is the low nibble of byte
+    y*128 + x/2 when x is even and the high nibble when it is odd - the order the
+    engine's upload produces.
+    """
+    ofs, entries, _ti = level_pages(blob)
+    ent = {s: (o, z) for s, o, z in entries}
+    if page_index not in ent:
+        return None
+    o, z = ent[page_index]
+    rows, page = read_page(blob, o, z)
+    pal = clut_rgb(rows[clut_row if clut_row < len(rows) else 0])
+    x0, y0 = detail["x"], detail["y"]
+    w, h = detail["width"], detail["height"]
+    out = bytearray()
+    for y in range(y0, min(y0 + h, 256)):
+        for x in range(x0, min(x0 + w, 256)):
+            byte = page[y * 128 + (x >> 1)]
+            v = (byte & 0xF) if (x & 1) == 0 else (byte >> 4)
+            out += bytes(pal[v])
+    return w, h, bytes(out)
 
 
 def _selftest():
