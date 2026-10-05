@@ -289,32 +289,51 @@ def build_textureinfo(perms, specs):
     return bytes(body)
 
 
-def build_pallet(page_list, levels_dir):
+def build_pallet(page_list, levels_dir, remap, tex_remap):
     """LUMP_PALLET for the pool, in the ENGINE's record shape.
 
-    Note the direction of translation: Driver 1's own lump uses a 44-byte record
-    (three ints plus an inline CLUT, count exact, no terminator), but this lump
-    is read by the engine's ProcessPalletLumpForRows, which wants Driver 2's
-    shape - four ints whose fourth is clut_number, -1 selecting the inline form,
-    the run ended by a lone -1. So the bake converts rather than copies.
+    Driver 1's own LUMP_PALLET is a 44-byte record (three ints + an inline CLUT,
+    count exact, no terminator) carrying the COLOUR-VARIANT CLUTs - its palette
+    field is already the 0..5 variety index. The engine's ProcessPalletLumpForRows
+    wants Driver 2's shape: four ints whose fourth is clut_number, -1 the inline
+    form, the run ended by a lone -1. So the bake translates rather than copies.
+
+    The earlier version read the page's base CLUT rows (pages1.read_page) and wrote
+    palette=k (the texture id, 0..32). The engine treats palette as a 0..4 variant
+    index and clamps slot=palette+1 to 5, so every texture id >= 5 piled its CLUT
+    into slot 5 and slots 1..4 stayed empty - the draw then fell back to a
+    NEIGHBOURING texture's colours, which is exactly "some surfaces correct, some
+    wrong". Reading D1's real pallet fixes the field and the source in one move.
     """
     import pages1
 
     body = bytearray()
     body += struct.pack("<i", 0)                     # total_cluts: a CLUT count
     count = 0
+
+    by_level = {}
     for new_set, level, old_set, _bytes, _size in page_list:
+        by_level.setdefault(level, []).append((new_set, old_set))
+
+    for level in by_level:
         blob = open(os.path.join(levels_dir, d1pool.source_file(level) + ".LEV"), "rb").read()
-        ofs, entries, _ti = pages1.level_pages(blob)
-        ent = {s: (o, z) for s, o, z in entries}
-        if old_set not in ent:
+        pal = pages1.pallet_lump(blob)
+        if not pal:
             continue
-        o, z = ent[old_set]
-        rows, _page = pages1.read_page(blob, o, z)
-        for k, row in enumerate(rows):
-            body += struct.pack("<4i", k, k, new_set, -1)   # palette, texnum, tpage, inline
-            body += row
+        pbody, psize = pal
+        _n, recs = pages1.parse_pallet(pbody, psize)
+        for r in recs:
+            key = (level, r["tpageindex"])
+            if key not in remap:
+                continue                        # a set this city's cars do not use
+            new_set = remap[key]
+            texnum = r["texnum"]
+            if key in tex_remap:
+                texnum = tex_remap[key].get(texnum, texnum)
+            body += struct.pack("<4i", r["palette"], texnum, new_set, -1)
+            body += r["row"]
             count += 1
+
     body += struct.pack("<i", -1)                    # the lone terminator
     struct.pack_into("<i", body, 0, count)           # total_cluts := rows written
     return bytes(body)
@@ -427,14 +446,14 @@ def build_page_plan(items, levels_dir):
     return remap, tex_remap, perms, specs
 
 
-def build_file(items, perms, specs, levels_dir):
+def build_file(items, perms, specs, levels_dir, remap, tex_remap):
     car = build_car_models_lump(items)
 
     segs = bytearray()
     tex = build_textureinfo(perms, specs)
     segs += struct.pack("<ii", LUMP_TEXTUREINFO, len(tex)) + tex
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
-    pal = build_pallet(perms + specs, levels_dir)
+    pal = build_pallet(perms + specs, levels_dir, remap, tex_remap)
     segs += struct.pack("<ii", LUMP_PALLET, len(pal)) + pal
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
 
@@ -609,7 +628,7 @@ def bake_one_city(args, levels_dir):
             if key in tex_remap:
                 p["id"] = tex_remap[key].get(p["id"], p["id"])
 
-    out = build_file(items, perms, specs, levels_dir)
+    out = build_file(items, perms, specs, levels_dir, remap, tex_remap)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
@@ -688,7 +707,7 @@ def main(argv=None):
             if key in tex_remap:
                 p["id"] = tex_remap[key].get(p["id"], p["id"])
 
-    blob = build_file(items, perms, specs, levels_dir)
+    blob = build_file(items, perms, specs, levels_dir, remap, tex_remap)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
