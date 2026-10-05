@@ -275,7 +275,8 @@ override `LEVELS\<CarDataFolder>\CARMODEL_<n>.COS` (`LoadCustomCarCosmetics`,
 
 ## 9. Roadmap
 
-The approved phases. Phases 1–3 are done.
+The approved phases. **Phases 1–4 are done, and Phase 5's offline half is done;
+the engine wiring and the test rig are NOT started.**
 
 1. **Stand up the submodule + this doc.** — *done.* The module builds, registers
    its metadata and does nothing else.
@@ -287,13 +288,31 @@ The approved phases. Phases 1–3 are done.
 3. **Scale & cosmetics** (`tools/scalemodels.py`). — *done, §8.* The bake scale
    is 2048/3000 (D1 cell 3000, D2 cell 2048), verified against the measured
    model sizes.
-4. **Build the pool** (`tools/d1pool.py`). Extract every traffic shape from every
-   level, dedupe into one catalogue, emit `.obj` + `geom.json` + `pool.json`.
-5. **Bake to a synthetic fifth city** (`tools/bake.py`) and extend the engine to a
-   fifth source (the §6 tables/limits, in one commit with `exports.def`).
+4. **Build the pool** (`tools/d1pool.py`). — *done.* 43 unique clean shapes from
+   43 sources across the seven car-bearing levels (the levels share no shapes),
+   emitted as `.obj` + `geom.json` + `pool.json`, with a preview sheet
+   (`--render`) and a non-car outlier (CREDITS model 0) dropped.
+5. **Bake to a synthetic fifth city** — *offline half done* (`tools/bake.py`):
+   emits a blob in the exact shape the cross-city import reads (`models.c`
+   `LoadCarImport`), flat F3/F4 polys so it is geometry-only, verified by
+   re-reading it with an independent reader. **Still to do:** the engine wiring —
+   a fifth row in `LevelNames`/`LevelFiles`/`CosmeticFiles`, `gCarImports[4]` to
+   `[5]`, `CHK_CITY_COUNT_LIMIT`/`CHK_CAR_CITY_COUNT`, the `carTpages`/
+   `specTpages` arrays, and every frozen `[4]` in `exports.def` — all in ONE
+   commit (§6).
 6. **Category it separately** — its own roster row so the pool is grouped apart
    from the four cities — plus a test rig on top of carhacks' checks
    (`crosscheck.py`, `hostdiff.py`, the identity line) and headless acceptance.
+   **Not started.**
+
+### Picking this up in a fresh session
+
+1. The superproject gitlink was left one commit behind this submodule's HEAD at
+   hand-off (`fix-car-switch-release`) — bump it first.
+2. Phase 5's engine wiring as a single commit (§6 lists every site, and
+   `exports.def` must move with it), then `premake5.exe vs2019` and a build.
+3. Phase 6: make a pool item selectable through carhacks, add the roster row,
+   and drive it through the existing harnesses.
 
 ---
 
