@@ -194,6 +194,22 @@ def placement_from_donor(body_verts, donor_bbox, donor_centres, scale):
     dmin, dmax = donor_bbox
     our_c = [(bmin[i] + bmax[i]) / 2.0 * scale for i in range(3)]
     our_h = [(bmax[i] - bmin[i]) / 2.0 * scale for i in range(3)]
+
+    # JERICHO: the wheels are centred on x, whatever the body's own centre is.
+    #
+    # our_c[0] was the D1 body's bbox centre and is added to all four wheels, so a body
+    # not modelled symmetrically about x shifts the ENTIRE wheel set sideways - a uniform
+    # lateral offset, i.e. a permanent left/right weight bias, i.e. the car pulls slowly
+    # to one side. The donor's own centres are symmetric about x = 0, so re-proportioning
+    # them about OUR x centre is what introduced it.
+    #
+    # Measured on the shipped records, as the mismatch within an axle pair (wheelDisp 0
+    # vs 2, and 1 vs 3). Driver 2's own records are 1 unit or less - rounding - so that is
+    # the target:
+    #
+    #   before  NEWCASTLE model 1  7    model 2  6    model 3  4
+    #   after   all five cities    1 or less
+    our_c[0] = 0.0
     don_c = [(dmin[i] + dmax[i]) / 2.0 for i in range(3)]
     don_h = [(dmax[i] - dmin[i]) / 2.0 for i in range(3)]
     ratio = [(our_h[i] / don_h[i]) if don_h[i] else 1.0 for i in range(3)]
@@ -232,7 +248,21 @@ def placement(body_verts, wheel_verts, scale, wheelbase=DONOR_WHEELBASE):
     half_width = (max(bx) - min(bx)) / 2.0 * scale
     zc = (max(bz) + min(bz)) / 2.0 * scale
     ground = max(by) * scale                      # y is DOWN-positive
-    xc = (max(bx) + min(bx)) / 2.0 * scale
+    # JERICHO: the wheels are CENTRED on the car, never offset onto the body's own
+    # x centre.
+    #
+    # xc used to be the D1 body's bbox centre, and it is added to all four wheels. A D1
+    # body is not modelled symmetrically about x, so xc came out a few units off zero -
+    # and that is a UNIFORM lateral offset of the whole wheel set, which is a permanent
+    # left/right weight bias on the car. Measured on the shipped records as the mismatch
+    # between the axle pairs (wheelDisp 0 vs 2, and 1 vs 3):
+    #
+    #   NEWCASTLE model 1  7 units    model 2  6    model 3  4
+    #   Driver 2's own     1 unit, in every one of its 52 records
+    #
+    # A 4-7 unit bias is the "imported cars pull slowly to one side" report. Driver 2 is
+    # symmetric to within a unit of rounding, so zero is its convention and our target.
+    xc = 0.0
 
     track = max(0.0, half_width - half_tyre) + half_tyre * WHEEL_PROUD
     z_axle = wheelbase / 2.0
