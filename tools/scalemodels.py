@@ -71,7 +71,7 @@ def d2_model_stats(blob, body, model_index):
                 dims=(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)))
 
 
-def d1_rows(levels_dir):
+def d1_rows(levels_dir, variants=("clean",)):
     rows = []
     for path in sorted(glob.glob(os.path.join(levels_dir, "*.LEV"))):
         name = os.path.basename(path)[:-4]
@@ -79,13 +79,17 @@ def d1_rows(levels_dir):
             blob = f.read()
         if lev1.car_models_lump(blob) is None:
             continue
-        for m, variants in lev1.car_models(blob):
-            model = variants["clean"]
-            bb = model.bbox()
-            if not bb:
-                continue
-            rows.append((name, m, (bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]),
-                         model.bounding_sphere))
+        for m, models in lev1.car_models(blob):
+            for variant in variants:
+                model = models.get(variant)
+                if model is None:
+                    continue
+                bb = model.bbox()
+                if not bb:
+                    continue
+                rows.append(("%s/%s" % (name, variant), m,
+                             (bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]),
+                             model.bounding_sphere))
     return rows
 
 
@@ -115,7 +119,7 @@ def summarize(label, rows):
     ls = [r[2][2] for r in rows]
     bs = [r[3] for r in rows]
     print("%s: %d models over %d levels" % (label, len(rows),
-                                            len(set(r[0] for r in rows))))
+                                            len(set(r[0].split("/")[0] for r in rows))))
     print("   width  %4d..%-4d  (median %d)" % (min(ws), max(ws), sorted(ws)[len(ws)//2]))
     print("   height %4d..%-4d  (median %d)" % (min(hs), max(hs), sorted(hs)[len(hs)//2]))
     print("   length %4d..%-4d  (median %d)" % (min(ls), max(ls), sorted(ls)[len(ls)//2]))
@@ -131,9 +135,11 @@ def main(argv=None):
     ap.add_argument("--d1", required=True, help="a Driver 1 LEVELS directory")
     ap.add_argument("--d2", required=True, help="a Driver 2 LEVELS directory")
     ap.add_argument("--detail", action="store_true", help="print every row")
+    ap.add_argument("--variants", default="clean",
+                    help="D1 variants to include (clean,damaged,low); default clean")
     args = ap.parse_args(argv)
 
-    d1 = d1_rows(args.d1)
+    d1 = d1_rows(args.d1, tuple(args.variants.split(",")))
     d2 = d2_rows(args.d2)
     if args.detail:
         for label, rows in (("D1", d1), ("D2", d2)):
