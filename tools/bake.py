@@ -79,7 +79,27 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
     verts = [(int(round(x * scale)), int(round(y * scale)), int(round(z * scale)))
              for x, y, z in vertices]
     nv = len(verts)
-    fnorm = [tuple(n) for n in (face_normals or [])]
+
+    # Drop flat untextured polys that sit entirely below the ground plane (max y < 0).
+    # Driver 1 models carry these as under-arch fillers inside the wheel wells; the
+    # engine draws them OPAQUE (flat shading - a car body has no per-poly
+    # transparency), so they show as grey squares in the wheel arches. Dropping them
+    # leaves the arch open, which is what the wheel (a separate model, drawn in the
+    # same place) wants. The textured underside (set != 0) is kept: only the flat
+    # fillers are the problem, and only when the WHOLE poly is below the floor.
+    kept_polys = []
+    kept_fnorm = []
+    for k, p in enumerate(polys):
+        if p.get("set", 0) == 0:
+            ys = [vertices[i][1] for i in p["v"]]
+            if max(ys) < 0:
+                continue
+        kept_polys.append(p)
+        if face_normals and k < len(face_normals):
+            kept_fnorm.append(face_normals[k])
+    polys = kept_polys
+
+    fnorm = [tuple(n) for n in kept_fnorm]
     pnorm = [tuple(n) for n in (point_normals or [])]
     npol = len(polys)
 
