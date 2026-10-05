@@ -190,6 +190,90 @@ def show_pages(blob, path):
                                    [(p[0], p[1], 0) for p in ti["speclist"]]])
 
 
+def clut_rgb(row):
+    """32 bytes -> 16 (r, g, b) 8-bit tuples. PSX RGB555: R in bits 0-4,
+    G in 5-9, B in 10-14, bit 15 = STP."""
+    out = []
+    for i in range(16):
+        v = struct.unpack_from("<H", row, i * 2)[0]
+        out.append((((v >> 0) & 0x1F) << 3,
+                    ((v >> 5) & 0x1F) << 3,
+                    ((v >> 10) & 0x1F) << 3))
+    return out
+
+
+def parse_pallet(body, size=None):
+    """Parse a Driver 1 LUMP_PALLET (25) body.
+
+    D1's palette record is THREE ints plus the CLUT row inline:
+
+        [int total_cluts]           the RECORD count (FRISCO: 68; 4 + 68*44 == size)
+        total_cluts records of 44 bytes:
+            int palette       colour-variety index (traffic cars use 0..5)
+            int texnum        texture number within the page
+            int tpageindex    the texture set (page)
+            32 bytes          16 RGB555 entries
+
+    This is NOT Driver 2's shape. D2's record is four ints, the fourth a
+    clut_number that either selects the inline form (-1) or references an
+    earlier CLUT (cars.c:2058), and D2's lump ends on a lone -1. D1 has no
+    reference form, so every row is inline and the header count is exact -
+    there is no room for a terminator at all.
+
+    Measured on FRISCO: tpageindex takes only the two car pages {67, 68} and
+    palette only {0, 1, 2, 3}, which is what pins the field order.
+    """
+    if size is None:
+        size = len(body)
+    if size < 4:
+        return 0, []
+    total_cluts = struct.unpack_from("<i", body, 0)[0]
+    recs = []
+    for k in range(total_cluts):
+        o = 4 + k * 44
+        if o + 44 > size:
+            break
+        palette, texnum, tpageindex = struct.unpack_from("<3i", body, o)
+        recs.append({"palette": palette, "texnum": texnum,
+                     "tpageindex": tpageindex,
+                     "row": body[o + 12:o + 44]})
+    return total_cluts, recs
+
+
+def pallet_lump(blob):
+    """(body, size) of LUMP_PALLET, searched in both DATA containers."""
+    hdr = lev1.read_header(blob)
+    for coff, etype in ((hdr["loadtime_offset"], lev1.LUMP_LOADTIME_DATA),
+                        (hdr["inmem_offset"], lev1.LUMP_INMEMORY_DATA)):
+        got = lev1.find_lump(blob, coff, etype, lev1.LUMP_PALLET)
+        if got:
+            off, size = got
+            return blob[off:off + size], size
+    return None
+
+
+def show_pallet(blob, path):
+    got = pallet_lump(blob)
+    if not got:
+        print("%s: no LUMP_PALLET" % path)
+        return
+    body, size = got
+    total, recs = parse_pallet(body, size)
+    buckets = {}
+    for r in recs:
+        buckets.setdefault(r["tpageindex"], []).append(r["palette"])
+    print("%s: LUMP_PALLET %d bytes, total_cluts %d, %d records of 44 bytes (exact: %s)"
+          % (os.path.basename(path), size, total, len(recs),
+             4 + total * 44 == size))
+    for s in sorted(buckets):
+        print("  set %3d: %d rows, palettes %s"
+              % (s, len(buckets[s]), sorted(set(buckets[s]))))
+    if recs:
+        print("  first row (set %d, palette %d, texnum %d): %s"
+              % (recs[0]["tpageindex"], recs[0]["palette"], recs[0]["texnum"],
+                 clut_rgb(recs[0]["row"])[:4]))
+
+
 def _selftest():
     import random
     rng = random.Random(1234)
@@ -245,11 +329,16 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--info", action="store_true",
                     help="print the level's permanent page list")
+    ap.add_argument("--pallet", action="store_true",
+                    help="print the level's LUMP_PALLET records")
     args = ap.parse_args(argv)
     if args.selftest:
         return _selftest()
     if args.lev and args.info:
         show_pages(open(args.lev, "rb").read(), args.lev)
+        return 0
+    if args.lev and args.pallet:
+        show_pallet(open(args.lev, "rb").read(), args.lev)
         return 0
     ap.print_help()
     return 0
