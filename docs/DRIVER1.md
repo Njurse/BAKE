@@ -187,11 +187,14 @@ items belong.
   at 13 models, 0..12 (`FORMATS.md` §3). Driver 1's traffic IDs run past 200. So
   the pool is an **archive** you select a few items from into the ~12 resident
   slots — it can never be "all D1 traffic at once".
-- **The "compressed" claim.** `FORMATS.md` §8 says car-model polys are compressed
-  and a `PolySizes` walk *stalls from polygon 5* — yet the engine walks them with
-  exactly `PolySizes[ptype & 0x1f]` (`cars.c:1792`). Both cannot be literally
-  true. **Resolve before the bake** by round-tripping one real D2 model through
-  our reader and the engine's walk (Phase 2).
+- **The "compressed" claim — RESOLVED (Phase 2).** An earlier note in
+  `FORMATS.md` said car-model polys are compressed and a `PolySizes` walk *stalls
+  from polygon 5*. Measured: **false for car models.** Every CHICAGO model walks
+  its full `num_polys` with 0 zero-steps using only types 20 (FT3) and 22 (GT3),
+  exactly as `cars.c:1792` and `texture.c` (`CollectModelSets`) do it — and D1's
+  car models walk the same way (all 111 variants, 0 errors). `FORMATS.md` has
+  been corrected. The only real caveat is to **bound the walk to `num_polys`**;
+  walking past it is what produces a zero-size step, not compression.
 - **Textures.** A D1 poly carries a raw `page` byte; an engine poly carries
   `texture_set`, an *index* resolved per level through `texture_pages[128]` /
   `texture_cluts[128][32]` (`FORMATS.md` §2). A geometry-only blockout can
@@ -202,27 +205,65 @@ items belong.
 
 ---
 
-## 8. Roadmap
+## 8. Scale and cosmetics (Phase 3)
 
-The approved phases. Only Phase 1 is done.
+**Measured** by `tools/scalemodels.py` on this install (both games keep a car's
+`MODEL` at `car_lump_body + 164 + offset`):
 
-1. **Stand up the submodule + this doc.** — *done.* The module builds, registers
-   its metadata and does nothing else.
-2. **D1 level reader + car-model extractor** (`tools/lev1.py`). Walk
-   `LEVELS/*.LEV`, decode the car-models and model-names lumps into a neutral
-   model; reconcile the compression question (§7) against a real D2 model.
-3. **Build the pool** (`tools/d1pool.py`). Extract every `CIVCAR*` shape from all
-   eight levels, dedupe into one catalogue, emit `.obj` + `geom.json` +
-   `pool.json`.
-4. **Bake to a synthetic fifth city** (`tools/bake.py`) and extend the engine to a
-   fifth source (the §6 tables/limits, in one commit with `exports.def`).
-5. **Category it separately** — its own roster row so the pool is grouped apart
-   from the four cities — plus headless acceptance (`crosscheck.py`,
-   `hostdiff.py`).
+| | models | width (median) | height | length | `bounding_sphere` |
+|---|---|---|---|---|---|
+| Driver 1 | 44 clean (111 with all variants), 7 levels | 400 | 254 | 1104 | 30..644 |
+| Driver 2 | 39, 4 cities | 284 | 176 | 752 | 223..805 |
+
+D1/D2 median length ratio **1.468**, width ratio **1.408**.
+
+**The factor is principled, not a fudge.** A Driver 1 level cell is **3000**
+world units; a Driver 2 cell is **2048** — read per city from that city's
+`LUMP_MAP` (`map.c:76`): CHICAGO / HAVANA / RIO / VEGAS all report
+`cell_size = 2048`. The same physical car is therefore modelled `3000/2048`
+larger in Driver 1's units, and scaling D1's medians by the reciprocal lands on
+Driver 2's:
+
+```
+bake scale = 2048 / 3000 = 0.68267
+  width  400 * 0.68267 = 273   (D2 284)
+  height 254 * 0.68267 = 173   (D2 176)
+  length 1104 * 0.68267 = 754  (D2 752)
+```
+
+**Decision.** The bake multiplies every D1 model vertex by `2048/3000` so a D1
+shape lands in Driver 2's car size band. It is a named constant with the table
+above behind it, and it travels in the pool record (`scale`) so an item can be
+re-tuned without touching code. The damaged/low variants land in the same band
+and use the same factor.
 
 ---
 
-## 9. How to re-measure (read-only)
+## 9. Roadmap
+
+The approved phases. Phases 1–3 are done.
+
+1. **Stand up the submodule + this doc.** — *done.* The module builds, registers
+   its metadata and does nothing else.
+2. **D1 level reader + car-model extractor** (`tools/lev1.py`). — *done.* Walks
+   `LEVELS/*.LEV`, decodes every car-model variant into a neutral model, and its
+   `--verify` reports 0 problems over all eight levels. The plan's "assert the
+   CIVCAR* list" was retired: this D1 build names only level models, so a pool
+   item's identity is (level, model index, variant).
+3. **Scale & cosmetics** (`tools/scalemodels.py`). — *done, §8.* The bake scale
+   is 2048/3000 (D1 cell 3000, D2 cell 2048), verified against the measured
+   model sizes.
+4. **Build the pool** (`tools/d1pool.py`). Extract every traffic shape from every
+   level, dedupe into one catalogue, emit `.obj` + `geom.json` + `pool.json`.
+5. **Bake to a synthetic fifth city** (`tools/bake.py`) and extend the engine to a
+   fifth source (the §6 tables/limits, in one commit with `exports.def`).
+6. **Category it separately** — its own roster row so the pool is grouped apart
+   from the four cities — plus a test rig on top of carhacks' checks
+   (`crosscheck.py`, `hostdiff.py`, the identity line) and headless acceptance.
+
+---
+
+## 10. How to re-measure (read-only)
 
 ```python
 import struct
@@ -239,7 +280,7 @@ Run from `src_rebuild/bin/Release_dev/DRIVER` (gitignored, local-only — §1).
 
 ---
 
-## 10. Sources
+## 11. Sources
 
 - **Local bytes:** `src_rebuild/bin/Release_dev/DRIVER/**` (this install).
 - **Engine:** `Game/C/{models,cars,texture,system,cosmetic,mission,main}.c`,
