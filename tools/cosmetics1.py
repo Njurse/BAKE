@@ -254,8 +254,10 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
         raise SystemExit("%s ships %d cars but only %d D2-compliant models exist"
                          % (city, len(filled), len(bake.D2_COMPLIANT_MODELS)))
     remapped = [(m, None, None, None, None) for m in range(scalemodels.MAX_CAR_MODELS)]
+    SLOT_MAP[city] = []
     for (src_m, rec, di, r, t), dst_m in zip(filled, bake.D2_COMPLIANT_MODELS):
         remapped[dst_m] = (dst_m, rec, di, r, t)
+        SLOT_MAP[city].append([src_m, dst_m])
     for gap in bake.D2_GAP_MODELS:
         if remapped[gap][1] is not None:
             raise SystemExit("%s would put a record on model %d, which no Driver 2 "
@@ -470,6 +472,14 @@ BORROWED_FIELDS = ("headLight", "frontInd", "backInd", "brakeLight", "revLight",
                    "twistRateX", "twistRateY", "twistRateZ", "mass")
 
 
+# What the transplant did to each city, as [(the slot the car had in the ORIGINAL
+# Driver 1 level, the model the engine will find it on)]. Filled by
+# records_for_city and published in the sidecar, so a launcher can be given the
+# number a person knows ("Newcastle slot 1") and translate it, instead of every
+# caller re-deriving the mapping and one of them getting it wrong.
+SLOT_MAP = {}
+
+
 def write_city_sidecar(out_dir, city, got, donor_city, fallback):
     """A per-city JSON saying, per slot, what is measured and what is borrowed.
 
@@ -481,6 +491,9 @@ def write_city_sidecar(out_dir, city, got, donor_city, fallback):
            "fallback": "Driver 2 %s model 0" % donor_city,
            "measured_fields": list(MEASURED_FIELDS),
            "borrowed_fields": list(BORROWED_FIELDS),
+           "slot_map": SLOT_MAP.get(city, []),
+           # ^ [(slot in the original Driver 1 level, model the engine finds it
+           #    on)] - the translation a launcher needs to accept an original slot.
            "slots": []}
     by_slot = {slot: (rec, di, wb, track) for slot, rec, di, wb, track in got}
     for slot in range(13):
