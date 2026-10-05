@@ -11,6 +11,7 @@ the repo root. `tools/out/` is ignored.
 | `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`; `--render` a wireframe sheet |
 | `bake.py` | bakes pool items into an engine-shaped car-data blob (`out/bake/D1POOL.LEV`) |
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
+| `textured.py` | textured 3/4 renders from the level's own pages -> `out/textured_pool.png` |
 
 Typical run (both level directories are gitignored local data):
 

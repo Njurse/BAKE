@@ -233,9 +233,10 @@ class Model(object):
 
 def _uvs(rec, kind, n):
     """UV pairs. A GT record carries per-vertex normals before the UVs, so its
-    UVs start at byte 12; an FT record's start at byte 8."""
+    UVs start at byte 12; an FT record's start at byte 8. UV_INFO is two
+    UNSIGNED bytes (u, v) in 0..255 into the 256x256 page."""
     off = 12 if kind in NORMALLED else 8
-    return tuple(struct.unpack_from("<bb", rec, off + i * 2) for i in range(n))
+    return tuple(struct.unpack_from("<BB", rec, off + i * 2) for i in range(n))
 
 
 def decode_polys(blob, base, n_polys, num_vertices):
