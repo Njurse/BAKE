@@ -44,6 +44,21 @@ LUMP_TEXTUREINFO = 34
 LUMP_CAR_DATA = 35          # the DATA1 container's own type
 LUMP_DESC = 37
 MAX_CAR_MODELS = 13
+
+# Driver 2's COMPLIANT model numbers, in the order a transplant fills them: the
+# four its frontend actually offers first (carNumLookup, FEmain.c:639, maps
+# select-slots 0..3 onto models 1,2,3,4), then the extras its own cities ship.
+#
+# MEASURED: the four Driver 2 cities hold models 0,1,2,3,4,8,9,10,11,12 and NOTHING
+# else (CHICAGO ships 9, the rest 10). Model 0 is the police car, at a select slot
+# the stock frontend keeps locked, so a transplant leaves it alone.
+D2_COMPLIANT_MODELS = (1, 2, 3, 4, 8, 9, 10, 11, 12)
+
+# Models NO Driver 2 city holds data for. A car written at one of these resolves
+# nothing on the engine side and the import silently falls back. Driver 1's own
+# cars sit on exactly these numbers (5, 6 and 7 carry 17 of the pool's 43 shapes),
+# which is the whole reason the bake remaps instead of writing at D1's numbers.
+D2_GAP_MODELS = (5, 6, 7)
 DATA1_OFF = 2048            # as in the real level files
 MODEL_HDR = 36              # sizeof(MODEL): 9 fields, 36 bytes
 FLAT_COLOR = (0x7F, 0x7F, 0x7F)
@@ -427,11 +442,31 @@ def bake_one_city(args, levels_dir):
         g = d1pool.geom_record(m, [(args.city, m)], model)
         by_slot[m] = {"pool_index": m, "geom": g, "scale": g["scale"]}
 
+    # REMAP onto Driver 2's compliant models - do not write at Driver 1's numbers.
+    # Driver 1's cars sit on models 0,1,2,5,6,7,8(,9), and 5/6/7 are exactly the
+    # three models NO Driver 2 city holds data for: a car written there resolves
+    # nothing, the import silently falls back, and the player keeps their own car.
+    # So take the city's cars in their own ascending order and lay them on D2's
+    # compliant models - the four its frontend offers first, then the extras.
+    src_slots = sorted(by_slot)
+    if len(src_slots) > len(D2_COMPLIANT_MODELS):
+        raise SystemExit("%s ships %d cars but only %d D2-compliant models exist"
+                         % (args.city, len(src_slots), len(D2_COMPLIANT_MODELS)))
+
     empty = {"pool_index": 0, "geom": None, "scale": d1pool.SCALE}
-    items = []
-    for s in range(MAX_CAR_MODELS):
-        it = by_slot.get(s)
-        items.append(it if it is not None else dict(empty, pool_index=s))
+    items = [dict(empty, pool_index=s) for s in range(MAX_CAR_MODELS)]
+    for d1_slot, d2_slot in zip(src_slots, D2_COMPLIANT_MODELS):
+        it = dict(by_slot[d1_slot])
+        it["pool_index"] = d2_slot
+        it["d1_slot"] = d1_slot          # provenance: where the car really came from
+        items[d2_slot] = it
+
+    # The rule, asserted rather than assumed.
+    for gap in D2_GAP_MODELS:
+        if items[gap]["geom"] is not None:
+            raise SystemExit("%s would write model %d, which no Driver 2 city holds "
+                             "data for - the engine could never address it"
+                             % (args.city, gap))
 
     remap, perms, specs = build_page_plan(items, levels_dir)
     for it in items:
