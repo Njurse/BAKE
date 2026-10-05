@@ -154,10 +154,19 @@ def build_damaged_record(vertices, scale, clean_size):
 
 
 def build_car_models_lump(items):
-    """items: list of {'geom': <geom.json record>, 'scale': k}."""
-    blocks = []          # (clean_bytes, dam_bytes)
+    """items: list of {'geom': <geom.json record> or None, 'scale': k}.
+
+    A None geom is a slot the city has no car in. It still occupies its position -
+    the .LCF's record for that slot has to line up with it - and gets -1 offsets,
+    which is what an empty slot looks like in Driver 2's own files (and what
+    lev1.decode_model tests for).
+    """
+    blocks = []          # (clean_bytes, dam_bytes) or None
     for it in items:
         g = it["geom"]
+        if g is None:
+            blocks.append(None)
+            continue
         clean = build_model_record(g["vertices"], g["polys"],
                                    g.get("face_normals"), g.get("point_normals"),
                                    it["scale"])
@@ -171,7 +180,11 @@ def build_car_models_lump(items):
     body += b"\x00" * (164 - len(body))                       # pad to +164
 
     offsets = []
-    for clean, dam in blocks:
+    for blk in blocks:
+        if blk is None:
+            offsets.append((-1, -1, -1))
+            continue
+        clean, dam = blk
         clean_ofs = len(body) - 164
         body += clean
         dam_ofs = len(body) - 164
@@ -266,6 +279,8 @@ def build_page_plan(items, levels_dir):
     listed = {}
     for it in items:
         g = it["geom"]
+        if g is None:               # a slot the city has no car in
+            continue
         level = g["sources"][0][0]
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
@@ -386,10 +401,81 @@ def verify(blob):
     return None, {"models": n, "gt": ngt, "hemisphere": same}
 
 
+def bake_one_city(args, levels_dir):
+    """Bake ONE Driver 1 city's own car models, in its own SLOT order.
+
+    An .LCF describes a city's thirteen model slots, so the .LEV beside it must
+    carry that city's cars in the SAME slots - a deduped pool would put model 0's
+    description on whatever car happened to sort first, and every car in the city
+    would then get the wrong colours, wheels and collision box. Slots the city has
+    no car in stay empty (-1 offsets), because the .LCF has a record for them too.
+
+    Writes out/d1cities/<CITY>.LEV.
+    """
+    import lev1
+    import d1pool
+
+    blob = open(os.path.join(levels_dir, args.city + ".LEV"), "rb").read()
+
+    by_slot = {}
+    for m, variants in lev1.car_models(blob):
+        model = variants.get("clean")
+        if model is None and variants:
+            model = next(iter(variants.values()))
+        if model is None or not model.vertices:
+            continue
+        g = d1pool.geom_record(m, [(args.city, m)], model)
+        by_slot[m] = {"pool_index": m, "geom": g, "scale": g["scale"]}
+
+    empty = {"pool_index": 0, "geom": None, "scale": d1pool.SCALE}
+    items = []
+    for s in range(MAX_CAR_MODELS):
+        it = by_slot.get(s)
+        items.append(it if it is not None else dict(empty, pool_index=s))
+
+    remap, perms, specs = build_page_plan(items, levels_dir)
+    for it in items:
+        if it["geom"] is None:
+            continue
+        for p in it["geom"]["polys"]:
+            key = (args.city, p["set"])
+            if key in remap:
+                p["set"] = remap[key]
+
+    out = build_file(items, perms, specs, levels_dir)
+
+    if not os.path.isdir(args.out):
+        os.makedirs(args.out)
+    name = args.name if args.name != "D1POOL.LEV" else args.city + ".LEV"
+    path = os.path.join(args.out, name)
+    with open(path, "wb") as f:
+        f.write(out)
+
+    filled = [it for it in items if it["geom"]]
+    print("baked %s: %d of %d slots have a car -> %s (%d bytes)"
+          % (args.city, len(filled), MAX_CAR_MODELS, path, len(out)))
+    for n, it in enumerate(items):
+        g = it["geom"]
+        if g is None:
+            print("   slot %2d: empty" % n)
+            continue
+        print("   slot %2d: %d verts, %d tris, normals %s"
+              % (n, g["verts"], g["tris"], g.get("normals_source")))
+    print("   texture sets: %d permanent + %d special" % (len(perms), len(specs)))
+    problem, stats = verify(out)
+    if stats:
+        print("   normals: %d GT polys, table faces the geometry in %.1f%%"
+              % (stats["gt"], 100.0 * stats["hemisphere"] / max(stats["gt"], 1)))
+    print("   self-check: %s" % (problem if problem else "the blob re-reads cleanly"))
+    return 1 if problem else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--pool", required=True, help="a pool.json from d1pool.py")
+    ap.add_argument("--pool", default=os.path.join(os.path.dirname(
+                        os.path.abspath(__file__)), "out", "pool.json"),
+                    help="a pool.json from d1pool.py (not needed with --city)")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(
                         os.path.abspath(__file__)), "out", "bake"),
                     help="output directory (gitignored)")
@@ -398,8 +484,14 @@ def main(argv=None):
     ap.add_argument("--name", default="D1POOL.LEV", help="output file name")
     ap.add_argument("--levels", default=LEVELS_DIR,
                     help="directory of the source DRIVER/LEVELS/*.LEV files")
+    ap.add_argument("--city", default=None,
+                    help="bake ONE Driver 1 city's own car models, in SLOT order - "
+                         "what that city's .LCF describes (see SPOOFED_CITIES.md)")
     args = ap.parse_args(argv)
     levels_dir = args.levels
+
+    if args.city:
+        return bake_one_city(args, levels_dir)
 
     index = json.load(open(args.pool))
     keep = index["items"][:args.first]
