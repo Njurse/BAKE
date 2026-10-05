@@ -173,13 +173,88 @@ def texture_exports(levels_dir, out_root, scale=4):
     return index
 
 
+def verify(levels_dir, out_root):
+    """Assert what this phase promised, and return a list of problems.
+
+    Every car-bearing level must yield its wheel models with real geometry, and
+    every exported crop must be a real image whose size is its detail rect times
+    the scale.
+
+    A wheel may be FLAT in one axis - TRAIN's HUBCAP is a plate, which is right for
+    a hubcap decal - so the geometry test is that at most one extent is empty, not
+    that none is.
+    """
+    from PIL import Image
+
+    problems = []
+    wi = os.path.join(out_root, "wheels.json")
+    ti = os.path.join(out_root, "wheel_textures.json")
+    if not os.path.exists(wi) or not os.path.exists(ti):
+        return ["no wheels.json / wheel_textures.json under %s" % out_root]
+    wheels = json.load(open(wi))["wheels"]
+    textures = json.load(open(ti))["textures"]
+
+    car_levels = set()
+    for fn in sorted(os.listdir(levels_dir)):
+        if not fn.upper().endswith(".LEV"):
+            continue
+        blob = open(os.path.join(levels_dir, fn), "rb").read()
+        if lev1.car_models_lump(blob) is not None:
+            car_levels.add(fn[:-4])
+
+    by_level = {}
+    for w in wheels:
+        by_level.setdefault(w["level"], []).append(w)
+    for lv in sorted(car_levels):
+        got = by_level.get(lv)
+        if not got:
+            problems.append("%s: no wheel models exported" % lv)
+            continue
+        for w in got:
+            b = w["bbox_raw"]
+            ext = [b[3] - b[0], b[4] - b[1], b[5] - b[2]]
+            if w["verts"] <= 0 or w["tris"] <= 0:
+                problems.append("%s/%s: empty model" % (lv, w["name"]))
+            elif sum(1 for e in ext if e > 0) < 2:
+                problems.append("%s/%s: degenerate bbox %s" % (lv, w["name"], ext))
+
+    tby = {}
+    for t in textures:
+        tby.setdefault(t["level"], []).append(t)
+    for lv in sorted(car_levels):
+        if not tby.get(lv):
+            problems.append("%s: no wheel textures exported" % lv)
+        for t in tby.get(lv, []):
+            p = os.path.join(out_root, t["png"])
+            if not os.path.exists(p):
+                problems.append("%s/%s: missing %s" % (lv, t["name"], t["png"]))
+                continue
+            im = Image.open(p)
+            want = (t["rect"][2] * t["scale"], t["rect"][3] * t["scale"])
+            px = list(im.getdata())
+            if im.size != want:
+                problems.append("%s/%s: %s != rect %s" % (lv, t["name"], im.size, want))
+            if not px or not any(c != (0, 0, 0) for c in px):
+                problems.append("%s/%s: crop is blank" % (lv, t["name"]))
+    print("  %d levels, %d wheel models, %d texture crops" % (len(car_levels), len(wheels), len(textures)))
+    print("VERDICT: %s" % ("clean" if not problems else "%d problems" % len(problems)))
+    for p in problems:
+        print("   - %s" % p)
+    return problems
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--levels",
                     default="src_rebuild/bin/Release_dev/DRIVER/LEVELS")
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
+    ap.add_argument("--verify", action="store_true",
+                    help="check what has been exported instead of writing it")
     args = ap.parse_args(argv)
+
+    if args.verify:
+        return 1 if verify(args.levels, args.out) else 0
 
     index = export(args.levels, args.out)
     tex = texture_exports(args.levels, args.out)
