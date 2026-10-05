@@ -191,6 +191,20 @@ MODEL_FMT = "<hhhBBhhhh"    # shape_flags, flags2, instance_number, tri_verts,
                             # zBias, bounding_sphere, num_point_normals,
                             # num_vertices, num_polys
 MODEL_OFFSETS_FMT = "<iiiii"  # vertices, poly_block, normals, point_normals,
+
+# The stored normal tables hold the INWARD direction: cross(u, v), which points
+# into the surface for both games' winding. Measured directly - the roof polys of
+# every FRISCO model carry y = +1 (4096), and y is DOWN-positive, so a stored
+# roof normal points down into the car. Negating gives the outward vector the
+# renderers shade with; there is nothing to assume here, the sign is measured.
+NORMAL_SIGN = -1
+
+
+def _sign(x, y, z):
+    """A stored normal as an outward unit vector."""
+    x, y, z = NORMAL_SIGN * x, NORMAL_SIGN * y, NORMAL_SIGN * z
+    L = (x * x + y * y + z * z) ** 0.5 or 1.0
+    return (x / L, y / L, z / L)
                               # collision_block - byte offsets from the MODEL
 
 
@@ -225,23 +239,28 @@ class Model(object):
         self.errors = errors          # list of (index, reason)
 
     def poly_normals(self, poly):
-        """The three normals for a texturing poly's vertices.
+        """The three normals for a texturing poly's vertices, as OUTWARD vectors.
 
         Preferred source is the model's own per-vertex table, which is what the
         GT record's normal indices index (cars.c:650). Many models ship no such
         table (num_point_normals == 0) and then there is nothing for the indices
         to mean, so fall back to the poly's own geometric normal.
+
+        The stored normals are negated before being returned - see NORMAL_SIGN.
         """
         if self.normals and poly.n and all(i < len(self.normals) for i in poly.n):
-            return [self.normals[i] for i in poly.n]
+            return [_sign(*self.normals[i]) for i in poly.n]
         return [self._geo_normal(poly)] * len(poly.v)
 
     def _geo_normal(self, poly):
+        """The poly's OUTWARD geometric normal. cross(u, v) points inward for
+        both games' winding, so the operands are swapped (the convention
+        preview.py already measured and uses)."""
         a, b, c = (self.vertices[i] for i in poly.v[:3])
         u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
         v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
-        n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
-             u[0] * v[1] - u[1] * v[0])
+        n = (v[1] * u[2] - v[2] * u[1], v[2] * u[0] - v[0] * u[2],
+             v[0] * u[1] - v[1] * u[0])
         L = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) ** 0.5 or 1.0
         return (n[0] / L, n[1] / L, n[2] / L)
 

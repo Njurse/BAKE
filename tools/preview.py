@@ -88,12 +88,20 @@ def _fill(pix, w, h, pts, rgb):
 
 
 def render(items, path, cols, cell=128, pad=10):
-    """items: list of (label, vertices, faces) with faces = list of index tuples."""
+    """items: list of (label, vertices, faces) with faces = list of index tuples.
+
+    An item may carry a 4th element, one OUTWARD normal per face. When it does,
+    that is what the shading uses - the model's own normals, so a curved panel
+    reads as curved instead of faceted. Without it the face's geometric normal
+    is used, which is the same vector for flat geometry.
+    """
     rows = (len(items) + cols - 1) // cols
     w, h = cols * cell, rows * cell
     pix = bytearray(w * h * 3)
 
-    for idx, (_label, verts, faces) in enumerate(items):
+    for idx, item in enumerate(items):
+        _label, verts, faces = item[0], item[1], item[2]
+        fnormals = item[3] if len(item) > 3 else None
         if not verts:
             continue
         proj = [_project(v) for v in verts]
@@ -116,13 +124,17 @@ def render(items, path, cols, cell=128, pad=10):
             # MEASURED: cross(u, v) points INWARD for both games' winding (D1 and
             # D2 agree), so swap the operands to get the outward normal and shade
             # directionally - no abs(), which was hiding the inversion.
-            a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
-            u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
-            v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
-            n = (v[1] * u[2] - v[2] * u[1],
-                 v[2] * u[0] - v[0] * u[2],
-                 v[0] * u[1] - v[1] * u[0])
-            ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) or 1.0
+            n = fnormals[_fi] if (fnormals and fnormals[_fi]) else None
+            if n is not None:
+                ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) or 1.0
+            else:
+                a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
+                u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+                v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+                n = (v[1] * u[2] - v[2] * u[1],
+                     v[2] * u[0] - v[0] * u[2],
+                     v[0] * u[1] - v[1] * u[0])
+                ln = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) or 1.0
             d = max(0.0, (n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]) / ln)
             shade = int(38 + 200 * d)
             rgb = (shade, shade, min(255, shade + 20))
@@ -148,6 +160,17 @@ def pool_items(pool_path):
     return items
 
 
+def _mean_normal(model, poly):
+    """One outward normal per face, averaged from the model's own per-vertex
+    normals - what the shading should use."""
+    ns = model.poly_normals(poly)
+    sx = sum(n[0] for n in ns) / len(ns)
+    sy = sum(n[1] for n in ns) / len(ns)
+    sz = sum(n[2] for n in ns) / len(ns)
+    L = (sx * sx + sy * sy + sz * sz) ** 0.5 or 1.0
+    return (sx / L, sy / L, sz / L)
+
+
 def baked_items(lev_path):
     blob = open(lev_path, "rb").read()
     body, _size = scalemodels.d2_car_lump(blob)
@@ -160,7 +183,8 @@ def baked_items(lev_path):
         if not model.vertices:
             continue
         faces = [tuple(p.v) for p in model.polys]
-        items.append(("model %d" % m, list(model.vertices), faces))
+        normals = [_mean_normal(model, p) for p in model.polys]
+        items.append(("model %d" % m, list(model.vertices), faces, normals))
     return items
 
 
