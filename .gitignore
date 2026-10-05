@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.dll
+*.obj
+*.log
+bin/
+obj/
+lib/
+
+# extracted Driver 1 geometry is a build artifact, not source - regenerate it
+# with tools/ (see docs/DRIVER1.md); the pool index is committed, the shapes are
+# not.
+tools/out/
