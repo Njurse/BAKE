@@ -388,6 +388,15 @@ def build_file(items, perms, specs, levels_dir):
     # DATA1. Each entry is sector-aligned and they run in permlist order, which
     # is exactly how ProcessTextureInfo's callers carve them.
     for _new_set, _lvl, _old, entry, _size in perms + specs:
+        # A D1 page entry is [int npalettes][npalettes*32-byte CLUT rows][decomp_asm
+        # stream]. Driver 1 legitimately ships pages with 33 rows, but the engine's
+        # texture_cluts table holds 32 (texture.c texture_cluts[128][32]), so a 33rd
+        # row would be rejected as corrupt and leave the whole set untextured - the
+        # "NEWCASTLE set 4 looks corrupt (33)" failure. Cap at 32 by dropping the last
+        # row; the decomp stream that follows is unchanged.
+        npal = int.from_bytes(entry[:4], "little")
+        if npal > 32:
+            entry = struct.pack("<I", 32) + entry[4:4 + 32 * 32] + entry[4 + npal * 32:]
         out += entry
         out += b"\x00" * ((2048 - len(entry) % 2048) % 2048)
     return bytes(out)
