@@ -73,7 +73,14 @@ def _line(pix, w, h, x0, y0, x1, y1, rgb):
             y0 += sy
 
 
-def _fill_tex(pix, w, h, p, uv, tex, tw, th):
+def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None):
+    """Affine-map a triangle's uvs onto a page.
+
+    `tex` is the page's RGB bytes when `pal` is None (a tool TGA, already
+    CLUT-applied), or a 256x256 INDEX image when `pal` is given - which is the
+    baked path, because there the page is 4bpp and the palette is one of the
+    entry's own CLUT rows, chosen per poly by its texture_id.
+    """
     x0 = max(0, int(min(v[0] for v in p)))
     x1 = min(w - 1, int(max(v[0] for v in p)) + 1)
     y0 = max(0, int(min(v[1] for v in p)))
@@ -97,14 +104,20 @@ def _fill_tex(pix, w, h, p, uv, tex, tw, th):
             v = w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1]
             tu = 0 if u < 0 else (tw - 1 if u >= tw else int(u))
             tv = 0 if v < 0 else (th - 1 if v >= th else int(v))
-            o = (tv * tw + tu) * 3
+            o = tv * tw + tu
             d = (y * w + x) * 3
-            pix[d] = tex[o]
-            pix[d + 1] = tex[o + 1]
-            pix[d + 2] = tex[o + 2]
+            if pal is not None:
+                if o >= len(tex):
+                    continue
+                pix[d], pix[d + 1], pix[d + 2] = pal[tex[o]]
+            else:
+                o3 = o * 3
+                pix[d] = tex[o3]
+                pix[d + 1] = tex[o3 + 1]
+                pix[d + 2] = tex[o3 + 2]
 
 
-def render(items, pages_root, path, cols=6, cell=170, pad=8):
+def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None):
     rows = (len(items) + cols - 1) // cols
     w, h = cols * cell, rows * cell
     pix = bytearray(w * h * 3)
@@ -126,23 +139,34 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8):
         order = sorted(range(len(faces)),
                        key=lambda fi: -sum(proj[i][2] for i in faces[fi][0]))
         for fi in order:
-            ind, uv, setid = faces[fi]
+            entry = faces[fi]
+            ind, uv, setid = entry[0], entry[1], entry[2]
+            texid = entry[3] if len(entry) > 3 else -1
             if len(ind) != 3 or setid < 0:
                 continue                       # only textured triangles here
             page = pages.get((level, setid))
             if page is None:
-                f = os.path.join(pages_root, "%s_textures" % level,
-                                 "PAGE_%d.tga" % setid)
-                page = load_tga_rgb(f) if os.path.exists(f) else False
+                if baked is not None:
+                    page = baked.get(setid) or False
+                else:
+                    f = os.path.join(pages_root, "%s_textures" % level,
+                                     "PAGE_%d.tga" % setid)
+                    page = load_tga_rgb(f) if os.path.exists(f) else False
                 pages[(level, setid)] = page
             if page is False:
                 misses += 1
                 continue
-            tw, th, tex = page
-            _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
-                      uv, tex, tw, th)
+            if baked is not None:
+                idx, crows = page
+                pal = crows[texid] if 0 <= texid < len(crows) else crows[0]
+                _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
+                          uv, idx, 256, 256, pal=pal)
+            else:
+                tw, th, teximg = page
+                _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
+                          uv, teximg, tw, th)
         # a thin outline so a miss is visible rather than a hole
-        for ind, _uv, _s in faces:
+        for ind, _uv, _s in ((f[0], f[1], f[2]) for f in faces):
             pts = [scr[i] for i in ind]
             for a in range(len(pts) - 1):
                 _line(pix, w, h, int(pts[a][0]), int(pts[a][1]),
@@ -179,18 +203,99 @@ def pool_items(pool_path, want_levels, first):
     return items
 
 
+def baked_pages(blob):
+    """set -> (256x256 index bytes, [CLUT rows as rgb tuples]) from the blob's
+    OWN embedded pages. This is what makes the baked path self-supporting: no
+    DriverLevelTool export and no source level is read."""
+    import pages1
+    d1o, d1s = struct.unpack_from("<2I", blob, 8)[:2]
+    segs = {}
+    o = d1o + 8
+    while o + 8 <= d1o + d1s:
+        t, s = struct.unpack_from("<2i", blob, o)
+        if t == 0 and s == 0:
+            break
+        segs[t] = (o + 8, s)
+        o += 8 + ((s + 3) & ~3)
+    if 34 not in segs:
+        return {}
+    ti = pages1.parse_texture_info(blob[segs[34][0]:segs[34][0] + segs[34][1]])
+    # pageBase, as the engine computes it (models.c:391)
+    pb = (d1o // 2048 + d1s // 2048) * 2048
+    out = {}
+    off = 0
+    for new_set, size in list(ti["permlist"]) + list(ti["speclist"]):
+        rows, page = pages1.read_page(blob, pb + off, size)
+        # the page is 4bpp: unpack it into a 256x256 index image, low nibble first
+        idx = bytearray(65536)
+        k = 0
+        for y in range(256):
+            for xb in page[y * 128:(y + 1) * 128]:
+                idx[k] = xb & 0xF
+                idx[k + 1] = xb >> 4
+                k += 2
+        out[new_set] = (bytes(idx), [pages1.clut_rgb(r) for r in rows])
+        off += (size + 2047) & ~2047
+    return out
+
+
+def baked_items(lev_path):
+    """The baked blob's own models as render items: (label, key, verts, faces)
+    with faces carrying (indices, uvs, set, texture_id)."""
+    import lev1
+    import scalemodels as sm
+
+    blob = open(lev_path, "rb").read()
+    got = sm.d2_car_lump(blob)
+    if not got:
+        return []
+    body, _size = got
+    items = []
+    for m in range(sm.MAX_CAR_MODELS):
+        clean, _dam, _low = struct.unpack_from("<3i", blob, body + 4 + m * 12)
+        if clean == -1:
+            continue
+        model = lev1.decode_model(blob, body + 164 + clean)
+        if not model.vertices:
+            continue
+        faces = []
+        for p in model.polys:
+            if len(p.v) != 3 or p.kind not in ("FT3", "GT3"):
+                continue
+            faces.append((tuple(p.v), tuple(tuple(q) for q in p.uv),
+                          p.texture_set, p.texture_id))
+        items.append(("model %d" % m, "baked", list(model.vertices), faces))
+    return items
+
+
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pool", default=os.path.join(here, "out", "pool.json"))
-    ap.add_argument("--pages-root", required=True,
+    ap.add_argument("--pages-root", default="",
                     help="dir holding <LEVEL>_textures/PAGE_<n>.tga for each level")
+    ap.add_argument("--baked", default="",
+                    help="render the BAKED blob from its OWN embedded pages "
+                         "(no tool export, no source level)")
     ap.add_argument("--levels", default="", help="comma-separated source levels to include")
     ap.add_argument("--first", type=int, default=0, help="limit to the first N shapes")
     ap.add_argument("--cell", type=int, default=170)
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
+
+    if args.baked:
+        blob = open(args.baked, "rb").read()
+        baked = baked_pages(blob)
+        items = baked_items(args.baked)
+        if not items:
+            print("the baked blob has no models")
+            return 1
+        out = args.out or os.path.join(here, "out", "textured_baked.png")
+        render(items, "", out, cols=5, cell=args.cell, baked=baked)
+        printed = sum(1 for _v in baked)
+        print("  (pages read from the blob itself: %d sets)" % printed)
+        return 0
 
     want = set(x for x in args.levels.split(",") if x)
     items = pool_items(args.pool, want, args.first)
