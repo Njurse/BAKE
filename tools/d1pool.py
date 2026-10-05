@@ -222,6 +222,19 @@ def render_sheet(items, path, cell=112, cols=8):
     return frac
 
 
+# A car-data city is not always named after its file. Newcastle - the Driver 1
+# level reachable only by cheat, whose geometry is the credits drive - is stored in
+# CREDITS.LEV. This mapping lives HERE and only here: the bake and the cosmetics
+# file both read it, because if they disagreed the geometry and the colours would
+# describe different cars.
+CITY_SOURCE_FILE = {"NEWCASTLE": "CREDITS"}
+
+
+def source_file(city):
+    """The .LEV a car-data city is actually stored in."""
+    return CITY_SOURCE_FILE.get(city, city)
+
+
 def collect(levels_dir, variants):
     """Return (items, skipped): items are deduped, in first-seen order."""
     items = []

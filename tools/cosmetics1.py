@@ -36,7 +36,8 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lev1        # noqa: E402
+import lev1
+import d1pool        # noqa: E402
 import scalemodels  # noqa: E402
 import wheelgeom   # noqa: E402
 
@@ -208,7 +209,7 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
     model slots. Returns a list of (slot, record, donor_index, radius, track),
     with a record of None for a slot the city leaves empty.
     """
-    blob = open(os.path.join(levels_dir, city + ".LEV"), "rb").read()
+    blob = open(os.path.join(levels_dir, d1pool.source_file(city) + ".LEV"), "rb").read()
     donors = sorted(donor_bb)          # only the models that have a body
     donor_halves = [halves_from_bbox(donor_bb[m]) for m in donors]
     out = []
@@ -217,6 +218,13 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
         if model is None and variants:
             model = next(iter(variants.values()))
         if model is None or not model.vertices:
+            out.append((m, None, None, None, None))
+            continue
+
+        # Same non-car test as the bake (see d1pool.source_file). If these two ever
+        # disagree about which slots hold cars, a record lands on the wrong body.
+        _bb = model.bbox()
+        if _bb is None or (_bb[5] - _bb[2]) < d1pool.MIN_LENGTH_RAW:
             out.append((m, None, None, None, None))
             continue
         bmin, bmax = wheelgeom.body_bbox(model.vertices)

@@ -30,6 +30,7 @@ Usage:
     python bake.py --pool DIR/pool.json [--out DIR] [--first N]
 """
 
+import d1pool                 # source_file(): a city is not always named after its file
 import argparse
 import json
 import os
@@ -255,7 +256,7 @@ def build_pallet(page_list, levels_dir):
     body += struct.pack("<i", 0)                     # total_cluts: a CLUT count
     count = 0
     for new_set, level, old_set, _bytes, _size in page_list:
-        blob = open(os.path.join(levels_dir, level + ".LEV"), "rb").read()
+        blob = open(os.path.join(levels_dir, d1pool.source_file(level) + ".LEV"), "rb").read()
         ofs, entries, _ti = pages1.level_pages(blob)
         ent = {s: (o, z) for s, o, z in entries}
         if old_set not in ent:
@@ -304,7 +305,7 @@ def build_page_plan(items, levels_dir):
             if key in remap:
                 continue
             if level not in listed:
-                blob = open(os.path.join(levels_dir, level + ".LEV"), "rb").read()
+                blob = open(os.path.join(levels_dir, d1pool.source_file(level) + ".LEV"), "rb").read()
                 ofs, entries, ti = pages1.level_pages(blob)
                 # The special pages carry no offset of their own: their data runs
                 # on from the end of the permanent pages, sector-aligned, in
@@ -430,7 +431,7 @@ def bake_one_city(args, levels_dir):
     import lev1
     import d1pool
 
-    blob = open(os.path.join(levels_dir, args.city + ".LEV"), "rb").read()
+    blob = open(os.path.join(levels_dir, d1pool.source_file(args.city) + ".LEV"), "rb").read()
 
     by_slot = {}
     for m, variants in lev1.car_models(blob):
@@ -438,6 +439,14 @@ def bake_one_city(args, levels_dir):
         if model is None and variants:
             model = next(iter(variants.values()))
         if model is None or not model.vertices:
+            continue
+
+        # The pool's own non-car test, so a level that ships a prop in its car
+        # table (CREDITS slot 0 is a 52x49x48 box) does not get it offered as a car.
+        # Reusing MIN_LENGTH_RAW rather than a second threshold is what keeps the .LEV
+        # and the .LCF describing the same set of cars.
+        _bb = model.bbox()
+        if _bb is None or (_bb[5] - _bb[2]) < d1pool.MIN_LENGTH_RAW:
             continue
         g = d1pool.geom_record(m, [(args.city, m)], model)
         by_slot[m] = {"pool_index": m, "geom": g, "scale": g["scale"]}
