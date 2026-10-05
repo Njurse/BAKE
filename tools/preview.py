@@ -25,6 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lev1          # noqa: E402
 import scalemodels   # noqa: E402
 
+LEVELS_DIR = "src_rebuild/bin/Release_dev/DRIVER/LEVELS"
+
 YAW = math.radians(34.0)
 PITCH = math.radians(18.0)
 # The game's y axis is DOWN-positive (REDRIVER2 convention: smaller y is higher),
@@ -85,6 +87,48 @@ def _fill(pix, w, h, pts, rgb):
             if (w0 >= 0 and w1 >= 0 and w2 >= 0) or (w0 <= 0 and w1 <= 0 and w2 <= 0):
                 o = (y * w + x) * 3
                 pix[o], pix[o + 1], pix[o + 2] = rgb
+
+
+def attach_wheels(items, levels_dir, pool_path):
+    """The same items with the shared wheel on each, or None if it cannot be.
+
+    The flat renderer needs no page at all - it shades by geometry - so unlike
+    the textured path there is nothing to load but the wheel model itself.
+    """
+    import json
+    import wheelgeom
+    import wheelrender
+
+    pl = os.path.join(os.path.dirname(pool_path), "wheels", "placement.json")
+    if not os.path.exists(pl):
+        print("  (no %s - run wheels1.py --place first)" % pl)
+        return None
+    recs = {i["pool_index"]: i for i in json.load(open(pl))["items"]}
+    level, model = wheelgeom.canonical_wheel(levels_dir)
+    if model is None:
+        print("  (no wheel model under %s)" % levels_dir)
+        return None
+    out = []
+    for n, item in enumerate(items):
+        r = recs.get(n)
+        if not r:
+            out.append(item)
+            continue
+        # this renderer's items are (label, verts, faces[, normals]), NOT the
+        # textured path's (label, key, verts, faces) - so the tuple is rebuilt
+        # here rather than through wheelrender.wheeled_item.
+        wv, wtris, _wtex = wheelrender.wheel_copies(model, r["centres"], r["scale"])
+        off = len(item[1])
+        faces = list(item[2]) + [tuple(off + i for i in t) for t in wtris]
+        if len(item) > 3 and item[3] is not None:
+            # the wheels are flat, so a geometric normal is already right - but the
+            # list has to stay aligned with the faces.
+            out.append((item[0], list(item[1]) + list(wv), faces,
+                        list(item[3]) + [None] * len(wtris)))
+        else:
+            out.append((item[0], list(item[1]) + list(wv), faces))
+    print("  (wheels from %s)" % level)
+    return out
 
 
 def render(items, path, cols, cell=128, pad=10):
@@ -194,15 +238,29 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pool", default=os.path.join(here, "out", "pool.json"))
     ap.add_argument("--baked", default=os.path.join(here, "out", "bake", "D1POOL.LEV"))
+    ap.add_argument("--wheeled", action="store_true",
+                    help="write the wheels-on sheet as an EXTRA copy, leaving the plain ones alone")
+    ap.add_argument("--levels-dir", default=LEVELS_DIR,
+                    help="source DRIVER/LEVELS, for the wheel model")
     args = ap.parse_args(argv)
 
     out = []
     if os.path.exists(args.baked):
-        out.append(render(baked_items(args.baked),
-                          os.path.join(here, "out", "preview_baked.png"), cols=7))
+        items = baked_items(args.baked)
+        out.append(render(items, os.path.join(here, "out", "preview_baked.png"), cols=7))
+        if args.wheeled:
+            w = attach_wheels(items, args.levels_dir, args.pool)
+            if w is not None:
+                out.append(render(w, os.path.join(here, "out", "preview_wheeled.png"),
+                                  cols=7))
     if os.path.exists(args.pool):
-        out.append(render(pool_items(args.pool),
-                          os.path.join(here, "out", "preview_pool.png"), cols=8))
+        items = pool_items(args.pool)
+        out.append(render(items, os.path.join(here, "out", "preview_pool.png"), cols=8))
+        if args.wheeled:
+            w = attach_wheels(items, args.levels_dir, args.pool)
+            if w is not None:
+                out.append(render(w, os.path.join(here, "out",
+                                                  "preview_pool_wheeled.png"), cols=8))
     return 0 if out else 1
 
 

@@ -73,7 +73,7 @@ def _line(pix, w, h, x0, y0, x1, y1, rgb):
             y0 += sy
 
 
-def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None, shade=1.0):
+def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None, shade=1.0, skip=None):
     """Affine-map a triangle's uvs onto a page.
 
     `tex` is the page's RGB bytes when `pal` is None (a tool TGA, already
@@ -82,6 +82,10 @@ def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None, shade=1.0):
     entry's own CLUT rows, chosen per poly by its texture_id.
 
     `shade` scales the sampled colour, so the lit render can be directional.
+    `skip` is a per-CLUT-entry transparency mask: texels whose entry is marked
+    are left alone. Only the wheel passes one - it is a sprite whose corners are
+    the transparent entry, and drawing them opaque punches black holes in the car
+    behind it.
     """
     x0 = max(0, int(min(v[0] for v in p)))
     x1 = min(w - 1, int(max(v[0] for v in p)) + 1)
@@ -111,7 +115,10 @@ def _fill_tex(pix, w, h, p, uv, tex, tw, th, pal=None, shade=1.0):
             if pal is not None:
                 if o >= len(tex):
                     continue
-                c = pal[tex[o]]
+                v = tex[o]
+                if skip is not None and skip[v]:
+                    continue
+                c = pal[v]
                 pix[d] = min(255, int(c[0] * shade))
                 pix[d + 1] = min(255, int(c[1] * shade))
                 pix[d + 2] = min(255, int(c[2] * shade))
@@ -184,10 +191,15 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None,
                 misses += 1
                 continue
             if baked is not None:
-                idx, crows = page
+                idx, crows = page[0], page[1]
+                masks = page[2] if len(page) > 2 else None
                 pal = crows[texid] if 0 <= texid < len(crows) else crows[0]
+                if masks:
+                    sk = masks[texid] if 0 <= texid < len(masks) else masks[0]
+                else:
+                    sk = None
                 _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
-                          uv, idx, 256, 256, pal=pal, shade=shade)
+                          uv, idx, 256, 256, pal=pal, shade=shade, skip=sk)
             else:
                 tw, th, teximg = page
                 _fill_tex(pix, w, h, [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
@@ -317,6 +329,43 @@ def baked_items(lev_path):
     return items
 
 
+LEVELS_DIR = "src_rebuild/bin/Release_dev/DRIVER/LEVELS"
+
+
+def attach_wheels(items, baked, levels_dir, pool_path):
+    """Give each baked item its wheels, from the placement record.
+
+    The wheel's texture is NOT in the baked blob - it lives on the wheel's SOURCE
+    level's page - so it is loaded from there and merged under WHEEL_SET_BASE,
+    which no car set uses, and the item's own geometry is left alone.
+    """
+    import wheelrender
+
+    pl_path = os.path.join(os.path.dirname(pool_path), "wheels", "placement.json")
+    if not os.path.exists(pl_path):
+        print("  (no %s - run wheels1.py --place first; rendering without wheels)"
+              % pl_path)
+        return items
+    recs = {i["pool_index"]: i for i in json.load(open(pl_path))["items"]}
+    got = wheelrender.load_wheel(levels_dir)
+    if not got:
+        print("  (no wheel model under %s; rendering without wheels)" % levels_dir)
+        return items
+    model, level, page = got
+    if page and baked is not None:
+        baked[wheelrender.WHEEL_SET_BASE] = page
+    out = []
+    for n, item in enumerate(items):
+        rec = recs.get(n)
+        if not rec:
+            out.append(item)
+            continue
+        out.append(wheelrender.wheeled_item(item, model, rec["centres"],
+                                            rec["scale"]))
+    print("  (wheels from %s, set %d)" % (level, wheelrender.WHEEL_SET_BASE))
+    return out
+
+
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__,
@@ -334,6 +383,10 @@ def main(argv=None):
     ap.add_argument("--wireframe", action="store_true",
                     help="draw the face outlines (off by default)")
     ap.add_argument("--unlit", action="store_true", help="skip the directional shading")
+    ap.add_argument("--wheeled", action="store_true",
+                    help="draw the wheels on, as an extra copy alongside the plain sheet")
+    ap.add_argument("--levels-dir", default=LEVELS_DIR,
+                    help="source DRIVER/LEVELS, for the wheel model and its texture")
     args = ap.parse_args(argv)
 
     if args.baked:
@@ -343,7 +396,11 @@ def main(argv=None):
         if not items:
             print("the baked blob has no models")
             return 1
-        out = args.out or os.path.join(here, "out", "textured_baked.png")
+        if args.wheeled:
+            items = attach_wheels(items, baked, args.levels_dir, args.pool)
+        out = args.out or os.path.join(here, "out",
+                                       "textured_wheeled.png" if args.wheeled
+                                       else "textured_baked.png")
         render(items, "", out, cols=5, cell=args.cell, baked=baked,
                wireframe=args.wireframe, lit=not args.unlit)
         printed = sum(1 for _v in baked)
@@ -355,9 +412,13 @@ def main(argv=None):
     if not items:
         print("no pool items selected")
         return 1
-    out = args.out or os.path.join(here, "out", "textured_%s.png"
-                                   % ("_".join(sorted(want)) or "all"))
-    render(items, args.pages_root, out, cell=args.cell)
+    if args.wheeled:
+        items = attach_wheels(items, None, args.levels_dir, args.pool)
+    out = args.out or os.path.join(here, "out", "textured_%s%s.png"
+                                   % ("_".join(sorted(want)) or "all",
+                                      "_wheeled" if args.wheeled else ""))
+    render(items, args.pages_root, out, cell=args.cell,
+           wireframe=args.wireframe, lit=not args.unlit)
     return 0
 
 

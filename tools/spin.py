@@ -16,12 +16,16 @@ Usage:
 
 import argparse
 import math
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import preview     # noqa: E402  (LIGHT, _png)
 import textured    # noqa: E402  (baked_pages, baked_items, _fill_tex)
+import wheelrender  # noqa: E402
+
+LEVELS_DIR = "src_rebuild/bin/Release_dev/DRIVER/LEVELS"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -120,11 +124,17 @@ def frame(items, pages, refs, yaw, pitch, cols, cell, pad=10):
             d = max(0.0, (nx * L[0] + ny * L[1] + nz * L[2]) / ln)
             shade = 0.45 + 0.75 * d
 
-            idx_img, crows = page
+            idx_img, crows = page[0], page[1]
+            masks = page[2] if len(page) > 2 else None
             pal = crows[texid] if 0 <= texid < len(crows) else crows[0]
+            if masks:
+                sk = masks[texid] if 0 <= texid < len(masks) else masks[0]
+            else:
+                sk = None
             textured._fill_tex(pix, w, h,
                                [scr[ind[0]], scr[ind[1]], scr[ind[2]]],
-                               uv, idx_img, 256, 256, pal=pal, shade=shade)
+                               uv, idx_img, 256, 256, pal=pal, shade=shade,
+                               skip=sk)
     return pix, w, h
 
 
@@ -152,6 +162,12 @@ def main(argv=None):
                     help="elevation in degrees (the plan asked for a slight one)")
     ap.add_argument("--cols", type=int, default=5)
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
+    ap.add_argument("--wheeled", action="store_true",
+                    help="draw the wheels on and TURN them a little every frame")
+    ap.add_argument("--wheel-turns", type=float, default=3.0,
+                    help="whole wheel revolutions per full turn of the car")
+    ap.add_argument("--levels-dir", default=LEVELS_DIR,
+                    help="source DRIVER/LEVELS, for the wheel model and its texture")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.baked):
@@ -168,19 +184,53 @@ def main(argv=None):
     pitch = math.radians(args.elev)
     duration = max(40, int(1000 / max(args.frames / 1.5, 1)))
 
+    # The wheels, if asked for. They are re-made per frame with a spin angle so
+    # the tyre texture visibly turns - which is the whole point of having them on.
+    wheel_arg = None
+    if args.wheeled:
+        wm, wlevel, wpage = wheelrender.load_wheel(args.levels_dir)
+        if wm is None:
+            print("no wheel model under %s" % args.levels_dir)
+            return 1
+        if wpage:
+            pages[wheelrender.WHEEL_SET_BASE] = wpage
+        pl = os.path.join(args.out, "wheels", "placement.json")
+        if not os.path.exists(pl):
+            print("no %s - run wheels1.py --place first" % pl)
+            return 1
+        wheel_arg = (wm, {i["pool_index"]: i for i in json.load(open(pl))["items"]})
+        print("wheels from %s, set %d, %.1f turn(s) of the wheel per turn of the car"
+              % (wlevel, wheelrender.WHEEL_SET_BASE, args.wheel_turns))
+
+    def at(spin):
+        """The items as they stand at this wheel angle."""
+        if wheel_arg is None:
+            return items
+        wm, recs = wheel_arg
+        out = []
+        for n, it in enumerate(items):
+            r = recs.get(n)
+            out.append(wheelrender.wheeled_item(it, wm, r["centres"], r["scale"],
+                                                spin=spin) if r else it)
+        return out
+
+    turns = 2.0 * math.pi * args.wheel_turns
+    stem = "spin_wheeled" if args.wheeled else "spin_baked"
+
     # one grid GIF, every model turning together
     grid = []
     grefs = refs_for(items, pitch, args.cell, 10)
     for i in range(args.frames):
         yaw = 2.0 * math.pi * i / args.frames
-        pix, w, h = frame(items, pages, grefs, yaw, pitch, args.cols, args.cell)
+        pix, w, h = frame(at(turns * i / args.frames), pages, grefs, yaw, pitch,
+                          args.cols, args.cell)
         grid.append(_image(pix, w, h))
-    g = save_gif(os.path.join(args.out, "spin_baked.gif"), grid, duration)
+    g = save_gif(os.path.join(args.out, stem + ".gif"), grid, duration)
     print("grid: %s (%dx%d, %d frames, %d shapes)"
           % (g, grid[0].size[0], grid[0].size[1], len(grid), len(items)))
 
     # and one per model
-    d = os.path.join(args.out, "spin")
+    d = os.path.join(args.out, stem)
     if not os.path.isdir(d):
         os.makedirs(d)
     for n, item in enumerate(items):
@@ -189,7 +239,8 @@ def main(argv=None):
         fr = []
         for i in range(args.frames):
             yaw = 2.0 * math.pi * i / args.frames
-            pix, w, h = frame([item], pages, irefs, yaw, pitch, 1, args.cell, pad=14)
+            one = at(turns * i / args.frames)[n]
+            pix, w, h = frame([one], pages, irefs, yaw, pitch, 1, args.cell, pad=14)
             fr.append(_image(pix, w, h))
         save_gif(os.path.join(d, label + ".gif"), fr, duration)
     print("per model: %d GIFs in %s" % (len(items), d))

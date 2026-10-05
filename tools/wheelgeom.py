@@ -46,6 +46,14 @@ DONOR_WHEEL_RADIUS = 49     # the axle height, and D1's wheel on the D2 scale
 DONOR_TYRE_HALFWIDTH = 17   # the wheel model's own half width
 DONOR_TRACK_CENTRE = 105    # |x| of the effective wheel centre
 
+# A D1 car body is a SOLID shell - no wheel arches - so a tyre placed exactly
+# flush with the body's side is covered by that side face and cannot be seen at
+# all. The wheels are therefore pushed a little PROUD, as a fraction of the tyre's
+# own half width. This is a PREVIEW accommodation only; Phase 3's cosmetics carry
+# the real wheelDisp, and Driver 2 needs no such help because its bodies are
+# modelled with arches.
+WHEEL_PROUD = 0.35
+
 
 def donor_from_lcfs(levels_dir):
     """Derive the donor numbers from Driver 2's own .LCF files.
@@ -132,8 +140,9 @@ def placement(body_verts, wheel_verts, scale, wheelbase=DONOR_WHEELBASE):
     the ground line rather than wherever the model origin happens to be, and the
     axles straddle that bbox's z centre.
 
-    The track is per car: half the body width less the tyre's half width, so the
-    tyre sits flush with the body's side. The WHEELBASE is, by choice, the one
+    The track is per car: half the body width less the tyre's half width, plus a
+    little so the tyre is PROUD of the body's side (see WHEEL_PROUD - a solid D1
+    shell hides a flush wheel completely). The WHEELBASE is, by choice, the one
     shared number.
     """
     bx = [v[0] for v in body_verts]
@@ -151,7 +160,7 @@ def placement(body_verts, wheel_verts, scale, wheelbase=DONOR_WHEELBASE):
     ground = max(by) * scale                      # y is DOWN-positive
     xc = (max(bx) + min(bx)) / 2.0 * scale
 
-    track = max(0.0, half_width - half_tyre)
+    track = max(0.0, half_width - half_tyre) + half_tyre * WHEEL_PROUD
     z_axle = wheelbase / 2.0
     out = []
     for i in range(4):

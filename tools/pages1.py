@@ -401,6 +401,35 @@ def write_pages(blob, path, out_root):
     return info
 
 
+def clut_mask(row):
+    """Per CLUT entry: 1 where the entry is exactly 0x8000.
+
+    0x8000 is black with the STP bit set, and that is the engine's transparent
+    marker - the wheel SPRITE's corners are entry 0 of its own row, and drawing
+    them opaque punches black holes in whatever is behind. Narrower than "any
+    entry with bit 15" on purpose: every entry of a D1 CAR palette has bit 15
+    set, so that test would erase the cars.
+    """
+    return bytes(1 if struct.unpack_from("<H", row, i * 2)[0] == 0x8000 else 0
+                 for i in range(16))
+
+
+def page_indexes(page):
+    """A decoded 4bpp page (32768 bytes) -> a 256x256 index image.
+
+    The texel at (x, y) is the low nibble of byte y*128 + x/2 when x is even and
+    the high nibble when it is odd - the order the engine's upload produces.
+    """
+    idx = bytearray(65536)
+    k = 0
+    for y in range(256):
+        for xb in page[y * 128:(y + 1) * 128]:
+            idx[k] = xb & 0xF
+            idx[k + 1] = xb >> 4
+            k += 2
+    return bytes(idx)
+
+
 def texture_names(blob):
     """The level's texture-name buffer, which the TEXINF nameoffsets point into."""
     hdr = lev1.read_header(blob)
