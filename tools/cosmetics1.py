@@ -115,12 +115,35 @@ def build_record(verts, scale, centres, radius, donor, donor_half):
         return tuple(int(round(p[i] * ratio[i])) for i in range(3))
 
     out = bytearray(RECORD_SIZE)
-    for o, p in zip(POS_OFFSETS[:23], donor["anchors"] + donor["cPoints"]
-                    + [donor["colBox"], donor["cog"]]):
+    # The anchors are the DONOR's, re-proportioned per axis. They are not cloned:
+    # scaling by the ratio between the two bodies puts each one at the same place
+    # on our car as it held on Driver 2's - so the headlight stays at the front,
+    # the exhaust at the rear and the police light at the belt line, at THIS car's
+    # front/rear/height.
+    for o, p in zip(POS_OFFSETS[:9], donor["anchors"]):
         struct.pack_into("<3h", out, o, *scaled(p))
-    # colBox is ours outright: it is this car's own box, not a proportion of one
+    # colBox and cog are ours outright - measured, not inherited. colBox is this
+    # car's own box; cog is that box's centre, which is where the weight sits.
     struct.pack_into("<3h", out, 212, int(round(half[0])), int(round(half[1])),
                      int(round(half[2])))
+    struct.pack_into("<3h", out, 220, 0,
+                     int(round((max(ys) + min(ys)) / 2.0 * scale)),
+                     int(round((max(zs) + min(zs)) / 2.0 * scale)))
+    # cPoints[12]: the collision hull, from the car's own footprint - three heights
+    # (ground, belt, roof) by the four corners, in Driver 2's own order (low front,
+    # low rear, mid front, high front, high rear, mid rear).
+    y_low, y_high = max(ys) * scale, min(ys) * scale          # y is down-positive
+    y_mid = (y_low + y_high) / 2.0
+    x_f, z_f = half[0], min(zs) * scale                       # front is -z
+    z_r = max(zs) * scale
+    corners = ((y_low, z_f), (y_low, z_r), (y_mid, z_f),
+               (y_high, z_f), (y_high, z_r), (y_mid, z_r))
+    n = 0
+    for y, z in corners:
+        for sx in (-1, 1):
+            struct.pack_into("<3h", out, 116 + n * 8,
+                             int(round(sx * x_f)), int(round(y)), int(round(z)))
+            n += 1
     for i, d in enumerate(wheel_disp_from(centres, radius)):
         struct.pack_into("<3h", out, OFF_WHEELDISP + i * 8,
                          max(-32768, min(32767, int(round(d[0])))),
