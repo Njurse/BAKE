@@ -257,6 +257,34 @@ items belong.
   at 13 models, 0..12 (`FORMATS.md` §3). Driver 1's traffic IDs run past 200. So
   the pool is an **archive** you select a few items from into the ~12 resident
   slots — it can never be "all D1 traffic at once".
+- **The D2-compliant-slot collision — the playtest blocker (measured).** Driver 1's
+  `CAR_MODELS` table *is* its traffic-car list (7–8 cars per city; every entry
+  decodes to car dimensions, ≈400×250×1100, matching §8's scale measurement). No
+  D1 name names them — this build's `MODELNAMES` holds only `CLEANWHEEL`,
+  `DAMWHEEL`, `FASTWHEEL`, `HELICOPTER` — so the **model index is the only
+  identifier**. Measured layout:
+
+  | city | models with a car | count |
+  |---|---|---|
+  | MIAMI / FRISCO / LA | `0,1,2,5,6,7,8` | 7 |
+  | NEWYORK | `0,1,2,5,6,7,8,9` | 8 |
+
+  Across the whole 43-shape pool the model indices in use are **0,1,2,5,6,7,8,9**
+  (counts 6,7,7,7,5,5,5,1): **models 3 and 4 are never used in Driver 1**, while
+  **5, 6 and 7 carry 17 of the 43 cars — 40%.**
+
+  Driver 2's own compliant models are `0,1,2,3,4,8,9,10,11,12`; **5, 6 and 7 hold
+  no data in any of the four cities** (`CHICAGO` ships 9 models, the others 10, and
+  none ships 5/6/7). Its frontend then maps select-slots 0–3 → models **1,2,3,4**
+  via `carNumLookup` (`FEmain.c:639`), with model 0 the police car at a locked
+  slot. So a D1 city's cars land on models the engine will never address — the
+  import resolves, nothing downstream names it, and the player silently keeps
+  their own car.
+
+  **Remedy: the transplant remaps.** A city's cars are written to D2-compliant
+  models in order — the first four to **1,2,3,4** (mirroring a stock D2 city's
+  four selectable slots) and any beyond that to **8,9,10,11** — with 5, 6, 7
+  never written and model 0 left as D2's police car. See §8.
 - **The "compressed" claim — RESOLVED (Phase 2).** An earlier note in
   `FORMATS.md` said car-model polys are compressed and a `PolySizes` walk *stalls
   from polygon 5*. Measured: **false for car models.** Every CHICAGO model walks
