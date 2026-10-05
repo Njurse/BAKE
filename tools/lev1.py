@@ -31,6 +31,15 @@ The car-models lump body (models.cpp LoadCarModelsLump):
   +160  r_ofs = the offset base; an int32 pad sits here
         model data: at r_ofs+offset  ->  int32 size, then `size` bytes of MODEL
 
+NOTE ON THE REFERENCE TOOL. OpenDriver2Tools' DriverLevelTool can be pointed at
+a D1 level and will emit car-model OBJs, but its -carmodels export complains
+("... has invalid indices (or format is unknown)", "... zero size!") on Driver 1
+AND Driver 2 alike - 108 such lines on a Driver 2 CHICAGO.LEV in this repo. Its
+decode_poly is the D2 decoder and carries a "TODO: D1 and D2 to have different
+decoding routines". So those reports are a defect of the tool, not evidence
+about the D1 car format, which is why this reader was written independently and
+validated against the bytes (every variant of every model walks with 0 errors).
+
 Usage:
     python lev1.py <LEVELS/FRISCO.LEV> [--lumps] [--names] [--models]
 """
