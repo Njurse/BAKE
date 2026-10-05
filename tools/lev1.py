@@ -384,49 +384,95 @@ def show_models(blob, path):
                   % (t, LUMP_NAMES.get(t, "?"), body, size))
 
 
+def verify(blob, path):
+    """Check the reader's invariants on one level. Returns a list of problems.
+
+    - the entry table is MAX_CAR_MODELS (13) entries (models.h);
+    - every variant of every model decodes with 0 errors;
+    - the damaged-block invariant holds: block size == 36 + num_vertices*8.
+    """
+    problems = []
+    cm = car_models_lump(blob)
+    if cm is None:
+        print("  %-12s no CAR_MODELS lump (skipped)"
+              % path.replace("\\", "/").rsplit("/", 1)[-1])
+        return problems
+    body, _size = cm
+    r_ofs = body + 4 + MAX_CAR_MODELS * 12
+    nvar = 0
+    for m, variants in car_models(blob):
+        for variant, model in variants.items():
+            nvar += 1
+            if model.errors:
+                problems.append("model %d %s: %s" % (m, variant, model.errors[:2]))
+            if variant == "damaged":
+                _c, dam, _l = struct.unpack_from("<3i", blob, body + 4 + m * 12)
+                block = struct.unpack_from("<i", blob, r_ofs + dam)[0]
+                nv = struct.unpack_from(MODEL_FMT, blob, r_ofs + dam + 4)[7]
+                if block != 36 + nv * 8:
+                    problems.append("model %d damaged: block %d != 36+nv*8 (%d)"
+                                    % (m, block, 36 + nv * 8))
+    print("  %-12s %2d variants, %d problems"
+          % (path.replace("\\", "/").rsplit("/", 1)[-1], nvar, len(problems)))
+    return problems
+
+
+def dump_names(blob):
+    got = model_names_lump(blob)
+    if not got:
+        print("no LUMP_MODELNAMES")
+        return
+    body, size = got
+    text = blob[body:body + size]
+    names = [s.decode("ascii", "replace") for s in text.split(b"\x00") if s]
+    print("model names (%d):" % len(names))
+    for i, n in enumerate(names):
+        print("  %4d  %s" % (i, n))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("lev", help="a Driver 1 LEVELS/*.LEV")
+    ap.add_argument("lev", nargs="+", help="one or more Driver 1 LEVELS/*.LEV")
     ap.add_argument("--lumps", action="store_true", help="dump the section table")
     ap.add_argument("--names", action="store_true", help="dump the model-names lump")
     ap.add_argument("--models", action="store_true",
                     help="decode every car-model variant and print its stats")
+    ap.add_argument("--verify", action="store_true",
+                    help="assert the reader's invariants; exit 1 on any problem")
     args = ap.parse_args(argv)
 
-    with open(args.lev, "rb") as f:
-        blob = f.read()
+    problems = []
+    for path in args.lev:
+        with open(path, "rb") as f:
+            blob = f.read()
 
-    did = False
-    if args.lumps:
-        show_lumps(blob, args.lev)
-        did = True
+        did = False
+        if args.lumps:
+            show_lumps(blob, path)
+            did = True
+        if args.models:
+            show_models(blob, path)
+            did = True
+        if args.names:
+            dump_names(blob)
+            did = True
+        if args.verify:
+            problems += verify(blob, path)
+            did = True
+        if not did:
+            cm = car_models_lump(blob)
+            if cm is None:
+                print("%s: no LUMP_CAR_MODELS in DATA1" % path)
+                problems.append(path)
+                continue
+            body, size = cm
+            print("%s: LUMP_CAR_MODELS at %d size %d" % (path, body, size))
 
-    if args.models:
-        show_models(blob, args.lev)
-        did = True
-
-    if args.names:
-        got = model_names_lump(blob)
-        if not got:
-            print("no LUMP_MODELNAMES")
-        else:
-            body, size = got
-            text = blob[body:body + size]
-            names = [s.decode("ascii", "replace")
-                     for s in text.split(b"\x00") if s]
-            print("model names (%d):" % len(names))
-            for i, n in enumerate(names):
-                print("  %4d  %s" % (i, n))
-        did = True
-
-    if not did:
-        cm = car_models_lump(blob)
-        if cm is None:
-            print("no LUMP_CAR_MODELS in DATA1")
-            return 1
-        body, size = cm
-        print("LUMP_CAR_MODELS at %d size %d" % (body, size))
+    if args.verify:
+        print("VERDICT: %s (%d problems)"
+              % ("clean" if not problems else "FAILED", len(problems)))
+        return 1 if problems else 0
     return 0
 
 
