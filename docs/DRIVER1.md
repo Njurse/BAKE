@@ -237,6 +237,21 @@ above behind it, and it travels in the pool record (`scale`) so an item can be
 re-tuned without touching code. The damaged/low variants land in the same band
 and use the same factor.
 
+**The per-item plan is reproducible:** `tools/scalemodels.py --plan` prints
+`d1 level | idx | D1 bbox | scaled bbox | nearest D2 car | scale` for every
+item. A sample (the tool prints all 44):
+
+| d1 level | idx | D1 bbox | scaled | nearest D2 car |
+|---|---|---|---|---|
+| FRISCO | 0 | 388x286x1134 | 265x195x774 | VEGAS model 2 (284x152x764) |
+| FRISCO | 1 | 392x234x1066 | 268x160x728 | CHICAGO model 4 (319x262x724) |
+| MIAMI | 2 | 410x254x1070 | 280x173x730 | CHICAGO model 4 (319x262x724) |
+| IVIEW | 2 | 462x292x1202 | 315x199x821 | CHICAGO model 9 (418x322x846) |
+
+Every scaled D1 model lands within a few percent of an existing D2 car, which is
+the practical check that 2048/3000 is right. (CREDITS model 0, 52x49x48 →
+35x33x33, is the non-car outlier; the pool excludes it.)
+
 **Cosmetics (`CAR_COSMETICS`) — decided.** Driver 1 has no equivalent table, so
 the pool **synthesizes** one per item:
 

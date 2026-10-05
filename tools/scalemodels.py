@@ -129,6 +129,24 @@ def summarize(label, rows):
                 l=(min(ls), max(ls), sorted(ls)[len(ls)//2]))
 
 
+def plan_table(d1, d2, k):
+    """Print the per-item scale plan: D1 bbox -> scaled bbox -> nearest D2 car.
+
+    (Phase 4 assigns the stable pool_index; here the identity is the level and
+    the model index, which is what the pool record is built from.)
+    """
+    print("%-16s %-4s %-14s %-14s %-22s %s"
+          % ("d1 level", "idx", "D1 bbox", "scaled", "nearest D2 car", "scale"))
+    for name, m, dims, _bound in d1:
+        s = tuple(int(round(v * k)) for v in dims)
+        best = min(d2, key=lambda r: abs(r[2][2] - s[2])) if d2 else None
+        near = ("%s model %d %dx%dx%d" % (best[0], best[1], best[2][0],
+                                           best[2][1], best[2][2])) if best else "-"
+        print("%-16s %-4d %4dx%4dx%-4d %4dx%4dx%-4d %-22s %.5f"
+              % (name.split("/")[0], m, dims[0], dims[1], dims[2],
+                 s[0], s[1], s[2], near, k))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -137,10 +155,15 @@ def main(argv=None):
     ap.add_argument("--detail", action="store_true", help="print every row")
     ap.add_argument("--variants", default="clean",
                     help="D1 variants to include (clean,damaged,low); default clean")
+    ap.add_argument("--plan", action="store_true",
+                    help="print the per-item scale plan table")
     args = ap.parse_args(argv)
 
     d1 = d1_rows(args.d1, tuple(args.variants.split(",")))
     d2 = d2_rows(args.d2)
+    if args.plan:
+        plan_table(d1, d2, float(D2_CELL_SIZE) / D1_CELL_SIZE)
+        return 0
     if args.detail:
         for label, rows in (("D1", d1), ("D2", d2)):
             for name, m, dims, bound in rows:
