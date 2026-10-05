@@ -36,7 +36,8 @@ touches the engine. Reproduce with `tools/` in the order given.
 - `cosmetics1.py --check` — every derived field inside Driver 2's own ranges;
 - `cosmetics1.py --verify` — each `.LCF` is 4096 bytes with records ending at the
   3120 the engine reads;
-- `wheels1.py --check` — one shared wheelbase, four wheels on every shape;
+- `wheels1.py --check` — four wheels on every shape, the wheelbase/body ratio and
+  the sill's drop inside Driver 2's own bands;
 - `textured.py --baked` — 0 polys with no page.
 
 The pipeline is green end to end: `pages1 --selftest` → `lev1 --verify` →

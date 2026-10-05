@@ -378,10 +378,35 @@ native size (`cars.c:1264`); the radius only sets the axle height.
 **`FixCarCos` corrects the body's off-centre placement on load** (`handling.c:180`):
 `delta.vz = -(wheelDisp[0].vz + wheelDisp[1].vz - 14) / 2`. With a placement
 symmetric about the car's bbox z centre this reduces to `z_centre + 7`, so it is a
-direct readout of how far off centre the body sits. Ours run −11..37 against
+direct readout of how far off centre the body sits. Ours run −28..20 against
 Driver 2's ordinary cars' −34..+6, so the engine has very little to correct.
 `tools/cosmetics1.py --check` prints every field against Driver 2's own ranges side
 by side.
+
+**Where the four wheel centres come from — measured, and per car.** Neither number
+is a constant, which is what Driver 2's own cars say:
+
+| | Driver 2, ordinary cars | Driver 2, all 13 slots | ours |
+|---|---|---|---|
+| `wheelbase / half-length` | 1.04 .. 1.28 | 0.97 .. 1.60 | **1.04 .. 1.14** |
+| sill vs tyre contact, in radii | −1.17 .. −0.66 | — | **−1.21 .. −0.63** |
+| `wheelDisp.vy`, the axle height | −30 | −30 and **−116** (the vans) | per car |
+
+So the placement takes both from a **matched Driver 2 car, re-proportioned per
+axis onto our car's own bbox** — the same rule the light anchors already use, which
+keeps one saying for "put this where Driver 2 put it, on a car this size". The
+donor is matched on the **whole 3D proportion**, not length alone, because length
+alone cannot tell a van from a saloon and the van is exactly the one whose axle
+height is raised; the ordinary cars draw on donors 0, 1, 3 and 12.
+
+Two consequences worth knowing:
+
+- the body reaching *below* the tyre contact is Driver 2's own shape, not a bug —
+  25..51% of its cars' vertices sit below that line;
+- in the **previews** the wheels are pushed out to the body's side, because a D1
+  body is a solid shell with no arches and a faithful tyre is hidden by the body's
+  own side face. The file carries both: `centres` faithful for the records,
+  `render_centres` for the renderers.
 
 **Routing.** An `.LCF` is the natural home because it is exactly what the import
 path already reads: `LoadCarImport` pulls a city's `.LCF` beside its car data

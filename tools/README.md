@@ -15,7 +15,7 @@ against the game data and runs from the repo root. `tools/out/` is gitignored.
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
 | `wheels1.py` | the level's wheel models and the shared wheel textures, to the side (`--verify`); `--place` writes the per-car placement record; `--check` pins the placement invariants |
-| `wheelgeom.py` | where a wheel goes: the donor derivation (`--donor`, from Driver 2's own `.LCF`s) and the frozen shared wheelbase, with the placement arithmetic |
+| `wheelgeom.py` | where a wheel goes: the donor derivation and its measured bands (`--donor`, from Driver 2's own `.LCF`s), and `placement_from_donor()` — the per-car wheelbase, track and ride height |
 | `wheelrender.py` | the shared "draw a wheel" used by all three renderers — the wheel model, its sprite texture and its transparency, replicated at each centre and optionally spun about its axle |
 | `cosmetics1.py` | a full 236-byte `CAR_COSMETICS` per car: `--selftest` the engine's wheel arithmetic, `--build` derive and print, `--check` against Driver 2's own ranges, `--write DIR` the four city `.LCF`s, `--verify DIR`, `--dump FILE` |
 
@@ -66,8 +66,10 @@ it is the cheapest thing to run after a change to the page decoder.
   normal index inside its table, and 19 texture sets (9 permanent + 10 special)
   whose pages it carries itself.
 * `textured.py --baked` renders those with **0 polys missing a page**.
-* **43** cars placed on one shared wheelbase (431), each with 4 wheels on its own
-  ground line; radius 49.8 everywhere against Driver 2's own 49.
+* **43** cars each placed from the matched Driver 2 car: wheelbase 341..457
+  (1.04..1.14 of each body's length, inside Driver 2's 1.04..1.28), a track per
+  car, and a ride height where the body reaches 0.63..1.21 tyre radii past the
+  contact — the same shape Driver 2's own cars have.
 * **29** `CAR_COSMETICS` records over the four D1 cities, every field inside
   Driver 2's own ranges, and the wheel arithmetic round-trips all **208** of
   Driver 2's own wheel entries.
