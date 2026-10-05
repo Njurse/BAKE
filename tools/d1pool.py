@@ -87,6 +87,7 @@ def geom_record(index, sources, model):
         "bbox_raw": [min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)],
         "bounding_sphere": model.bounding_sphere,
         "scale": SCALE,
+        "vertices": [list(v) for v in vs],
         "polys": polys,
     }
 
