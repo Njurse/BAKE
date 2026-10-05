@@ -124,6 +124,8 @@ def iter_lumps(blob, container_offset, expect_type):
         s = u32(blob, off + 4)
         if t == 0xFF:                      # stop marker
             break
+        if t == 0 and s == 0:              # zero padding after the last segment
+            break
         yield t, off + 8, s
         off = align4(off + 8 + s)
 
@@ -369,7 +371,8 @@ def show_models(blob, path):
     return nerr
 
 
-
+def show_lumps(blob, path):
+    """Print the D1 section table and the DATA1/DATA2 sub-lumps."""
     hdr = read_header(blob)
     print("%s  (%d bytes)" % (path, len(blob)))
     print("  LUMPDESC: %d bytes" % hdr["lumpdesc_size"])
