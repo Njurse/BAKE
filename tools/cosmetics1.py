@@ -29,6 +29,7 @@ exactly that.
 """
 
 import argparse
+import json
 import math
 import os
 import struct
@@ -412,6 +413,62 @@ def parse_lcf(blob):
     return [blob[o:o + RECORD_SIZE] for o in offs]
 
 
+def fallback_record(donors, donor_city="CHICAGO", model=0):
+    """The record for a slot that has no car: Driver 2's own common saloon.
+
+    Not invented. It is Driver 2's model 0 repacked verbatim - wheelbase 431,
+    wheelSize 49, track 122, vy -30, mass / powerRatio / traction all 4096 - which
+    is the car whose numbers every other measurement in this module lands on.
+
+    The engine declares `dummyCosmetics` for exactly this (cosmetic.h:5) and never
+    defines it, so there was nothing to reuse from its side. A D1 city ships fewer
+    than 13 car models, so the unused slots need SOME record; a neutral Driver 2
+    saloon says "nothing here" unambiguously, where copying the city's own slot 0
+    would claim six slots are the same car.
+    """
+    recs = donors.get(donor_city)
+    if not recs:
+        return None
+    return _donor_bytes(recs, model)
+
+
+# Which fields this module MEASURES off the car itself, against those it takes
+# from the donor. Recorded per slot in the side-car so the borrowed ones are a
+# list to work through rather than a thing to remember.
+MEASURED_FIELDS = ("colBox", "cog", "cPoints", "wheelDisp", "wheelSize")
+BORROWED_FIELDS = ("headLight", "frontInd", "backInd", "brakeLight", "revLight",
+                   "policeLight", "exhaust", "smoke", "fire", "extraInfo",
+                   "powerRatio", "cbYoffset", "susCoeff", "traction",
+                   "twistRateX", "twistRateY", "twistRateZ", "mass")
+
+
+def write_city_sidecar(out_dir, city, got, donor_city, fallback):
+    """A per-city JSON saying, per slot, what is measured and what is borrowed.
+
+    This is the "until we figure it out properly" list made concrete: anything in
+    `borrowed` is standing in from the matched Driver 2 car and has not been derived
+    from the D1 data.
+    """
+    doc = {"city": city, "lcf": city + ".LCF", "donor_city": donor_city,
+           "fallback": "Driver 2 %s model 0" % donor_city,
+           "measured_fields": list(MEASURED_FIELDS),
+           "borrowed_fields": list(BORROWED_FIELDS),
+           "slots": []}
+    by_slot = {slot: (rec, di, wb, track) for slot, rec, di, wb, track in got}
+    for slot in range(13):
+        ent = by_slot.get(slot)
+        if ent is None or ent[0] is None:
+            doc["slots"].append({"slot": slot, "source": "fallback",
+                                 "note": "no car in this slot"})
+            continue
+        _rec, di, wb, track = ent
+        doc["slots"].append({"slot": slot, "source": "derived", "donor": di,
+                             "wheelbase": round(wb, 1), "track": round(track, 1)})
+    with open(os.path.join(out_dir, city + ".cosmetics.json"), "w") as f:
+        json.dump(doc, f, indent=1)
+    return doc
+
+
 def write_city_lcfs(levels_dir, out_dir, donor_city, donor_dir=None, cities=None):
     """Write one .LCF per D1 city. Returns {city: path}.
 
@@ -428,20 +485,22 @@ def write_city_lcfs(levels_dir, out_dir, donor_city, donor_dir=None, cities=None
         return None
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
+    fallback = fallback_record(donors, donor_city)
+    if fallback is None:
+        print("no fallback record: %s has no such city" % donor_city)
+        return None
     out = {}
     for city in sorted(got):
         by_slot = {slot: rec for slot, rec, _di, _r, _t in got[city]}
-        # An .LCF always holds 13, but a D1 city may ship fewer cars. The empty
-        # slots are filled with THIS city's own first record - a valid record for a
-        # car of this city, which nothing reads - rather than a run of zeros for the
-        # engine to trip over, or a borrowed bus from a city that needed one.
-        filled = [rec for _s, rec, _d, _r, _t in got[city] if rec]
-        spare = filled[0] if filled else _donor_bytes(donor_recs, 0)
-        records = [by_slot.get(slot) or spare for slot in range(13)]
+        # An .LCF always holds 13, but a D1 city ships fewer cars. The unused slots
+        # take the neutral Driver 2 saloon (see fallback_record) rather than this
+        # city's own slot 0, which would claim six slots are the same car.
+        records = [by_slot.get(slot) or fallback for slot in range(13)]
         path = os.path.join(out_dir, city + ".LCF")
         blob = make_lcf(records)
         with open(path, "wb") as f:
             f.write(blob)
+        write_city_sidecar(out_dir, city, got[city], donor_city, fallback)
         out[city] = path
     return out
 
