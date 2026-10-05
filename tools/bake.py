@@ -129,7 +129,12 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
         bound = int(max(max(abs(x), abs(y), abs(z)) for x, y, z in verts)) + 1
 
     hdr = struct.pack("<HHhBBhHHHiiiii",
-                      0,                 # shape_flags (0 = no flags; >0x800000 bails)
+                      0x8001,            # shape_flags. CONSTANT in Driver 2: all 57 of
+                                        # its records across CHICAGO and HAVANA read
+                                        # 32769, and our 0 was the last field that
+                                        # differed on every variant. Not guessed - measured.
+                                        # (tri_verts and npn DO vary there, including 0, so
+                                        # ours are left alone.)
                       0,                 # flags2
                       0,                 # instance_number
                       0,                 # tri_verts
@@ -151,18 +156,31 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
     return bytes(out)
 
 
-def build_damaged_record(vertices, scale, clean_size):
-    """A damaged block is MODEL + its own vertices ONLY (its polys are the clean
-    model's). lev1.py measures block size == 36 + nv*8 for every real one."""
+def build_damaged_record(vertices, scale, clean):
+    """A damaged block is MODEL + its own vertices ONLY - its polys are the clean
+    model's, which is why num_polys and poly_block must be CARRIED OVER from it
+    rather than zeroed. Zeroing them does not fail a load: the block sits inside
+    the lump, the offsets are valid, and the engine then builds a car whose
+    damaged model has no polygons at all - which is an access violation, not an
+    error. Measured against Driver 2's own damaged blocks: num_polys equals the
+    clean model's there (248 for CHICAGO model 1), while ours read 0."""
     verts = [(int(round(x * scale)), int(round(y * scale)), int(round(z * scale)))
              for x, y, z in vertices]
     nv = len(verts)
     bound = 0
     if verts:
         bound = int(max(max(abs(x), abs(y), abs(z)) for x, y, z in verts)) + 1
+    # EVERY structural field comes from the clean block; only the four the dented
+    # vertices own are replaced. Writing zeros here is what crashed: the offsets
+    # stayed in range so the load succeeded, and the engine then read a normals
+    # table at offset 0. Driver 2's own damaged blocks keep the clean's nofs and
+    # pnoffs (1052 and 3036 for CHICAGO model 1) and their real flags (32769) and
+    # tri_verts (3); ours had all four as zero.
+    (flags, flags2, inst, tri_verts, pad, _cbound, _cnpn, _cnv, npol,
+     vofs, pblock, nofs, pnoffs, _last) = struct.unpack_from("<HHhBBhHHHiiiii", clean, 0)
     hdr = struct.pack("<HHhBBhHHHiiiii",
-                      0, 0, 0, 0, 0, bound, 0, nv, 0,
-                      MODEL_HDR, clean_size, 0, 0, 0)
+                      flags, flags2, inst, tri_verts, pad, bound, 0, nv, npol,
+                      vofs, pblock, nofs, pnoffs, _last)
     out = bytearray(hdr)
     for x, y, z in verts:
         out += struct.pack("<hhhh", x, y, z, 0)
@@ -186,8 +204,16 @@ def build_car_models_lump(items):
         clean = build_model_record(g["vertices"], g["polys"],
                                    g.get("face_normals"), g.get("point_normals"),
                                    it["scale"])
-        dam = build_damaged_record(g["vertices"], it["scale"], len(clean))
-        blocks.append((clean, dam))
+        dam = build_damaged_record(g["vertices"], it["scale"], clean)
+        # A THIRD block is not optional, however little it is used: the engine's
+        # GetCarImportModels rejects a model outright unless all three offsets are
+        # present AND strictly increasing (clean < damaged < low). Writing only two
+        # is why every transplanted city reported "has no such model" for cars its
+        # blob demonstrably held. Driver 1's own low-detail model is not carried
+        # through the bake yet, so the clean record is repeated for it - the car is
+        # then undamaged at distance rather than dented, which is the safer way to
+        # be wrong.
+        blocks.append((clean, dam, clean))
 
     body = bytearray()
     body += struct.pack("<i", len(items))                     # model count @ +0
@@ -200,12 +226,14 @@ def build_car_models_lump(items):
         if blk is None:
             offsets.append((-1, -1, -1))
             continue
-        clean, dam = blk
+        clean, dam, low = blk
         clean_ofs = len(body) - 164
         body += clean
         dam_ofs = len(body) - 164
         body += dam
-        offsets.append((clean_ofs, dam_ofs, -1))
+        low_ofs = len(body) - 164
+        body += low
+        offsets.append((clean_ofs, dam_ofs, low_ofs))
 
     for i, (c, d, l) in enumerate(offsets):
         struct.pack_into("<3i", body, entries_at + i * 12, c, d, l)
@@ -383,6 +411,22 @@ def verify(blob):
     n = 0
     ngt = 0
     same = 0
+
+    # THE THREE-OFFSET RULE. The engine takes a model only if clean, damaged and
+    # low are all present and strictly increasing; a blob that fails this loads,
+    # reports its size, and then every model in it is refused - which is exactly
+    # how a missing third offset hid for so long. Checked here rather than only in
+    # the writer so the self-check keeps saying it.
+    for m in range(MAX_CAR_MODELS):
+        c, d, l = struct.unpack_from("<3i", blob, body + 4 + m * 12)
+        if c == -1:
+            continue
+        if not (c < d < l):
+            return ("model %d has offsets (clean %d, damaged %d, low %d) - the engine "
+                    "needs all three strictly increasing, or it refuses the model"
+                    % (m, c, d, l)), {}
+        if l >= _size:
+            return "model %d low offset %d is outside the block (%d)" % (m, l, _size), {}
     for m in range(MAX_CAR_MODELS):
         st = sm.d2_model_stats(blob, body, m)
         if not st:

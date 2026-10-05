@@ -156,13 +156,17 @@ def build_record(verts, scale, centres, radius, donor, donor_bbox):
     # front/rear/height.
     for o, p in zip(POS_OFFSETS[:9], donor["anchors"]):
         struct.pack_into("<3h", out, o, *scaled(p))
-    # colBox and cog are ours outright - measured, not inherited. colBox is this
-    # car's own box; cog is that box's centre, which is where the weight sits.
+    # colBox is ours outright, measured from this car's own bbox.
     struct.pack_into("<3h", out, 212, int(round(half[0])), int(round(half[1])),
                      int(round(half[2])))
-    struct.pack_into("<3h", out, 220, 0,
-                     int(round((max(ys) + min(ys)) / 2.0 * scale)),
-                     int(round((max(zs) + min(zs)) / 2.0 * scale)))
+    # cog is the DONOR's, re-proportioned per axis like the anchors - it is NOT
+    # the bbox centre, which is what it used to be and which is the origin on any
+    # symmetric model. MEASURED: Driver 2 stores about -85 here on every car (85
+    # units ABOVE the origin in this down-positive system - a deliberately high
+    # centre of mass, which is what its handling is tuned around), and it is never
+    # zero in any of its 52 records. Deriving it from the box put the weight at the
+    # origin on all 29 transplanted cars.
+    struct.pack_into("<3h", out, 220, *scaled(donor["cog"]))
     # cPoints[12]: the collision hull, from the car's own footprint - three heights
     # (ground, belt, roof) by the four corners, in Driver 2's own order (low front,
     # low rear, mid front, high front, high rear, mid rear).
@@ -359,6 +363,22 @@ def check_records(levels_dir, donor_city, donor_dir, cities=None):
                             % (tag, len(rec["wheelDisp"])))
         if rec["colBox"] == (0, 0, 0):
             problems.append("%s: colBox is zero" % tag)
+
+        # cog must not be the origin. Driver 2 stores a high centre of mass on
+        # every car it ships (-74..-95 on y in all 52 of its records) and never a
+        # zero, so a zero here means it was measured off the box instead of taken
+        # from the donor - which is how all 29 transplanted cars were wrong.
+        if rec["cog"] == (0, 0, 0):
+            problems.append("%s: cog is the origin - take the donor's, not the "
+                            "bbox centre" % tag)
+        # The band is Driver 2's OWN SPAN, not one city's: measured across
+        # CHICAGO/HAVANA/VEGAS/RIO its cog.vy runs -284..15 with a median of -87,
+        # so a tight band round one city's cars would flag values Driver 2 ships
+        # itself. This catches a value that is nowhere near anything, not a car
+        # that is merely large.
+        elif not (-320 <= rec["cog"][1] <= 40):
+            problems.append("%s: cog.vy %d is outside the range Driver 2 itself "
+                            "uses (-284..15)" % (tag, rec["cog"][1]))
         if rec["sA"][5] <= 0:
             problems.append("%s: wheelSize %d" % (tag, rec["sA"][5]))
         # the runtime scalars must be non-zero - a zero mass or powerRatio is a car
