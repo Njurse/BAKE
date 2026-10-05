@@ -68,15 +68,61 @@ def write_obj(path, model):
                 f.write("f %d %d %d\n" % (tri[0] + 1, tri[1] + 1, tri[2] + 1))
 
 
+def normals_for(model):
+    """(face_normals, point_normals, n_per_poly, source) for one model.
+
+    The engine lights a GT poly from the model's point_normals table, indexed by
+    that poly's own normal indices (cars.c:650 indexes nlist = point_normals with
+    them, and cars.c:964 recomputes each entry's pad from the table's direction).
+    So a baked model must ship such a table AND indices that resolve inside it.
+
+      * when the source model ships one, copy it and keep its indices verbatim -
+        measured valid: on all 46 variants that have a table, every GT index is
+        in range and max(index) == npn - 1;
+      * when it ships none (65 of 111 variants), synthesise one normal per
+        VERTEX - the average of the face normals meeting there - and index it by
+        the vertex, which is what smooth shading means.
+
+    Both tables are stored the way the engine wants them, i.e. in the models'
+    own INWARD convention (lev1.NORMAL_SIGN), not the outward one the renderers
+    shade with - the engine derives its lighting from the direction.
+    """
+    if model.face_normals:
+        face = [list(n) for n in model.face_normals]
+    else:
+        face = [[int(round(c * 4096)) for c in model._geo_normal(p)]
+                for p in model.polys]
+
+    if model.normals:
+        return face, [list(n) for n in model.normals], \
+            [list(p.n) for p in model.polys], "model"
+
+    acc = [[0.0, 0.0, 0.0] for _ in model.vertices]
+    for p in model.polys:
+        g = model._geo_normal(p)                 # outward
+        for vi in p.v:
+            acc[vi][0] += g[0]
+            acc[vi][1] += g[1]
+            acc[vi][2] += g[2]
+    pt = []
+    for a in acc:
+        a = [c * lev1.NORMAL_SIGN for c in a]    # store the inward convention
+        L = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) ** 0.5 or 1.0
+        pt.append([int(round(a[0] / L * 4096)), int(round(a[1] / L * 4096)),
+                   int(round(a[2] / L * 4096))])
+    return face, pt, [list(p.v) for p in model.polys], "synthesised"
+
+
 def geom_record(index, sources, model):
     vs = model.vertices
     xs = [v[0] for v in vs]
     ys = [v[1] for v in vs]
     zs = [v[2] for v in vs]
+    face_n, point_n, pn, nsource = normals_for(model)
     polys = []
-    for p in model.polys:
+    for k, p in enumerate(model.polys):
         polys.append({"kind": p.kind, "set": p.texture_set, "id": p.texture_id,
-                      "v": list(p.v), "uv": [list(u) for u in p.uv],
+                      "v": list(p.v), "n": pn[k], "uv": [list(u) for u in p.uv],
                       "color": list(p.color)})
     return {
         "version": 1,
@@ -87,6 +133,9 @@ def geom_record(index, sources, model):
         "bbox_raw": [min(xs), min(ys), min(zs), max(xs), max(ys), max(zs)],
         "bounding_sphere": model.bounding_sphere,
         "scale": SCALE,
+        "normals_source": nsource,
+        "face_normals": face_n,
+        "point_normals": point_n,
         "vertices": [list(v) for v in vs],
         "polys": polys,
     }

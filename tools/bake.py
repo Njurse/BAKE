@@ -20,9 +20,11 @@ The car-models segment body:
     +4    13 x 3 int32 offsets (clean, damaged, low; -1 absent), relative +164
     +164  per model: MODEL(36) + SVECTOR vertices + the poly stream
 
-BLOCKOUT: every source poly is emitted as a FLAT F3/F4 record (no texture set),
-so the model needs no palette or texture page at all - that is what keeps the
-first milestone geometry-only. Vertices are scaled by the D1->D2 cell ratio.
+BLOCKOUT: the poly encoder is now full GT3/GT4 - each record carries the source
+(texture set, texture id, u, v) AND the normal indices, and every model ships
+both normal tables, so a baked car is smooth-shaded rather than faceted. Only
+the texture PAGES are still absent (Phase C). Vertices are scaled by the
+D1->D2 cell ratio.
 
 Usage:
     python bake.py --pool DIR/pool.json [--out DIR] [--first N]
@@ -45,26 +47,61 @@ MODEL_HDR = 36              # sizeof(MODEL): 9 fields, 36 bytes
 FLAT_COLOR = (0x7F, 0x7F, 0x7F)
 
 
-def build_model_record(vertices, polys, scale):
-    """One MODEL + its vertices + a flat F3/F4 poly stream. Returns bytes."""
+def build_model_record(vertices, polys, face_normals, point_normals, scale):
+    """One MODEL + vertices + BOTH normal tables + a GT3/GT4 poly stream.
+
+    The table order is the models' own and is load-bearing: the offsets are
+    cumulative, so vertices -> normals (one per poly) -> point_normals (the table
+    the GT indices resolve in) -> the poly stream.
+    """
     verts = [(int(round(x * scale)), int(round(y * scale)), int(round(z * scale)))
              for x, y, z in vertices]
     nv = len(verts)
+    fnorm = [tuple(n) for n in (face_normals or [])]
+    pnorm = [tuple(n) for n in (point_normals or [])]
+    npol = len(polys)
 
-    # the poly stream: one F3 (8 bytes) per triangle, F4 (12) per quad
     stream = bytearray()
     npolys = 0
-    for p in polys:
+    for k, p in enumerate(polys):
         v = list(p["v"])
+        uv = [tuple(u) for u in p.get("uv", [])]
+        ns = list(p.get("n") or [])
+        setid = p.get("set", 0) & 0xFF
+        texid = p.get("id", 0) & 0xFF
+        col = tuple(p.get("color", FLAT_COLOR))
         if len(v) == 3:
-            stream += bytes([0, v[0], v[1], v[2], 0,
-                             FLAT_COLOR[0], FLAT_COLOR[1], FLAT_COLOR[2]])
+            rec = bytearray(24)
+            rec[0] = 22                                  # GT3
+            rec[1], rec[2] = setid, texid
+            rec[4:7] = bytes(x & 0xFF for x in v[:3])
+            rec[8:11] = bytes((ns[i] if i < len(ns) else 0) & 0xFF for i in range(3))
+            for i in range(3):
+                u = uv[i] if i < len(uv) else (0, 0)
+                rec[12 + i * 2] = u[0] & 0xFF
+                rec[13 + i * 2] = u[1] & 0xFF
+            rec[20:23] = bytes(col)
+            stream += rec
             npolys += 1
-        else:
-            stream += bytes([1, 0, 0, 0, v[0], v[1], v[2], v[3], 0, 0, 0, 0])
+        elif len(v) == 4:
+            rec = bytearray(24)
+            rec[0] = 23                                  # GT4
+            rec[1], rec[2] = setid, texid
+            rec[4:8] = bytes(x & 0xFF for x in v[:4])
+            rec[8:12] = bytes((ns[i] if i < len(ns) else 0) & 0xFF for i in range(4))
+            for i in range(4):
+                u = uv[i] if i < len(uv) else (0, 0)
+                rec[12 + i * 2] = u[0] & 0xFF
+                rec[13 + i * 2] = u[1] & 0xFF
+            rec[20:23] = bytes(col)
+            stream += rec
             npolys += 1
 
-    poly_block = MODEL_HDR + nv * 8            # the polys sit right after the verts
+    vofs = MODEL_HDR
+    nofs = vofs + nv * 8
+    pnoffs = nofs + len(fnorm) * 8
+    poly_block = pnoffs + len(pnorm) * 8
+
     bound = 0
     if verts:
         bound = int(max(max(abs(x), abs(y), abs(z)) for x, y, z in verts)) + 1
@@ -76,15 +113,18 @@ def build_model_record(vertices, polys, scale):
                       0,                 # tri_verts
                       0,                 # zBias
                       bound,             # bounding_sphere
-                      0,                 # num_point_normals
+                      len(pnorm),        # num_point_normals
                       nv,                # num_vertices
                       npolys,            # num_polys
-                      MODEL_HDR,         # vertices offset
-                      poly_block,        # poly_block offset
-                      0, 0, 0)           # normals / point_normals / collision_block
+                      vofs, poly_block, nofs, pnoffs,
+                      0)                 # collision_block
     out = bytearray(hdr)
     for x, y, z in verts:
         out += struct.pack("<hhhh", x, y, z, 0)
+    for n in fnorm:
+        out += struct.pack("<hhhh", n[0], n[1], n[2], 0)
+    for n in pnorm:
+        out += struct.pack("<hhhh", n[0], n[1], n[2], 0)
     out += stream
     return bytes(out)
 
@@ -112,7 +152,9 @@ def build_car_models_lump(items):
     blocks = []          # (clean_bytes, dam_bytes)
     for it in items:
         g = it["geom"]
-        clean = build_model_record(g["vertices"], g["polys"], it["scale"])
+        clean = build_model_record(g["vertices"], g["polys"],
+                                   g.get("face_normals"), g.get("point_normals"),
+                                   it["scale"])
         dam = build_damaged_record(g["vertices"], it["scale"], len(clean))
         blocks.append((clean, dam))
 
