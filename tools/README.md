@@ -14,6 +14,22 @@ against the game data and runs from the repo root. `tools/out/` is gitignored.
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
+| `wheels1.py` | the level's wheel models and the shared wheel textures, to the side (`--verify`); `--place` writes the per-car placement record; `--check` pins the placement invariants |
+| `wheelgeom.py` | where a wheel goes: the donor derivation (`--donor`, from Driver 2's own `.LCF`s) and the frozen shared wheelbase, with the placement arithmetic |
+| `wheelrender.py` | the shared "draw a wheel" used by all three renderers — the wheel model, its sprite texture and its transparency, replicated at each centre and optionally spun about its axle |
+| `cosmetics1.py` | a full 236-byte `CAR_COSMETICS` per car: `--selftest` the engine's wheel arithmetic, `--build` derive and print, `--check` against Driver 2's own ranges, `--write DIR` the four city `.LCF`s, `--verify DIR`, `--dump FILE` |
+
+The wheeled renders are **extra copies** — the plain sheets are left untouched
+(verified byte-identical):
+
+```sh
+python $T/preview.py   --wheeled      # + preview_wheeled.png, preview_pool_wheeled.png
+python $T/textured.py  --baked $T/out/bake/D1POOL.LEV --wheeled
+python $T/spin.py      --wheeled      # + spin_wheeled.gif, spin_wheeled/*.gif
+```
+
+`--wheel-turns N` sets how many revolutions the wheels make per turn of the car
+(default 3), which is what makes the tyre texture visibly rotate.
 
 Typical run (both level directories are gitignored local data):
 
@@ -29,9 +45,13 @@ python $T/pages1.py $LEV/FRISCO.LEV --write $T/out/pages
 python $T/scalemodels.py --d1 $LEV --d2 $D2 --plan
 python $T/d1pool.py --levels $LEV --render
 python $T/bake.py --pool $T/out/pool.json --first 13
-python $T/preview.py
-python $T/textured.py --baked $T/out/bake/D1POOL.LEV
-python $T/spin.py
+python $T/wheels1.py --place && python $T/wheels1.py --check
+python $T/preview.py --wheeled
+python $T/textured.py --baked $T/out/bake/D1POOL.LEV --wheeled
+python $T/spin.py --wheeled
+python $T/cosmetics1.py --selftest
+python $T/cosmetics1.py --check
+python $T/cosmetics1.py --write $T/out/lcf     # writes and then re-reads each file
 ```
 
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
@@ -46,6 +66,12 @@ it is the cheapest thing to run after a change to the page decoder.
   normal index inside its table, and 19 texture sets (9 permanent + 10 special)
   whose pages it carries itself.
 * `textured.py --baked` renders those with **0 polys missing a page**.
+* **43** cars placed on one shared wheelbase (431), each with 4 wheels on its own
+  ground line; radius 49.8 everywhere against Driver 2's own 49.
+* **29** `CAR_COSMETICS` records over the four D1 cities, every field inside
+  Driver 2's own ranges, and the wheel arithmetic round-trips all **208** of
+  Driver 2's own wheel entries.
+* Four `.LCF` files, each byte-structurally identical to a Driver 2 one.
 
 ## The two things that bite
 
@@ -58,4 +84,6 @@ it is the cheapest thing to run after a change to the page decoder.
   after the other.
 
 See [`../docs/DRIVER1.md`](../docs/DRIVER1.md) for the format work and the
-roadmap, and [`../docs`](../docs) for the phase status.
+roadmap, [`../docs/SPOOFED_CITIES.md`](../docs/SPOOFED_CITIES.md) for the plan to
+add the four D1 cities alongside Driver 2's four, and [`../docs`](../docs) for the
+phase status.
