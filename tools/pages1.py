@@ -274,6 +274,81 @@ def show_pallet(blob, path):
                  clut_rgb(recs[0]["row"])[:4]))
 
 
+def load_tga_rgb(path):
+    """An uncompressed 24/32-bit TGA -> a 256x256 list of (r, g, b), top row
+    first. Only what the reference tool writes."""
+    d = open(path, "rb").read()
+    idlen, cmaptype, imgtype = d[0], d[1], d[2]
+    w, h = struct.unpack_from("<HH", d, 12)
+    bpp, desc = d[16], d[17]
+    if imgtype != 2 or cmaptype != 0:
+        raise ValueError("%s: not an uncompressed true-colour TGA" % path)
+    px = d[18 + idlen:]
+    step = bpp // 8
+    cols = [tuple(px[i * step:i * step + 3]) for i in range(w * h)]
+    rows = [cols[i * w:(i + 1) * w] for i in range(h)]
+    if not (desc & 0x20):          # bit 5 clear = bottom-up, the TGA default
+        rows = rows[::-1]
+    return rows
+
+
+def compare_pages(blob, path, tga_dir):
+    """Cross-check our page decode against DriverLevelTool's own TGA exports.
+
+    A byte-exact RGB comparison is NOT available: the tool's page image carries
+    ~240 distinct colours where the page holds 16, so it is not a plain indexed
+    render (it very likely blends the entries whose bit 15 is set - every entry
+    in a D1 car CLUT has bit 15 set). What IS comparable is the STRUCTURE, via a
+    CLUT-free test: two texels that are the same index must be the same colour in
+    the tool's image, checked per 32x32 block.
+    """
+    import glob
+    ofs, entries, ti = level_pages(blob)
+    if ti is None:
+        print("%s: no LUMP_TEXTUREINFO" % path)
+        return
+    base = os.path.basename(path)
+    all_sets = [s for s, _o, _z in entries] + [p[0] for p in ti["speclist"]]
+    print("%s: %d permanent + %d special pages" % (base, len(entries),
+                                                   ti["nspecpages"]))
+    exported = set()
+    for s, o, z in entries:
+        if s in exported:
+            continue
+        tga = os.path.join(tga_dir, "PAGE_%d.tga" % s)
+        if not os.path.exists(tga):
+            print("  set %3d: the tool exported no PAGE_%d.tga" % (s, s))
+            continue
+        exported.add(s)
+        _rows, page = read_page(blob, o, z)
+        idx = []
+        for y in range(256):
+            for xb in page[y * 128:(y + 1) * 128]:
+                idx.append(xb & 0xF)
+                idx.append(xb >> 4)
+        img = load_tga_rgb(tga)
+        colours = {c for r in img for c in r}
+        clean = 0
+        total = 0
+        for by in range(0, 256, 32):
+            for bx in range(0, 256, 32):
+                seen = {}
+                ok = True
+                for yy in range(by, by + 32):
+                    for xx in range(bx, bx + 32):
+                        v = idx[yy * 256 + xx]
+                        c = img[yy][xx]
+                        if seen.setdefault(v, c) != c:
+                            ok = False
+                total += 1
+                clean += 1 if ok else 0
+        print("  set %3d: PAGE_%d has %3d colours; index->colour bijection in "
+              "%2d/%d 32x32 blocks" % (s, s, len(colours), clean, total))
+    missing = [s for s in all_sets if s not in exported]
+    if missing:
+        print("  pages the tool did not export: %s" % sorted(set(missing)))
+
+
 def _selftest():
     import random
     rng = random.Random(1234)
@@ -331,9 +406,14 @@ def main(argv=None):
                     help="print the level's permanent page list")
     ap.add_argument("--pallet", action="store_true",
                     help="print the level's LUMP_PALLET records")
+    ap.add_argument("--compare", metavar="TGA_DIR",
+                    help="cross-check pages against DriverLevelTool's TGA exports")
     args = ap.parse_args(argv)
     if args.selftest:
         return _selftest()
+    if args.lev and args.compare:
+        compare_pages(open(args.lev, "rb").read(), args.lev, args.compare)
+        return 0
     if args.lev and args.info:
         show_pages(open(args.lev, "rb").read(), args.lev)
         return 0
