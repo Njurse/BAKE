@@ -83,24 +83,65 @@ def donor_from_lcfs(levels_dir):
     return (bases[mid], sizes[mid], DONOR_TYRE_HALFWIDTH, centres[mid], per_city)
 
 
-def placement(body, wheel, scale, wheelbase=DONOR_WHEELBASE):
-    """The four wheel centres for one car, and the wheel's own scale.
+def wheel_radii(levels_dir, name="CLEANWHEEL"):
+    """{level: raw radius} for every level that names this wheel."""
+    import lev1
 
-    `body` and `wheel` are neutral models (lev1.Model), `scale` is the bake scale
-    the body was drawn at. The wheels are anchored on the CAR's own bbox, so the
-    tyres sit on the ground line rather than wherever the model origin happens to
-    be, and the axles straddle that bbox's z centre.
+    out = {}
+    for fn in sorted(os.listdir(levels_dir)):
+        if not fn.upper().endswith(".LEV"):
+            continue
+        blob = open(os.path.join(levels_dir, fn), "rb").read()
+        if lev1.models_lump(blob) is None:
+            continue
+        m = lev1.level_model(blob, name)
+        if not m or not m.vertices:
+            continue
+        wy = [v[1] for v in m.vertices]
+        wz = [v[2] for v in m.vertices]
+        out[fn[:-4]] = max(max(wy) - min(wy), max(wz) - min(wz)) / 2.0
+    return out
 
-    The track is per car - half the body width less the tyre's half width, so the
-    tyre sits flush with the body's side. The WHEELBASE, by choice, is the one
+
+def canonical_wheel(levels_dir, name="CLEANWHEEL"):
+    """The wheel model D1's cars actually share -> (level, Model).
+
+    Most car levels agree EXACTLY - 25 x 73 x 73 on FRISCO, LA, MIAMI, NEWYORK and
+    TRAIN - while CREDITS and IVIEW carry far larger versions at a different scale
+    from their own car models (CREDITS' is radii out at ~1500, i.e. bigger than
+    the car). Taking the median radius keeps those display assets out of the car
+    pipeline, instead of letting one level's UI model set the wheels for everyone.
+    """
+    import lev1
+
+    radii = wheel_radii(levels_dir, name)
+    if not radii:
+        return None, None
+    ordered = sorted(radii, key=lambda lv: radii[lv])
+    pick = ordered[len(ordered) // 2]
+    blob = open(os.path.join(levels_dir, pick + ".LEV"), "rb").read()
+    return pick, lev1.level_model(blob, name)
+
+
+def placement(body_verts, wheel_verts, scale, wheelbase=DONOR_WHEELBASE):
+    """The four wheel centres for one car, and the wheel's own radius.
+
+    `body_verts` and `wheel_verts` are plain (x, y, z) sequences - the car's
+    vertices and the wheel model's - and `scale` is the bake scale the body was
+    drawn at. The wheels are anchored on the CAR's own bbox, so the tyres sit on
+    the ground line rather than wherever the model origin happens to be, and the
+    axles straddle that bbox's z centre.
+
+    The track is per car: half the body width less the tyre's half width, so the
+    tyre sits flush with the body's side. The WHEELBASE is, by choice, the one
     shared number.
     """
-    bx = [v[0] for v in body.vertices]
-    by = [v[1] for v in body.vertices]
-    bz = [v[2] for v in body.vertices]
-    wx = [abs(v[0]) for v in wheel.vertices]
-    wy = [v[1] for v in wheel.vertices]
-    wz = [v[2] for v in wheel.vertices]
+    bx = [v[0] for v in body_verts]
+    by = [v[1] for v in body_verts]
+    bz = [v[2] for v in body_verts]
+    wx = [abs(v[0]) for v in wheel_verts]
+    wy = [v[1] for v in wheel_verts]
+    wz = [v[2] for v in wheel_verts]
 
     radius = max(max(wy) - min(wy), max(wz) - min(wz)) / 2.0 * scale
     half_tyre = max(wx) * scale
@@ -117,7 +158,7 @@ def placement(body, wheel, scale, wheelbase=DONOR_WHEELBASE):
         sx = -1 if (i & 2) == 0 else 1            # wheels 0/1 left, 2/3 right
         sz = 1 if (i & 1) == 0 else -1            # 0/2 front, 1/3 rear
         out.append((xc + sx * track, ground - radius, zc + sz * z_axle))
-    return out, radius
+    return out, radius, track
 
 
 def main(argv=None):

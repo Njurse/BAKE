@@ -243,6 +243,49 @@ def verify(levels_dir, out_root):
     return problems
 
 
+def placements(levels_dir, pool_path, out_root):
+    """Per pool item: which wheel model it wears and where the four wheels go.
+
+    Anchored on each car's OWN bbox (wheelgeom.placement), so the tyres sit on the
+    ground line rather than wherever the model origin happens to be. The
+    wheelbase is the one shared constant; the track is per car, from its own
+    width. This is also the record the cosmetics need, since a CAR_COSMETICS
+    carries wheelDisp and wheelSize.
+    """
+    import wheelgeom
+
+    index = {"version": 1, "wheelbase": wheelgeom.DONOR_WHEELBASE,
+             "donor_radius": wheelgeom.DONOR_WHEEL_RADIUS, "items": []}
+    pool = json.load(open(pool_path))
+    pd = os.path.dirname(pool_path)
+    # ONE wheel model for the whole pool: the shared D1 wheel, not each level's,
+    # because CREDITS/IVIEW ship display-scale versions (see canonical_wheel).
+    canonical, wheel = wheelgeom.canonical_wheel(levels_dir)
+    index["wheel_model"] = "CLEANWHEEL"
+    index["wheel_level"] = canonical
+    index["wheel_radii_raw"] = wheelgeom.wheel_radii(levels_dir)
+    if wheel is None:
+        return index
+    for it in pool["items"]:
+        g = json.load(open(os.path.join(pd, it["geom"])))
+        centres, radius, track = wheelgeom.placement(
+            g["vertices"], wheel.vertices, g["scale"])
+        index["items"].append({
+            "pool_index": it["pool_index"],
+            "level": g["sources"][0][0], "model": g["sources"][0][1],
+            "wheel_model": "CLEANWHEEL", "wheel_level": canonical,
+            "scale": g["scale"], "radius": radius, "track": track,
+            "wheelbase": wheelgeom.DONOR_WHEELBASE,
+            "centres": [list(c) for c in centres],
+        })
+    d = os.path.join(out_root, "wheels")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    with open(os.path.join(d, "placement.json"), "w") as f:
+        json.dump(index, f, indent=1)
+    return index
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -251,10 +294,29 @@ def main(argv=None):
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     ap.add_argument("--verify", action="store_true",
                     help="check what has been exported instead of writing it")
+    ap.add_argument("--place", action="store_true",
+                    help="write the per-car wheel placement record and stop")
+    ap.add_argument("--pool", default=os.path.join(HERE, "out", "pool.json"))
     args = ap.parse_args(argv)
 
     if args.verify:
         return 1 if verify(args.levels, args.out) else 0
+
+    if args.place:
+        idx = placements(args.levels, args.pool, args.out)
+        if not idx["items"]:
+            print("no placeable pool items")
+            return 1
+        rad = [i["radius"] for i in idx["items"]]
+        trk = [i["track"] for i in idx["items"]]
+        print("%d items placed; wheelbase %d (shared); wheel from %s"
+              % (len(idx["items"]), idx["wheelbase"], idx.get("wheel_level")))
+        print("  radius  %.1f .. %.1f" % (min(rad), max(rad)))
+        print("  track   %.1f .. %.1f  (per car, from its own width)" % (min(trk), max(trk)))
+        print("  per-level raw wheel radii: %s" %
+              {k: int(v) for k, v in sorted(idx["wheel_radii_raw"].items())})
+        print("wrote %s" % os.path.join(args.out, "wheels", "placement.json"))
+        return 0
 
     index = export(args.levels, args.out)
     tex = texture_exports(args.levels, args.out)
