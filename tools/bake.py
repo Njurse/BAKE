@@ -60,6 +60,10 @@ D2_COMPLIANT_MODELS = (1, 2, 3, 4, 8, 9, 10, 11, 12)
 # cars sit on exactly these numbers (5, 6 and 7 carry 17 of the pool's 43 shapes),
 # which is the whole reason the bake remaps instead of writing at D1's numbers.
 D2_GAP_MODELS = (5, 6, 7)
+# The first set number a bake may hand out. texture_set 0 is the engine's "no
+# page" sentinel (the pin walk skips it and CarSetRemap sends it to a host slot),
+# so a car page must never be numbered 0 - see build_page_plan.
+PAGE_SET_BASE = 1
 DATA1_OFF = 2048            # as in the real level files
 MODEL_HDR = 36              # sizeof(MODEL): 9 fields, 36 bytes
 FLAT_COLOR = (0x7F, 0x7F, 0x7F)
@@ -80,20 +84,19 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
              for x, y, z in vertices]
     nv = len(verts)
 
-    # Drop flat untextured polys that sit entirely below the ground plane (max y < 0).
-    # Driver 1 models carry these as under-arch fillers inside the wheel wells; the
-    # engine draws them OPAQUE (flat shading - a car body has no per-poly
-    # transparency), so they show as grey squares in the wheel arches. Dropping them
-    # leaves the arch open, which is what the wheel (a separate model, drawn in the
-    # same place) wants. The textured underside (set != 0) is kept: only the flat
-    # fillers are the problem, and only when the WHOLE poly is below the floor.
+    # Keep only TEXTURED polys. Driver 1 also ships flat untextured polys (F3/F4:
+    # a near-black interior/underside), and the engine's car reader has no flat
+    # path Driver 2 ever exercises - a D2 car model carries no flat poly at all.
+    # This writer used to emit them as GT3/GT4 with set 0/id 0, i.e. on
+    # texture_set 0 - the engine's "no page" sentinel - so their polys drew
+    # whatever the host had at that index. They are dropped rather than faked.
+    # (The old rule dropped only the flat UNDER-ARCH fillers, max y < 0; dropping
+    # every flat covers those and the rest.)
     kept_polys = []
     kept_fnorm = []
     for k, p in enumerate(polys):
-        if p.get("set", 0) == 0:
-            ys = [vertices[i][1] for i in p["v"]]
-            if max(ys) < 0:
-                continue
+        if p.get("kind") not in ("FT3", "FT4", "GT3", "GT4"):
+            continue
         kept_polys.append(p)
         if face_normals and k < len(face_normals):
             kept_fnorm.append(face_normals[k])
@@ -377,6 +380,14 @@ def build_page_plan(items, levels_dir):
     bounds. The ids are remapped and the CLUT rows reordered to match (the tile
     image is untouched - it comes from the UVs). The blanket rule, not a one-off.
 
+    SET NUMBERS START AT 1, NEVER 0. The engine reserves texture_set 0 as "no
+    page": the pin walk skips it (texture.c `if (set == 0 ...) continue`) and
+    CarSetRemap re-indexes it onto a HOST/world slot - so a car page numbered 0
+    is never paged in and every poly on it draws the level's own page instead.
+    That is the "the hood is invisible on car 1, and models 1 and 2 are half
+    broken" report: the first used page of a bake took 0. Driver 2 never names a
+    car page 0 for the same reason. PAGE_SET_BASE keeps the reservation.
+
     Returns (remap, tex_remap, perms, specs).
     """
     import pages1
@@ -437,7 +448,7 @@ def build_page_plan(items, levels_dir):
                 target = specs
             else:
                 continue
-            remap[key] = len(perms) + len(specs)
+            remap[key] = PAGE_SET_BASE + len(perms) + len(specs)
             entry = blob[o:o + z]
             tm = tex_remap.get(key)
             if tm:
