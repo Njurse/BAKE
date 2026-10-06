@@ -306,6 +306,28 @@ items belong.
   decide what a pool set maps onto.
 - **`exports.def`.** Any exported array whose dimension changes needs the
   matching `exports.def` line in the same commit (the export-generation rule).
+- **`texture_set 0` IS RESERVED — a bake must never number a car page 0.** The
+  engine treats set 0 as "no page": `CarImportPin`'s walk skips it
+  (`texture.c`, `if (set == 0 ...) continue`) and `CarSetRemap` re-indexes it onto
+  a HOST/world slot, so every poly on it draws the level's own page instead of the
+  car's. This was a live defect: the first version of this bake numbered the first
+  used page 0, so NEWCASTLE model 1 had 75 of 135 polys (its hood among them) on a
+  page that was never paged in, model 2 had 78 of 139, and model 3 only 20 of 233
+  (its untextured ones) - which read as "the hood is invisible on car 1, cars 1
+  and 2 are half broken, car 3 is fine". `bake.py` now starts at `PAGE_SET_BASE = 1`
+  and the untextured F3/F4 polys (which carry set 0 legitimately) are DROPPED
+  rather than emitted as GT3/GT4: no Driver 2 car model carries a flat poly at all.
+  Verify with the `PERMS`/`SPECS` sets and a scan that no model poly has
+  `texture_set == 0`.
+- **A guest city gets EIGHT palette rows, and Driver 1 cities bake 11-13 sets.**
+  `CarPalIndexInCity` resolves a set to a `civ_clut` row by searching
+  `carTpages[city][0..7]`, so a set past the eighth answers `-1` and
+  `CarPalIndexForBuild` sends it to the block base row: those panels draw their own
+  pinned page but the FIRST page's palette. That is the visible "minor corruption
+  on vehicles with extra panels" (VEGAS ambulance, large SUVs, long cars), and it
+  is engine-side, not a bake bug. See `MODS/carhacks/docs/PALETTES.md` §7 for the
+  two candidate fixes (fill `carTpages`' unused zero slots - D1 cities use only 5
+  of the 8 - or assign rows per model at build time; 8 rows cannot hold 13 sets).
 
 ---
 
