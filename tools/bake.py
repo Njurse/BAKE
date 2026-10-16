@@ -68,6 +68,22 @@ DATA1_OFF = 2048            # as in the real level files
 MODEL_HDR = 36              # sizeof(MODEL): 9 fields, 36 bytes
 FLAT_COLOR = (0x7F, 0x7F, 0x7F)
 
+
+def _flat_555(rgb8):
+    """8-bit (r,g,b) -> a PSX RGB555 word (STP bit clear, so opaque)."""
+    r, g, b = rgb8
+    return ((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10)
+
+
+def _flat_clut_row(rgb8):
+    """One 32-byte CLUT row whose every entry is the same opaque colour.
+
+    A solid-colour page is filled with index 0, so only entry 0 matters, but
+    filling all 16 guards against a UV accidentally sampling another index and
+    drawing transparent black instead.
+    """
+    return struct.pack("<16H", *([_flat_555(rgb8)] * 16))
+
 # Where the source levels live; set from --levels. Driver 1's data is gitignored
 # / local-only, so nothing here may hard-code a machine path.
 LEVELS_DIR = "src_rebuild/bin/Release_dev/DRIVER/LEVELS"
@@ -84,18 +100,17 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
              for x, y, z in vertices]
     nv = len(verts)
 
-    # Keep only TEXTURED polys. Driver 1 also ships flat untextured polys (F3/F4:
-    # a near-black interior/underside), and the engine's car reader has no flat
-    # path Driver 2 ever exercises - a D2 car model carries no flat poly at all.
-    # This writer used to emit them as GT3/GT4 with set 0/id 0, i.e. on
-    # texture_set 0 - the engine's "no page" sentinel - so their polys drew
-    # whatever the host had at that index. They are dropped rather than faked.
-    # (The old rule dropped only the flat UNDER-ARCH fillers, max y < 0; dropping
-    # every flat covers those and the rest.)
+    # Keep TEXTURED polys AND the flat F3/F4 polys. Driver 1's cabin glass and
+    # interior are flat untextured polys carrying a colour, and the engine's car
+    # reader has no flat path Driver 2 ever exercises. build_page_plan gives the
+    # flat polys a synthesized solid-colour page (their `set`/`id` name the CLUT
+    # row holding their colour), so they are re-encoded here as GT3/GT4 with a
+    # NEUTRAL grey tint - the CLUT row supplies the real colour, and grey is what
+    # a D1 GT poly carries so the texture is not darkened.
     kept_polys = []
     kept_fnorm = []
     for k, p in enumerate(polys):
-        if p.get("kind") not in ("FT3", "FT4", "GT3", "GT4"):
+        if p.get("kind") not in ("F3", "F4", "FT3", "FT4", "GT3", "GT4"):
             continue
         kept_polys.append(p)
         if face_normals and k < len(face_normals):
@@ -316,6 +331,8 @@ def build_pallet(page_list, levels_dir, remap, tex_remap):
 
     by_level = {}
     for new_set, level, old_set, _bytes, _size in page_list:
+        if level is None:                        # the synthesized flat-colour page
+            continue
         by_level.setdefault(level, []).append((new_set, old_set))
 
     for level in by_level:
@@ -335,6 +352,18 @@ def build_pallet(page_list, levels_dir, remap, tex_remap):
                 texnum = tex_remap[key].get(texnum, texnum)
             body += struct.pack("<4i", r["palette"], texnum, new_set, -1)
             body += r["row"]
+            count += 1
+
+    # The flat-colour page: one palette record per CLUT row. Its colours are not
+    # read from any source level, so emit them straight from the page entry the
+    # planner synthesized.
+    for new_set, level, old_set, entry, _size in page_list:
+        if level is not None:
+            continue
+        npal = int.from_bytes(entry[:4], "little")
+        for i in range(npal):
+            body += struct.pack("<4i", 0, i, new_set, -1)
+            body += entry[4 + i * 32:4 + i * 32 + 32]
             count += 1
 
     body += struct.pack("<i", -1)                    # the lone terminator
@@ -454,7 +483,38 @@ def build_page_plan(items, levels_dir):
             if tm:
                 entry = _compact_page_entry(entry, tm)
             target.append((remap[key], level, p["set"], entry, len(entry)))
-    return remap, tex_remap, perms, specs
+
+    # Flat F3/F4 polys (the cabin glass/interior) get ONE synthesized solid-colour
+    # page: its CLUT holds one row per distinct flat colour, the page image is all
+    # index 0, and each flat poly's `id` selects its colour's row. It rides in the
+    # permanent list with `level is None`, which build_pallet keys on to emit the
+    # flat colours' palette records directly (there is no source level to read).
+    flat_colours = []
+    flat_index = {}
+    for it in items:
+        g = it["geom"]
+        if g is None:
+            continue
+        for p in g["polys"]:
+            if p["kind"] not in ("F3", "F4"):
+                continue
+            c = tuple(p.get("color", (0, 0, 0)))
+            if c not in flat_index:
+                flat_index[c] = len(flat_colours)
+                flat_colours.append(c)
+
+    flat_set = 0
+    if flat_colours:
+        if len(flat_colours) > 32:
+            raise SystemExit("a city's flat polys use %d distinct colours; the "
+                             "engine holds 32 CLUT rows" % len(flat_colours))
+        flat_set = PAGE_SET_BASE + len(perms) + len(specs)
+        rows = b"".join(_flat_clut_row(c) for c in flat_colours)
+        page = pages1.encode_literal(b"\x00" * 0x8000)      # 256x256 4bpp, all index 0
+        entry = struct.pack("<i", len(flat_colours)) + rows + page
+        perms.append((flat_set, None, None, entry, len(entry)))
+
+    return remap, tex_remap, perms, specs, (flat_set, flat_index)
 
 
 def build_file(items, perms, specs, levels_dir, remap, tex_remap):
@@ -628,11 +688,16 @@ def bake_one_city(args, levels_dir):
                              "data for - the engine could never address it"
                              % (args.city, gap))
 
-    remap, tex_remap, perms, specs = build_page_plan(items, levels_dir)
+    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir)
     for it in items:
         if it["geom"] is None:
             continue
         for p in it["geom"]["polys"]:
+            if p["kind"] in ("F3", "F4"):
+                p["set"] = flat_set
+                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
+                p["color"] = list(FLAT_COLOR)   # neutral tint; the CLUT row is the colour
+                continue
             key = (args.city, p["set"])
             if key in remap:
                 p["set"] = remap[key]
@@ -708,10 +773,15 @@ def main(argv=None):
     # One set number means a different page in another level, so a pool that
     # flattens seven levels has to renumber - otherwise two cities' cars would
     # share a page. Do it before anything reads the polys.
-    remap, tex_remap, perms, specs = build_page_plan(items, levels_dir)
+    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir)
     for it in items:
         level = it["geom"]["sources"][0][0]
         for p in it["geom"]["polys"]:
+            if p["kind"] in ("F3", "F4"):
+                p["set"] = flat_set
+                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
+                p["color"] = list(FLAT_COLOR)   # neutral tint; the CLUT row is the colour
+                continue
             key = (level, p["set"])
             if key in remap:
                 p["set"] = remap[key]
