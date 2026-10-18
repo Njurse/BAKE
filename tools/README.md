@@ -70,8 +70,8 @@ it is the cheapest thing to run after a change to the page decoder.
   pages added to the same page plan. A missing or display-scale variant falls
   back to the canonical car-scale D1 wheel (`wheelgeom.canonical_wheel`), so
   MIAMI's absent `DAMWHEEL` and NEWCASTLE's CREDITS source still carry D1
-  wheels. The engine now selects those per car instead of drawing the host
-  level's shared wheels.
+  wheels. The engine keeps the host wheel mesh and applies those textures (and
+  their palettes) to it, rather than drawing the imported mesh.
 * `textured.py --baked` renders those with **0 polys missing a page**.
 * **43** cars each placed from the matched Driver 2 car: wheelbase 341..457
   (1.04..1.14 of each body's length, inside Driver 2's 1.04..1.28), a track per

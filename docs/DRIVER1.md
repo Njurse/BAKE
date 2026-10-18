@@ -224,9 +224,10 @@ the canonical car-scale set rather than a wheel larger than the car.
 The engine side is `GetCarImportWheel(city, kind)`: `models.c` copies the
 records, applies the same `CarSetRemap` the car polys use, runs the host
 wheel transform (`MangleWheelModel`), and returns NULL for an absent variant.
-`DrawCarWheels` selects them per car from `GetCarModelSourceCity(cp->ap.model)`
-and keeps the host wheel for any absent variant; `LoadImportedTPages` registers
-their pages against the slots that can draw them.
+`DrawCarWheels` keeps the HOST level's wheel mesh and uses the imported model
+only as the texture/UV source, so a D1 car keeps the proven wheel topology and
+wears its own city's wheel texture and palette. `LoadImportedTPages` registers
+the wheel's source sets against the slots that can draw them.
 
 ## 5. `DT*.BIN` — what they are (and are not)
 
