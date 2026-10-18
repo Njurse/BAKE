@@ -44,7 +44,13 @@ LUMP_PALLET = 25
 LUMP_TEXTUREINFO = 34
 LUMP_CAR_DATA = 35          # the DATA1 container's own type
 LUMP_DESC = 37
+# A segment Driver 2 itself never writes. It carries the source city's wheel
+# models beside its car models, so an imported D1 car can wear D1 wheels instead
+# of the host level's shared CLEANWHEEL/FASTWHEEL/DAMWHEEL. Unknown segment
+# types are skipped by the engine's other walks, so this is additive.
+LUMP_CAR_WHEELS = 200
 MAX_CAR_MODELS = 13
+WHEEL_ORDER = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL")
 
 # Driver 2's COMPLIANT model numbers, in the order a transplant fills them: the
 # four its frontend actually offers first (carNumLookup, FEmain.c:639, maps
@@ -278,6 +284,203 @@ def build_car_models_lump(items):
     return bytes(body)
 
 
+def build_wheel_record(geom, scale):
+    """One wheel MODEL + vertices + an FT4 poly stream.
+
+    Wheels are drawn by DrawWheelObject, which reads POLYFT4 records directly and
+    never uses normals, so this deliberately differs from build_model_record:
+    FT4 (20 bytes) instead of GT3/GT4 (24), and no normal tables. The returned
+    block is exactly `poly_block` bytes - what GetCarModel copies.
+    """
+    verts = [(int(round(x * scale)), int(round(y * scale)), int(round(z * scale)))
+             for x, y, z in geom["vertices"]]
+    nv = len(verts)
+
+    stream = bytearray()
+    npolys = 0
+    # Driver 1's untextured marker is set 255. A wheel still carries real UVs on
+    # those quads (the edge-on faces), and the offline renderer draws them with
+    # the wheel's own sprite. Do the same here: they share the wheel's textured
+    # set, which is the only one the page plan can resolve.
+    sprite_set = None
+    for p in geom["polys"]:
+        if p.get("kind") == "FT4" and p.get("set", 0) != 255:
+            sprite_set = p.get("set", 0) & 0xFF
+            break
+
+    for p in geom["polys"]:
+        if p.get("kind") != "FT4":
+            raise SystemExit("wheel %s carries a %s poly; wheel records are FT4 only"
+                             % (geom.get("name", "?"), p.get("kind")))
+        v = list(p["v"])
+        uv = [tuple(u) for u in (p.get("uv") or [(0, 0)] * 4)]
+        setid = p.get("set", 0) & 0xFF
+        if setid == 255 and sprite_set is not None:
+            setid = sprite_set
+        rec = bytearray(20)
+        rec[0] = 21                                   # FT4
+        rec[1] = setid
+        rec[2] = p.get("id", 0) & 0xFF
+        rec[4:8] = bytes(x & 0xFF for x in v[:4])
+        for i in range(4):
+            u = uv[i] if i < len(uv) else (0, 0)
+            rec[8 + i * 2] = u[0] & 0xFF
+            rec[9 + i * 2] = u[1] & 0xFF
+        rec[16:19] = bytes(p.get("color", FLAT_COLOR))
+        stream += rec
+        npolys += 1
+
+    vofs = MODEL_HDR
+    poly_block = vofs + nv * 8
+    bound = 0
+    if verts:
+        bound = int(max(max(abs(x), abs(y), abs(z)) for x, y, z in verts)) + 1
+
+    hdr = struct.pack("<HHhBBhHHHiiiii",
+                      0x8001,             # same shape_flags as the car records
+                      0,                  # flags2
+                      0,                  # instance_number
+                      0,                  # tri_verts
+                      0,                  # zBias
+                      bound,              # bounding_sphere
+                      0,                  # num_point_normals
+                      nv,                 # num_vertices
+                      npolys,             # num_polys
+                      vofs, poly_block, 0, 0,
+                      0)                  # collision_block
+    out = bytearray(hdr)
+    for x, y, z in verts:
+        out += struct.pack("<hhhh", x, y, z, 0)
+    out += stream
+    return bytes(out)
+
+
+def build_wheel_lump(wheels):
+    """LUMP_CAR_WHEELS body: count, 3 offsets, then the wheel blocks.
+
+    `wheels` is a 3-entry list of geom records (or None). Offsets are relative to
+    the segment body start, and -1 means that variant is absent - the engine then
+    keeps the host level's wheel for it.
+    """
+    if len(wheels) > MAX_CAR_MODELS:
+        raise SystemExit("too many wheel variants")
+    body = bytearray()
+    body += struct.pack("<i", len(wheels))          # count @ +0
+    offsets_at = len(body)
+    body += b"\x00" * (len(wheels) * 4)             # offsets @ +4
+
+    offsets = []
+    for g in wheels:
+        if g is None:
+            offsets.append(-1)
+            continue
+        offsets.append(len(body))                   # relative to the segment body
+        body += build_wheel_record(g, g.get("scale", d1pool.SCALE))
+
+    for i, ofs in enumerate(offsets):
+        struct.pack_into("<i", body, offsets_at + i * 4, ofs)
+    return bytes(body)
+
+
+def _wheel_is_car_scale(model, scale):
+    """A wheel from a car level, not a menu/credits display asset.
+
+    CREDITS and IVIEW name CLEANWHEEL/FASTWHEEL too, at radii 10-20x the car
+    levels'. Taking one of those would fit a car with a wheel larger than itself.
+    """
+    if model is None or not model.vertices or not model.polys:
+        return False
+    import wheelgeom
+    radius = wheelgeom.wheel_radius(model, scale)
+    return 20.0 <= radius <= 120.0
+
+
+def _wheel_slot(levels_dir, level, name, model):
+    """The model-table slot a named wheel occupies in a level (0 when unknown)."""
+    import wheels1
+    blob = open(os.path.join(levels_dir, level + ".LEV"), "rb").read()
+    for slot, n, _m in wheels1.wheels_in(blob):
+        if n == name:
+            return slot
+    return 0
+
+
+def collect_wheels(levels_dir, city=None):
+    """The three wheel models an import blob should carry, in WHEEL_ORDER.
+
+    A city's own wheels win when they are car-scale. A missing or display-scale
+    variant falls back to wheelgeom.canonical_wheel() - the median car-scale wheel
+    across the D1 cities - so MIAMI's missing DAMWHEEL and NEWCASTLE's CREDITS
+    source still get a real D1 wheel instead of the host level's.
+
+    Returns a 3-entry list of {'level','slot','name','geom'} or None per variant.
+    """
+    import lev1
+    import wheels1
+    import wheelgeom
+
+    source = d1pool.source_file(city) if city else None
+    own = {}
+    if source:
+        blob = open(os.path.join(levels_dir, source + ".LEV"), "rb").read()
+        for slot, name, model in wheels1.wheels_in(blob):
+            own[name] = (source, slot, model)
+
+    out = []
+    for name in WHEEL_ORDER:
+        picked = None
+        got = own.get(name)
+
+        if got and _wheel_is_car_scale(got[2], d1pool.SCALE):
+            picked = got
+        else:
+            level, model = wheelgeom.canonical_wheel(levels_dir, name)
+
+            if level is not None and model is not None:
+                picked = (level, _wheel_slot(levels_dir, level, name, model), model)
+
+        if picked is None:
+            out.append(None)
+            continue
+
+        level, slot, model = picked
+        geom = wheels1.wheel_record(level, slot, name, model)
+        geom["sources"] = [[level, slot]]
+        geom["scale"] = d1pool.SCALE
+        out.append({"level": level, "slot": slot, "name": name, "geom": geom})
+
+    return out
+
+
+def _geom_records(items, wheels):
+    """Every geometry record a page plan has to see: cars first, then wheels."""
+    out = []
+    for it in items:
+        if it.get("geom") is not None:
+            out.append(it["geom"])
+    for w in (wheels or []):
+        if w is not None:
+            out.append(w["geom"])
+    return out
+
+
+def apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index):
+    """Rewrite every car and wheel poly onto the baked set/id numbers."""
+    for g in _geom_records(items, wheels):
+        level = g["sources"][0][0]
+        for p in g["polys"]:
+            if p["kind"] in ("F3", "F4"):
+                p["set"] = flat_set
+                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
+                p["color"] = list(FLAT_COLOR)
+                continue
+            key = (level, p["set"])
+            if key in remap:
+                p["set"] = remap[key]
+            if key in tex_remap:
+                p["id"] = tex_remap[key].get(p["id"], p["id"])
+
+
 def build_textureinfo(perms, specs):
     """LUMP_TEXTUREINFO for the pool, in the layout ProcessTextureInfo and
     ParseImportedTextureInfoForCity both walk:
@@ -390,7 +593,7 @@ def _compact_page_entry(entry, texmap):
     return out
 
 
-def build_page_plan(items, levels_dir):
+def build_page_plan(items, levels_dir, wheels=None):
     """Assign every distinct (source level, texture set) a fresh set number.
 
     Set numbers are per-level, so the same number means a different page in
@@ -402,6 +605,10 @@ def build_page_plan(items, levels_dir):
     3/4, its special list; only 67/68 are permanent). The engine resolves the two
     lists separately (gCarImportPerms vs gCarImportSpecs) and layers their page
     data one after the other, so the plan keeps them apart too.
+
+    `wheels` (optional) adds the wheel models' pages to the same plan, so an
+    imported car's wheels carry their own texture rather than borrowing the host
+    level's shared wheel sprite.
 
     Also compacts each set's texture ids to 0..N-1 when a page carries an id the
     engine cannot hold: Driver 1 pages have up to 33 CLUT rows (texture ids
@@ -417,17 +624,16 @@ def build_page_plan(items, levels_dir):
     broken" report: the first used page of a bake took 0. Driver 2 never names a
     car page 0 for the same reason. PAGE_SET_BASE keeps the reservation.
 
-    Returns (remap, tex_remap, perms, specs).
+    Returns (remap, tex_remap, perms, specs, (flat_set, flat_index)).
     """
     import pages1
+
+    geoms = _geom_records(items, wheels)
 
     # First pass: every texture id each (level, set) actually uses, across all the
     # city's models, so the compaction is the union of what the cars reference.
     used_ids = {}
-    for it in items:
-        g = it["geom"]
-        if g is None:               # a slot the city has no car in
-            continue
+    for g in geoms:
         level = g["sources"][0][0]
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
@@ -444,10 +650,7 @@ def build_page_plan(items, levels_dir):
     perms = []
     specs = []
     listed = {}
-    for it in items:
-        g = it["geom"]
-        if g is None:               # a slot the city has no car in
-            continue
+    for g in geoms:
         level = g["sources"][0][0]
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
@@ -491,10 +694,7 @@ def build_page_plan(items, levels_dir):
     # flat colours' palette records directly (there is no source level to read).
     flat_colours = []
     flat_index = {}
-    for it in items:
-        g = it["geom"]
-        if g is None:
-            continue
+    for g in geoms:
         for p in g["polys"]:
             if p["kind"] not in ("F3", "F4"):
                 continue
@@ -517,7 +717,7 @@ def build_page_plan(items, levels_dir):
     return remap, tex_remap, perms, specs, (flat_set, flat_index)
 
 
-def build_file(items, perms, specs, levels_dir, remap, tex_remap):
+def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None):
     car = build_car_models_lump(items)
 
     segs = bytearray()
@@ -530,6 +730,15 @@ def build_file(items, perms, specs, levels_dir, remap, tex_remap):
 
     seg = struct.pack("<ii", LUMP_CAR_MODELS, len(car)) + car
     seg += b"\x00" * ((4 - len(seg) % 4) % 4)
+
+    # The optional wheel models ride beside the car models. An engine that does
+    # not know this type skips it by its size, exactly like any other segment.
+    wheel_geoms = [w["geom"] if w is not None else None for w in (wheels or [])]
+    if any(g is not None for g in wheel_geoms):
+        wheel = build_wheel_lump(wheel_geoms)
+        seg += struct.pack("<ii", LUMP_CAR_WHEELS, len(wheel)) + wheel
+        seg += b"\x00" * ((4 - len(seg) % 4) % 4)
+
     seg += segs
 
     data1 = struct.pack("<ii", LUMP_CAR_DATA, len(seg) + 8) + seg
@@ -558,6 +767,58 @@ def build_file(items, perms, specs, levels_dir, remap, tex_remap):
         out += entry
         out += b"\x00" * ((2048 - len(entry) % 2048) % 2048)
     return bytes(out)
+
+
+def _data1_segment(blob, want):
+    """(body_offset, size) of one DATA1 segment, or (None, 0)."""
+    d1_off = struct.unpack_from("<I", blob, 8)[0]
+    off = d1_off + 8
+    while off + 8 <= len(blob):
+        t, s = struct.unpack_from("<ii", blob, off)
+        if t == 0xFF or s < 0 or off + 8 + s > len(blob):
+            break
+        if t == want:
+            return off + 8, s
+        off = off + 8 + ((s + 3) & ~3)
+    return None, 0
+
+
+def verify_wheels(blob):
+    """Re-read the optional wheel segment: real FT4 models the engine can draw."""
+    import lev1
+
+    body, size = _data1_segment(blob, LUMP_CAR_WHEELS)
+    if body is None:
+        return None, 0
+
+    n = struct.unpack_from("<i", blob, body)[0]
+    if n < 1 or n > len(WHEEL_ORDER):
+        return "wheel segment says %d entries (expected 1..%d)" % (n, len(WHEEL_ORDER)), 0
+
+    got = 0
+    for i in range(n):
+        ofs = struct.unpack_from("<i", blob, body + 4 + i * 4)[0]
+        if ofs == -1:
+            continue
+        if ofs < 0 or ofs >= size:
+            return "wheel %d offset %d is outside the segment (%d)" % (i, ofs, size), 0
+
+        model = lev1.decode_model(blob, body + ofs)
+        if model.errors:
+            return "wheel %d decoded with %d poly errors" % (i, len(model.errors)), 0
+        if not model.vertices or not model.polys:
+            return "wheel %d is empty" % i, 0
+        if len(model.vertices) > 24:
+            return "wheel %d has %d vertices (the draw path copies at most 24)" \
+                % (i, len(model.vertices)), 0
+        for p in model.polys:
+            if p.kind != "FT4":
+                return "wheel %d carries a %s poly (only FT4 is drawable)" % (i, p.kind), 0
+        got += 1
+
+    if got == 0:
+        return "wheel segment carries no models", 0
+    return None, got
 
 
 def verify(blob):
@@ -625,7 +886,12 @@ def verify(blob):
                 same += 1
     if not n:
         return "no models decoded", {}
-    return None, {"models": n, "gt": ngt, "hemisphere": same}
+
+    wheel_problem, wheel_count = verify_wheels(blob)
+    if wheel_problem:
+        return wheel_problem, {}
+
+    return None, {"models": n, "gt": ngt, "hemisphere": same, "wheels": wheel_count}
 
 
 def bake_one_city(args, levels_dir):
@@ -688,23 +954,20 @@ def bake_one_city(args, levels_dir):
                              "data for - the engine could never address it"
                              % (args.city, gap))
 
-    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir)
-    for it in items:
-        if it["geom"] is None:
+    wheels = collect_wheels(levels_dir, args.city)
+    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir, wheels)
+    for w in wheels:
+        if w is None:
             continue
-        for p in it["geom"]["polys"]:
-            if p["kind"] in ("F3", "F4"):
-                p["set"] = flat_set
-                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
-                p["color"] = list(FLAT_COLOR)   # neutral tint; the CLUT row is the colour
+        for p in w["geom"]["polys"]:
+            if p["set"] == 255:              # untextured marker: shares the wheel sprite
                 continue
-            key = (args.city, p["set"])
-            if key in remap:
-                p["set"] = remap[key]
-            if key in tex_remap:
-                p["id"] = tex_remap[key].get(p["id"], p["id"])
+            if (w["level"], p["set"]) not in remap:
+                raise SystemExit("%s wheel %s names set %d, which is not in that "
+                                 "level's page lists" % (args.city, w["name"], p["set"]))
 
-    out = build_file(items, perms, specs, levels_dir, remap, tex_remap)
+    apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
+    out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
@@ -723,6 +986,8 @@ def bake_one_city(args, levels_dir):
             continue
         print("   slot %2d: %d verts, %d tris, normals %s"
               % (n, g["verts"], g["tris"], g.get("normals_source")))
+    print("   wheels: %s" % ", ".join(
+        ("%s from %s" % (w["name"], w["level"])) if w else "absent" for w in wheels))
     print("   texture sets: %d permanent + %d special" % (len(perms), len(specs)))
     problem, stats = verify(out)
     if stats:
@@ -773,22 +1038,20 @@ def main(argv=None):
     # One set number means a different page in another level, so a pool that
     # flattens seven levels has to renumber - otherwise two cities' cars would
     # share a page. Do it before anything reads the polys.
-    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir)
-    for it in items:
-        level = it["geom"]["sources"][0][0]
-        for p in it["geom"]["polys"]:
-            if p["kind"] in ("F3", "F4"):
-                p["set"] = flat_set
-                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
-                p["color"] = list(FLAT_COLOR)   # neutral tint; the CLUT row is the colour
+    wheels = collect_wheels(levels_dir)
+    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir, wheels)
+    for w in wheels:
+        if w is None:
+            continue
+        for p in w["geom"]["polys"]:
+            if p["set"] == 255:              # untextured marker: shares the wheel sprite
                 continue
-            key = (level, p["set"])
-            if key in remap:
-                p["set"] = remap[key]
-            if key in tex_remap:
-                p["id"] = tex_remap[key].get(p["id"], p["id"])
+            if (w["level"], p["set"]) not in remap:
+                raise SystemExit("pool wheel %s names set %d, which is not in that "
+                                 "level's page lists" % (w["name"], p["set"]))
 
-    blob = build_file(items, perms, specs, levels_dir, remap, tex_remap)
+    apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
+    blob = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)

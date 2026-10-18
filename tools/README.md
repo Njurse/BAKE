@@ -10,7 +10,7 @@ against the game data and runs from the repo root. `tools/out/` is gitignored.
 | `pages1.py` | the texture half of the same file: `--selftest` the RLE, `--info` the permanent page list, `--pallet` the car palette records, `--compare DIR` a structural cross-check against DriverLevelTool's TGAs, `--write DIR` PNGs + a JSON index |
 | `scalemodels.py` | measures D1 vs D2 car-model sizes; `--plan` prints the per-item plan (D1 bbox -> scaled bbox -> nearest D2 car) |
 | `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`, carrying each poly's texture naming and both normal tables; `--render` a wireframe sheet |
-| `bake.py` | bakes pool items into an engine-shaped blob (`out/bake/D1POOL.LEV`): car models, `LUMP_PALLET`, `LUMP_TEXTUREINFO` and the texture pages. Self-checks by re-reading what it wrote |
+| `bake.py` | bakes pool items into an engine-shaped blob (`out/bake/D1POOL.LEV`): car models, `LUMP_CAR_WHEELS` (clean/damaged/fast wheel models), `LUMP_PALLET`, `LUMP_TEXTUREINFO` and the texture pages. Self-checks by re-reading what it wrote |
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
@@ -65,6 +65,13 @@ it is the cheapest thing to run after a change to the page decoder.
 * `bake.py` writes 13/13 models with 0 poly errors and **2161 GT polys**, every
   normal index inside its table, and 19 texture sets (9 permanent + 10 special)
   whose pages it carries itself.
+* Each per-city bake also writes a `LUMP_CAR_WHEELS` segment: the city's own
+  `CLEANWHEEL` / `DAMWHEEL` / `FASTWHEEL` as FT4 models, with their texture
+  pages added to the same page plan. A missing or display-scale variant falls
+  back to the canonical car-scale D1 wheel (`wheelgeom.canonical_wheel`), so
+  MIAMI's absent `DAMWHEEL` and NEWCASTLE's CREDITS source still carry D1
+  wheels. The engine now selects those per car instead of drawing the host
+  level's shared wheels.
 * `textured.py --baked` renders those with **0 polys missing a page**.
 * **43** cars each placed from the matched Driver 2 car: wheelbase 341..457
   (1.04..1.14 of each body's length, inside Driver 2's 1.04..1.28), a track per

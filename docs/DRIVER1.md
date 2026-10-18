@@ -196,6 +196,38 @@ baked Driver 1 car exactly as it treats Driver 2's own cars. (This is also why
 
 ---
 
+## 4a. The wheels travel with the car data
+
+A Driver 1 car's wheels are **not part of its body mesh**. Every level names
+`CLEANWHEEL`, `DAMWHEEL` and `FASTWHEEL` in its model table, and Driver 2's
+engine finds those names once and draws them for every car - so an imported D1
+car used to wear the *host level's* wheels, including its wheel texture.
+
+The per-city bake now writes a `LUMP_CAR_WHEELS` segment (type **200**, which no
+Driver 2 level writes) beside `LUMP_CAR_MODELS`:
+
+    int32 count                      1..3
+    int32 offsets[count]             relative to the segment body; -1 = absent
+    per offset: MODEL + vertices + an FT4 poly stream
+
+The three records are clean, damaged and fast. They are FT4 rather than GT3/GT4
+because `DrawWheelObject` reads `POLYFT4` records directly and never uses
+normals. Their texture pages are added to the same `LUMP_TEXTUREINFO` plan as
+the car pages, and their set numbers go through the same bake-time renumbering
+(the source level's set is meaningful only in that level).
+
+`bake.py` picks a city's own wheels when they are car-scale and falls back to
+`wheelgeom.canonical_wheel()` otherwise: MIAMI has no `DAMWHEEL`, and
+NEWCASTLE's source (`CREDITS.LEV`) carries display-scale wheels, so both take
+the canonical car-scale set rather than a wheel larger than the car.
+
+The engine side is `GetCarImportWheel(city, kind)`: `models.c` copies the
+records, applies the same `CarSetRemap` the car polys use, runs the host
+wheel transform (`MangleWheelModel`), and returns NULL for an absent variant.
+`DrawCarWheels` selects them per car from `GetCarModelSourceCity(cp->ap.model)`
+and keeps the host wheel for any absent variant; `LoadImportedTPages` registers
+their pages against the slots that can draw them.
+
 ## 5. `DT*.BIN` — what they are (and are not)
 
 Six files, exactly **6484 bytes** each, beside six of the eight levels; the third
