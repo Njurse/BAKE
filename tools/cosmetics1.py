@@ -166,7 +166,9 @@ def build_record(verts, scale, centres, radius, donor, donor_bbox):
     # centre of mass, which is what its handling is tuned around), and it is never
     # zero in any of its 52 records. Deriving it from the box put the weight at the
     # origin on all 29 transplanted cars.
-    struct.pack_into("<3h", out, 220, *scaled(donor["cog"]))
+    # x is forced to 0: a lateral COG is a permanent sideways weight bias (a pull).
+    _cog = scaled(donor["cog"])
+    struct.pack_into("<3h", out, 220, 0, _cog[1], _cog[2])
     # cPoints[12]: the collision hull, from the car's own footprint - three heights
     # (ground, belt, roof) by the four corners, in Driver 2's own order (low front,
     # low rear, mid front, high front, high rear, mid rear).

@@ -211,6 +211,10 @@ def placement_from_donor(body_verts, donor_bbox, donor_centres, scale):
     #   after   all five cities    1 or less
     our_c[0] = 0.0
     don_c = [(dmin[i] + dmax[i]) / 2.0 for i in range(3)]
+    # ...and about the DONOR's x = 0 too. Its wheel centres are symmetric about x = 0,
+    # but its body box need not be; subtracting that box's x centre shifted the whole
+    # wheel set sideways again by -don_c[0] * ratio (the pull our_c[0] = 0 was for).
+    don_c[0] = 0.0
     don_h = [(dmax[i] - dmin[i]) / 2.0 for i in range(3)]
     ratio = [(our_h[i] / don_h[i]) if don_h[i] else 1.0 for i in range(3)]
     out = []
