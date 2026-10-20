@@ -662,8 +662,23 @@ Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
 `(address, length, loop, rate)` directory + VAG data. The beta bank's sample 1
 (2,112 bytes, 11025 Hz) is the acceleration engine and sample 0 (3,200 bytes,
 11025 Hz) the idle; the horns are the retail `VOICES.BLK` samples 6/7/8, mixed
-into the same composed bank. The retail bank remains the fallback. The bank is
-registered in `JERICHO/CONFIG/cities.ini`:
+into the same composed bank. The retail bank remains the fallback.
+
+**Siren note (recorded for the import wiring).** Retail cop cars at source slot 1
+(MIAMI, FRISCO, LA, NEWYORK) and source slot 8 (LA, IVIEW) use retail
+`VOICES.BLK` sample 4 for their siren; the beta's car model 3 uses `SOUND.SBK`
+sample 7. The engine's cop siren is the global `CarHasSiren` bank
+(`gamesnd.c`), so this is not the per-car horn chosen by `add_car_sounds.py`.
+
+**Wheel-palette comparison.** The beta's set 1 has 27 CLUT rows and differs from
+retail MIAMI's set 1 in one row; the beta's set 53 has 24 rows while retail
+MIAMI's set 53 page has none. The beta wheel pages are not the retail set and
+the engine's wheel draw path did not take them (clean, damaged and fast all
+rendered wrong). BETAMIAMI therefore uses MIAMI's known-good CLEAN/DAM/FAST
+wheel art (`SELF_WHEEL_CITIES` is empty), exactly like the other D1 cities; the
+engine derives the wheel palette from the MIAMI wheel sprites (rows 6/6 of 27).
+
+The bank is registered in `JERICHO/CONFIG/cities.ini`:
 
 ```ini
 city_0 = BETAMIAMI, ..\DRIVER\D1CARS\BETAMIAMI.LEV, ..\DRIVER\D1CARS\BETAMIAMI.LCF

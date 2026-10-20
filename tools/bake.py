@@ -53,7 +53,10 @@ LUMP_CAR_WHEELS = 200
 # The one D1 city whose wheels every baked city carries (see collect_wheels).
 WHEEL_SOURCE_CITY = "MIAMI"
 # Cities whose own wheel art is good enough to carry, rather than MIAMI's.
-SELF_WHEEL_CITIES = ("BETAMIAMI",)
+# BETAMIAMI's early wheel pages are not the retail set (set 53 has no retail
+# CLUT rows) and the engine's wheel draw path did not take them, so it uses
+# MIAMI's known-good CLEAN/DAM/FAST wheel art like every other D1 city.
+SELF_WHEEL_CITIES = ()
 MAX_CAR_MODELS = 13
 WHEEL_ORDER = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL")
 

@@ -30,6 +30,12 @@ SOUND_SBK_ENGINE = 1     # 2,112 bytes @11025 Hz, looping
 SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
 SOUND_SBK_HORN = (6, 7, 8)   # retail VOICES.BLK horn indices
 
+# SIREN NOTE (not the per-car horn): retail cop cars use source slot 1
+# (MIAMI/FRISCO/LA/NEWYORK) and source slot 8 (LA/IVIEW); their siren sample is
+# retail VOICES.BLK entry 4. The beta's car model 3 uses SOUND.SBK entry 7.
+# The engine's cop siren comes from the global CarHasSiren bank (gamesnd.c), so
+# this is recorded for the siren wiring, not chosen by build_bank's horn slot.
+
 
 def read_d1_voices(voices_path):
     blob = open(voices_path, "rb").read()
@@ -73,17 +79,20 @@ def read_d1_voices(voices_path):
     return {"entries": entries, "vag": vag, "kind": "sbk"}
 
 
-def build_bank(voices, engine_index, horn_index, idle_index=None, horn_voices=None):
+def build_bank(voices, engine_index, horn_index, idle_index=None,
+               horn_voices=None, engine_rate=None):
     payload = bytearray()
     entries = []
 
-    def append(index, src=None):
+    def append(index, src=None, rate=None):
         src = voices if src is None else src
-        addr, length, loop, rate = src["entries"][index]
-        entries.append((len(payload), length, loop, rate))
+        addr, length, loop, samplerate = src["entries"][index]
+        if rate is not None:
+            samplerate = rate
+        entries.append((len(payload), length, loop, samplerate))
         payload.extend(src["vag"][addr:addr + length])
 
-    append(engine_index)
+    append(engine_index, rate=engine_rate)
     if idle_index is None:
         entries.append(entries[-1])      # retail: idle shares the one D1 loop
     else:
@@ -142,12 +151,14 @@ def build_sound_body(voices, models, horn_voices=None):
         for rank, model in enumerate(sorted(models)):
             if rank == 1:
                 engine = idle = SOUND_SBK_IDLE
+                engine_rate = None
             else:
                 engine = idle = SOUND_SBK_ENGINE
+                engine_rate = voices["entries"][engine][3] * 2 // 3   # -33% pitch (2/3 rate)
             horn = SOUND_SBK_HORN[rank % len(SOUND_SBK_HORN)]
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn, idle,
-                               horn_voices=horn_voices)
+                               horn_voices=horn_voices, engine_rate=engine_rate)
             rows.append((model, engine, horn, idle))
     else:
         for rank, model in enumerate(sorted(models)):
@@ -239,8 +250,10 @@ def main(argv=None):
     print("patched %s: %d models, %d -> %d bytes" %
           (dst, len(rows), len(blob), len(out)))
     if voices.get("kind") == "sbk":
-        print("   beta composed bank: engine %d, idle %d, horn %d (retail)"
-              % (SOUND_SBK_ENGINE, SOUND_SBK_IDLE, SOUND_SBK_HORN[0]))
+        print("   beta composed bank: engine %d @%d Hz, idle %d @%d Hz, horn %d (retail)"
+              % (SOUND_SBK_ENGINE, voices["entries"][SOUND_SBK_ENGINE][3] * 2 // 3,
+                 SOUND_SBK_IDLE, voices["entries"][SOUND_SBK_IDLE][3],
+                 SOUND_SBK_HORN[0]))
     for model, engine, horn, idle in rows:
         if idle is None:
             print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
