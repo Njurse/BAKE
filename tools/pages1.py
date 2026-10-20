@@ -32,6 +32,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lev1                                    # the D1 level/lump walker
+import euro43                                  # the headerless EURO-43 reader
 
 LUMP_TEXTUREINFO = lev1.LUMP_TEXTUREINFO
 
@@ -159,7 +160,14 @@ def read_page(blob, offset, size):
 
 
 def texture_info_lump(blob):
-    """(body, size) of LUMP_TEXTUREINFO, searched in both DATA containers."""
+    """(body, size) of LUMP_TEXTUREINFO, searched in both DATA containers.
+
+    A headerless beta stream has no type-34 lump: its texture info is the head of
+    the TEXTURES lump (type 0), so return that body and let level_pages() use the
+    raw page table.
+    """
+    if lev1.is_raw(blob):
+        return euro43.find(blob, 0)
     hdr = lev1.read_header(blob)
     for coff, etype in ((hdr["loadtime_offset"], lev1.LUMP_LOADTIME_DATA),
                         (hdr["inmem_offset"], lev1.LUMP_INMEMORY_DATA)):
@@ -169,11 +177,18 @@ def texture_info_lump(blob):
     return None
 
 
+def _raw_page_entries(blob):
+    """Page table of a headerless beta stream (see euro43.page_entries)."""
+    return euro43.page_entries(blob)
+
+
 def level_pages(blob):
     """Walk a whole level: (region_ofs, entries, table).
 
     `entries` is [(set, offset, size)], `table` is the parsed TEXTUREINFO.
     """
+    if lev1.is_raw(blob):
+        return _raw_page_entries(blob)
     hdr = lev1.read_header(blob)
     ofs = hdr["tpage_offset"]
     got = texture_info_lump(blob)
@@ -253,6 +268,8 @@ def parse_pallet(body, size=None):
 
 def pallet_lump(blob):
     """(body, size) of LUMP_PALLET, searched in both DATA containers."""
+    if lev1.is_raw(blob):
+        return euro43.pallet_lump(blob)
     hdr = lev1.read_header(blob)
     for coff, etype in ((hdr["loadtime_offset"], lev1.LUMP_LOADTIME_DATA),
                         (hdr["inmem_offset"], lev1.LUMP_INMEMORY_DATA)):
@@ -432,6 +449,8 @@ def page_indexes(page):
 
 def texture_names(blob):
     """The level's texture-name buffer, which the TEXINF nameoffsets point into."""
+    if lev1.is_raw(blob):
+        return euro43.texture_names(blob)
     hdr = lev1.read_header(blob)
     got = lev1.find_lump(blob, hdr["loadtime_offset"], lev1.LUMP_LOADTIME_DATA,
                          LUMP_TEXTURENAMES)

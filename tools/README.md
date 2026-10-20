@@ -82,6 +82,14 @@ it is the cheapest thing to run after a change to the page decoder.
   Driver 2's own wheel entries.
 * Four `.LCF` files, each byte-structurally identical to a Driver 2 one.
 
+A **headerless beta stream** (the EURO-43 `BETAMIAMI.LEV`) is read natively:
+`lev1.py` walks its flat lump list, groups the named car slots into eight cars,
+and `pages1.py` addresses its texture pages from the `TEXTURES` lump's TP table.
+`bake.py --city BETAMIAMI` produces the same car-data shape as a retail city
+(8 of 13 slots, its own wheels, 10 page sets). See
+[`../docs/DRIVER1.md`](../docs/DRIVER1.md) §11 for the layout and the bank
+registration.
+
 ## The two things that bite
 
 * **Set numbers are per-level.** The same number means a different page in

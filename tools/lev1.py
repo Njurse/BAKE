@@ -45,8 +45,12 @@ Usage:
 """
 
 import argparse
+import os
 import struct
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import euro43                                 # the headerless EURO-43 reader
 
 # ---------------------------------------------------------------------------
 # LUMP ids (level.h, OpenDriver2Tools)
@@ -105,6 +109,21 @@ def read_header(blob):
     return hdr
 
 
+def is_raw(blob):
+    """A headerless Driver 1 beta stream, not the PC LUMPDESC container."""
+    return euro43.is_raw(blob)
+
+
+def raw_lumps(blob):
+    """[(type, body_offset, size)] for a headerless raw stream, in file order."""
+    return euro43.lumps(blob)
+
+
+def raw_find(blob, lump_type):
+    """First (body, size) of `lump_type` in a headerless raw stream, or None."""
+    return euro43.find(blob, lump_type)
+
+
 def iter_lumps(blob, container_offset, expect_type):
     """Walk one DATA container's sub-lumps.
 
@@ -138,23 +157,39 @@ def find_lump(blob, container_offset, expect_type, lump_type):
 
 
 def car_models_lump(blob):
-    """Return (body, size) of LUMP_CAR_MODELS in DATA1, or None."""
+    """Return (body, size) of LUMP_CAR_MODELS in DATA1, or None.
+
+    A headerless beta stream has no type-28 table; its cars are named level
+    models instead - see raw_car_groups().
+    """
+    if is_raw(blob):
+        return None
     hdr = read_header(blob)
     return find_lump(blob, hdr["loadtime_offset"], LUMP_LOADTIME_DATA,
                      LUMP_CAR_MODELS)
 
 
 def model_names(blob):
-    """The level's model names (LUMP_MODELNAMES), in slot order."""
+    """The level's model names (LUMP_MODELNAMES), in slot order.
+
+    Empty slots are KEPT: a headerless beta stream has many unnamed slots, and
+    dropping them would slide every later name onto the wrong model.
+    """
     got = model_names_lump(blob)
     if not got:
         return []
     off, size = got
-    return [s.decode("ascii", "replace") for s in blob[off:off + size].split(b"\x00") if s]
+    names = [s.decode("ascii", "replace")
+             for s in blob[off:off + size].split(b"\x00")]
+    if names and names[-1] == "":
+        names.pop()
+    return names
 
 
 def models_lump(blob):
     """(body offset, size) of LUMP_MODELS (the level's model table) in DATA2."""
+    if is_raw(blob):
+        return raw_find(blob, LUMP_MODELS)
     hdr = read_header(blob)
     return find_lump(blob, hdr["inmem_offset"], LUMP_INMEMORY_DATA, LUMP_MODELS)
 
@@ -219,6 +254,8 @@ def level_model(blob, name):
 
 
 def model_names_lump(blob):
+    if is_raw(blob):
+        return raw_find(blob, LUMP_MODELNAMES)
     hdr = read_header(blob)
     for container, etype in ((hdr["loadtime_offset"], LUMP_LOADTIME_DATA),
                              (hdr["inmem_offset"], LUMP_INMEMORY_DATA)):
@@ -475,8 +512,29 @@ def decode_model(blob, model_off, polys_from=None, base=None):
                  vertices, polys, normals or None, face_normals or None, errors)
 
 
+def raw_car_groups(blob):
+    """[(group_index, {variant: Model})] for a headerless beta stream.
+
+    The layout/name grouping lives in euro43.py; this passes lev1's own model
+    decoder in, so euro43 never has to import the level reader.
+    """
+    return euro43.car_groups(blob, level_models)
+
+
+def has_car_models(blob):
+    """True when a level carries car geometry, in either container shape."""
+    if is_raw(blob):
+        return bool(raw_car_groups(blob))
+    return car_models_lump(blob) is not None
+
+
 def car_models(blob):
     """Yield (model_index, {variant: Model}) for every model a level ships."""
+    if is_raw(blob):
+        for m, variants in raw_car_groups(blob):
+            yield m, variants
+        return
+
     body, _size = car_models_lump(blob)
     r_ofs = body + 4 + MAX_CAR_MODELS * 12
 
@@ -515,8 +573,11 @@ def car_model_entries(blob):
 
 
 def show_models(blob, path):
-    body, size = car_models_lump(blob)
-    print("%s  CAR_MODELS lump %d bytes at %d" % (path, size, body))
+    if is_raw(blob):
+        print("%s  raw stream: named car models" % path)
+    else:
+        body, size = car_models_lump(blob)
+        print("%s  CAR_MODELS lump %d bytes at %d" % (path, size, body))
     n = 0
     nerr = 0
     for m, variants in car_models(blob):
@@ -543,8 +604,14 @@ def show_models(blob, path):
 
 def show_lumps(blob, path):
     """Print the D1 section table and the DATA1/DATA2 sub-lumps."""
-    hdr = read_header(blob)
     print("%s  (%d bytes)" % (path, len(blob)))
+    if is_raw(blob):
+        print("  headerless (EURO-43) stream")
+        for t, body, size in raw_lumps(blob):
+            print("    type %-3d %-14s ofs %-9d size %d"
+                  % (t, LUMP_NAMES.get(t, "?"), body, size))
+        return
+    hdr = read_header(blob)
     print("  LUMPDESC: %d bytes" % hdr["lumpdesc_size"])
     for name in ("loadtime", "tpage", "inmem", "spooled"):
         print("  %-9s offset %-9d size %d"
@@ -563,8 +630,23 @@ def verify(blob, path):
     - the entry table is MAX_CAR_MODELS (13) entries (models.h);
     - every variant of every model decodes with 0 errors;
     - the damaged-block invariant holds: block size == 36 + num_vertices*8.
+
+    A headerless beta stream has no 13-entry table: its cars are named level
+    models, so only the decode check applies there.
     """
     problems = []
+    if is_raw(blob):
+        nvar = 0
+        for m, variants in car_models(blob):
+            for variant, model in variants.items():
+                nvar += 1
+                if model.errors:
+                    problems.append("model %d %s: %s" % (m, variant, model.errors[:2]))
+        print("  %-12s %2d raw car groups, %d variants, %d problems"
+              % (path.replace("\\", "/").rsplit("/", 1)[-1], m + 1 if nvar else 0,
+                 nvar, len(problems)))
+        return problems
+
     cm = car_models_lump(blob)
     if cm is None:
         print("  %-12s no CAR_MODELS lump (skipped)"

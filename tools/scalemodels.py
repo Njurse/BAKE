@@ -77,7 +77,7 @@ def d1_rows(levels_dir, variants=("clean",)):
         name = os.path.basename(path)[:-4]
         with open(path, "rb") as f:
             blob = f.read()
-        if lev1.car_models_lump(blob) is None:
+        if not lev1.has_car_models(blob):
             continue
         for m, models in lev1.car_models(blob):
             for variant in variants:
