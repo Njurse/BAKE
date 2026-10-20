@@ -468,11 +468,21 @@ def _geom_records(items, wheels):
 
 
 def apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index):
-    """Rewrite every car and wheel poly onto the baked set/id numbers."""
+    """Rewrite every car and wheel poly onto the baked set/id numbers.
+
+    Driver 1 marks an UNTEXTURED poly with texture set 255 (lev1's wheel builder
+    names the same marker). A car model made only of those - TRAIN's train bodies -
+    used to keep 255, which no page plan can map: the engine found no page for it
+    and 164 of 188 polys drew nothing. They are flat polys in every way that
+    matters, so give them the same synthesized solid-colour page as F3/F4. Wheels
+    keep their own rule (build_wheel_record shares the sprite set).
+    """
+    car_ids = set(id(it["geom"]) for it in items if it.get("geom") is not None)
+
     for g in _geom_records(items, wheels):
         level = g["sources"][0][0]
         for p in g["polys"]:
-            if p["kind"] in ("F3", "F4"):
+            if p["kind"] in ("F3", "F4") or (id(g) in car_ids and p.get("set", 0) == 255):
                 p["set"] = flat_set
                 p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
                 p["color"] = list(FLAT_COLOR)
@@ -641,6 +651,8 @@ def build_page_plan(items, levels_dir, wheels=None):
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
                 continue
+            if p.get("set", 0) == 255:
+                continue                    # untextured: the flat page handles it
             used_ids.setdefault((level, p["set"]), set()).add(p["id"])
 
     tex_remap = {}
@@ -658,6 +670,8 @@ def build_page_plan(items, levels_dir, wheels=None):
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
                 continue
+            if p.get("set", 0) == 255:
+                continue                    # untextured: the flat page handles it
             key = (level, p["set"])
             if key in remap:
                 continue
@@ -690,16 +704,23 @@ def build_page_plan(items, levels_dir, wheels=None):
                 entry = _compact_page_entry(entry, tm)
             target.append((remap[key], level, p["set"], entry, len(entry)))
 
-    # Flat F3/F4 polys (the cabin glass/interior) get ONE synthesized solid-colour
-    # page: its CLUT holds one row per distinct flat colour, the page image is all
-    # index 0, and each flat poly's `id` selects its colour's row. It rides in the
-    # permanent list with `level is None`, which build_pallet keys on to emit the
-    # flat colours' palette records directly (there is no source level to read).
+    # Flat F3/F4 polys (the cabin glass/interior) and any car poly Driver 1 marks
+    # UNTEXTURED (set 255, as TRAIN's train bodies do) get ONE synthesized
+    # solid-colour page: its CLUT holds one row per distinct flat colour, the page
+    # image is all index 0, and each flat poly's `id` selects its colour's row. It
+    # rides in the permanent list with `level is None`, which build_pallet keys on
+    # to emit the flat colours' palette records directly (there is no source level
+    # to read). Set-255 wheels are not here: build_wheel_record shares their sprite.
     flat_colours = []
     flat_index = {}
-    for g in geoms:
+    for it in items:
+        g = it.get("geom")
+
+        if g is None:
+            continue
+
         for p in g["polys"]:
-            if p["kind"] not in ("F3", "F4"):
+            if p["kind"] not in ("F3", "F4") and p.get("set", 0) != 255:
                 continue
             c = tuple(p.get("color", (0, 0, 0)))
             if c not in flat_index:
