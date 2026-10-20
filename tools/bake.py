@@ -70,15 +70,13 @@ WHEEL_ORDER = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL")
 # the stock frontend keeps locked, so a transplant leaves it alone.
 D2_COMPLIANT_MODELS = (1, 2, 3, 4, 8, 9, 10, 11, 12)
 
-# The cop car in each source city, by D1 model slot. The bake writes a
-# LUMP_CAR_SIRENS flag for the remapped model, and the engine's CarHasSiren
-# then treats it like a Driver 2 police car (third channel, horn on/off,
-# AI pursuer siren loop). BETAMIAMI's cop is baked model 3, not a D1 slot.
-COP_SOURCE_SLOTS = {
-    "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 8), "NEWYORK": (1,),
-    "IVIEW": (8,),
+# The cop car in each baked city, by Driver 2 model slot (the slot the frontend
+# and engine use). The bake writes a LUMP_CAR_SIRENS flag for these, and the
+# engine's CarHasSiren then treats them like Driver 2 police cars.
+COP_DEST_MODELS = {
+    "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 9), "NEWYORK": (1, 9),
+    "IVIEW": (1,), "BETAMIAMI": (3,),
 }
-COP_DEST_MODELS = {"BETAMIAMI": (3,)}
 
 # Models NO Driver 2 city holds data for. A car written at one of these resolves
 # nothing on the engine side and the import silently falls back. Driver 1's own
@@ -1057,9 +1055,6 @@ def bake_one_city(args, levels_dir):
 
     apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
     siren_models = set(COP_DEST_MODELS.get(args.city, ()))
-    for d1_slot, d2_slot in zip(src_slots, D2_COMPLIANT_MODELS):
-        if d1_slot in COP_SOURCE_SLOTS.get(args.city, ()):
-            siren_models.add(d2_slot)
     out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels,
                      siren_models)
 
