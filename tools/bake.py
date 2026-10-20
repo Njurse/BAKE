@@ -49,6 +49,7 @@ LUMP_DESC = 37
 # of the host level's shared CLEANWHEEL/FASTWHEEL/DAMWHEEL. Unknown segment
 # types are skipped by the engine's other walks, so this is additive.
 LUMP_CAR_WHEELS = 200
+LUMP_CAR_SIRENS = 202       # 13 flags: this model is a cop car -> use the bank's siren sample
 
 # The one D1 city whose wheels every baked city carries (see collect_wheels).
 WHEEL_SOURCE_CITY = "MIAMI"
@@ -68,6 +69,16 @@ WHEEL_ORDER = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL")
 # else (CHICAGO ships 9, the rest 10). Model 0 is the police car, at a select slot
 # the stock frontend keeps locked, so a transplant leaves it alone.
 D2_COMPLIANT_MODELS = (1, 2, 3, 4, 8, 9, 10, 11, 12)
+
+# The cop car in each source city, by D1 model slot. The bake writes a
+# LUMP_CAR_SIRENS flag for the remapped model, and the engine's CarHasSiren
+# then treats it like a Driver 2 police car (third channel, horn on/off,
+# AI pursuer siren loop). BETAMIAMI's cop is baked model 3, not a D1 slot.
+COP_SOURCE_SLOTS = {
+    "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 8), "NEWYORK": (1,),
+    "IVIEW": (8,),
+}
+COP_DEST_MODELS = {"BETAMIAMI": (3,)}
 
 # Models NO Driver 2 city holds data for. A car written at one of these resolves
 # nothing on the engine side and the import silently falls back. Driver 1's own
@@ -746,7 +757,7 @@ def build_page_plan(items, levels_dir, wheels=None):
     return remap, tex_remap, perms, specs, (flat_set, flat_index)
 
 
-def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None):
+def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None, siren_models=None):
     car = build_car_models_lump(items)
 
     segs = bytearray()
@@ -766,6 +777,13 @@ def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None):
     if any(g is not None for g in wheel_geoms):
         wheel = build_wheel_lump(wheel_geoms)
         seg += struct.pack("<ii", LUMP_CAR_WHEELS, len(wheel)) + wheel
+        seg += b"\x00" * ((4 - len(seg) % 4) % 4)
+
+    # Cop flags for the engine's CarHasSiren: a 13-byte table (padded to 16).
+    # Unknown segment types are skipped by every other walk, so this is additive.
+    if siren_models:
+        flags = bytes(1 if m in siren_models else 0 for m in range(MAX_CAR_MODELS)) + b"\x00" * 3
+        seg += struct.pack("<ii", LUMP_CAR_SIRENS, len(flags)) + flags
         seg += b"\x00" * ((4 - len(seg) % 4) % 4)
 
     seg += segs
@@ -1000,7 +1018,12 @@ def bake_one_city(args, levels_dir):
                                  "level's page lists" % (args.city, w["name"], p["set"]))
 
     apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
-    out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels)
+    siren_models = set(COP_DEST_MODELS.get(args.city, ()))
+    for d1_slot, d2_slot in zip(src_slots, D2_COMPLIANT_MODELS):
+        if d1_slot in COP_SOURCE_SLOTS.get(args.city, ()):
+            siren_models.add(d2_slot)
+    out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels,
+                     siren_models)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
