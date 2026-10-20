@@ -539,7 +539,7 @@ def build_textureinfo(perms, specs):
     return bytes(body)
 
 
-def build_pallet(page_list, levels_dir, remap, tex_remap):
+def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
     """LUMP_PALLET for the pool, in the ENGINE's record shape.
 
     Driver 1's own LUMP_PALLET is a 44-byte record (three ints + an inline CLUT,
@@ -560,6 +560,7 @@ def build_pallet(page_list, levels_dir, remap, tex_remap):
     body = bytearray()
     body += struct.pack("<i", 0)                     # total_cluts: a CLUT count
     count = 0
+    have = set()
 
     by_level = {}
     for new_set, level, old_set, _bytes, _size in page_list:
@@ -585,6 +586,7 @@ def build_pallet(page_list, levels_dir, remap, tex_remap):
             body += struct.pack("<4i", r["palette"], texnum, new_set, -1)
             body += r["row"]
             count += 1
+            have.add((new_set, texnum))
 
     # The flat-colour page: one palette record per CLUT row. Its colours are not
     # read from any source level, so emit them straight from the page entry the
@@ -597,6 +599,42 @@ def build_pallet(page_list, levels_dir, remap, tex_remap):
             body += struct.pack("<4i", 0, i, new_set, -1)
             body += entry[4 + i * 32:4 + i * 32 + 32]
             count += 1
+
+    # Fill the used ids the source PALLET does not cover from the page's own CLUT
+    # row. The EURO-43 beta has no palette records for its set 31 (the clean
+    # model's low-detail page), and those rows otherwise stay empty and draw the
+    # page CLUT by fallback. The compacted entry is already indexed by the new
+    # texture id, so this is the exact row the poly names.
+    if items:
+        page_entries = {}
+        for new_set, level, _old_set, entry, _size in page_list:
+            if level is not None:
+                page_entries[new_set] = entry
+
+        for it in items:
+            g = it.get("geom")
+            if not g:
+                continue
+            for p in g["polys"]:
+                if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
+                    continue
+                s = p.get("set", 0)
+                tid = p.get("id", 0) & 0xFF
+                if s == 255 or (s, tid) in have:
+                    continue
+                entry = page_entries.get(s)
+                if entry is None:
+                    continue
+                npal = int.from_bytes(entry[:4], "little")
+                if tid < npal:
+                    row = entry[4 + tid * 32:4 + tid * 32 + 32]
+                elif npal > 0:
+                    row = entry[4:4 + 32]
+                else:
+                    row = b"\x00" * 32
+                body += struct.pack("<4i", 0, tid, s, -1) + row
+                count += 1
+                have.add((s, tid))
 
     body += struct.pack("<i", -1)                    # the lone terminator
     struct.pack_into("<i", body, 0, count)           # total_cluts := rows written
@@ -764,7 +802,7 @@ def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None, s
     tex = build_textureinfo(perms, specs)
     segs += struct.pack("<ii", LUMP_TEXTUREINFO, len(tex)) + tex
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
-    pal = build_pallet(perms + specs, levels_dir, remap, tex_remap)
+    pal = build_pallet(perms + specs, levels_dir, remap, tex_remap, items)
     segs += struct.pack("<ii", LUMP_PALLET, len(pal)) + pal
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
 
