@@ -21,12 +21,13 @@ MAX_CAR_MODELS = 13
 D1_ENGINE_SAMPLE = (1, 2, 3, 4, 5)
 D1_HORN_SAMPLE = (6, 7, 8)
 
-# The Euro-43 SOUND.SBK has its own bank order: 6 is the 24,800-byte 22050 Hz
-# engine loop (the same shape as retail entry 3), 7 the 1,920-byte idle, and
-# 8/9 one-shot horns. 11/12 are the beta's other long loops.
-SOUND_SBK_ENGINE = (6, 11, 12)
-SOUND_SBK_IDLE = (7, 10, 7)
-SOUND_SBK_HORN = (8, 9, 3)
+# The Euro-43 SOUND.SBK has its own bank order. The engine's composer takes the
+# FIRST model bank's sample 0 as the engine, the NEXT bank's sample 0 as the
+# idle (it only needs a different length), and the first bank's sample 2 as the
+# horn. These three constants are therefore the actual composed sounds.
+SOUND_SBK_ENGINE = 6     # 24,800 bytes @22050 Hz, looping
+SOUND_SBK_IDLE = 11      # 36,800 bytes @11025 Hz, looping (pitched-down traffic)
+SOUND_SBK_HORN = 8       # 31,552 bytes @22050 Hz, one-shot
 
 
 def read_d1_voices(voices_path):
@@ -131,16 +132,25 @@ def build_sound_body(voices, models):
     body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
     rows = []
     if voices.get("kind") == "sbk":
-        engines, idles, horns = SOUND_SBK_ENGINE, SOUND_SBK_IDLE, SOUND_SBK_HORN
+        # The engine composer reads model 1 sample 0 as the engine, the next
+        # model's sample 0 as the idle (a different length), and model 1
+        # sample 2 as the horn. Write exactly that pair; sample 1 is unused.
+        for rank, model in enumerate(sorted(models)):
+            if rank == 1:
+                engine = idle = SOUND_SBK_IDLE
+            else:
+                engine = idle = SOUND_SBK_ENGINE
+            horn = SOUND_SBK_HORN
+            offsets[model] = len(body)
+            body += build_bank(voices, engine, horn, idle)
+            rows.append((model, engine, horn, idle))
     else:
-        engines, idles, horns = D1_ENGINE_SAMPLE, None, D1_HORN_SAMPLE
-    for rank, model in enumerate(sorted(models)):
-        engine = engines[rank % len(engines)]
-        horn = horns[rank % len(horns)]
-        idle = idles[rank % len(idles)] if idles else None
-        offsets[model] = len(body)
-        body += build_bank(voices, engine, horn, idle)
-        rows.append((model, engine, horn, idle))
+        for rank, model in enumerate(sorted(models)):
+            engine = D1_ENGINE_SAMPLE[rank % len(D1_ENGINE_SAMPLE)]
+            horn = D1_HORN_SAMPLE[rank % len(D1_HORN_SAMPLE)]
+            offsets[model] = len(body)
+            body += build_bank(voices, engine, horn)
+            rows.append((model, engine, horn, None))
     struct.pack_into("<%di" % MAX_CAR_MODELS, body, 8, *offsets)
     return bytes(body), rows
 
