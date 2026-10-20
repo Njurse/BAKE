@@ -666,12 +666,14 @@ into the same composed bank. The retail bank remains the fallback.
 
 **Siren wiring.** Retail cop cars at source slot 1 (MIAMI, FRISCO, LA, NEWYORK)
 and source slot 8 (LA, IVIEW) use retail `VOICES.BLK` sample 4; the beta's car
-model 3 uses `SOUND.SBK` sample 7. The imported city has ONE generic composed
-bank, so `add_car_sounds.py --city` replaces that bank's third (horn) sample with
-the siren: sample 4 for MIAMI/FRISCO/LA/NEWYORK/IVIEW, sample 7 for BETAMIAMI.
-Every imported car from that city shares the generic bank, so the siren is the
-city's generic horn. The engine's automatic `CarHasSiren` loop still uses the
-global siren bank.
+model 3 uses `SOUND.SBK` sample 7. `add_car_sounds.py --city` puts the chosen
+sample in the imported bank's third slot, and the bake writes `LUMP_CAR_SIRENS`
+(type 202), a 13-entry cop flag table. `CarHasSiren` calls
+`GetCarImportSiren(city, model)` and returns the imported bank's third sample,
+so a marked imported cop uses Driver 2's siren logic: the third audio channel,
+the horn on/off control, and the AI pursuer siren loop. The city still has one
+generic bank, so the third sample is shared; only the marked model takes the
+siren channel.
 
 **Wheel-palette comparison.** The beta's set 1 has 27 CLUT rows and differs from
 retail MIAMI's set 1 in one row; the beta's set 53 has 24 rows while retail
