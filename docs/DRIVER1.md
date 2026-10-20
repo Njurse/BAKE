@@ -664,11 +664,14 @@ Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
 11025 Hz) the idle; the horns are the retail `VOICES.BLK` samples 6/7/8, mixed
 into the same composed bank. The retail bank remains the fallback.
 
-**Siren note (recorded for the import wiring).** Retail cop cars at source slot 1
-(MIAMI, FRISCO, LA, NEWYORK) and source slot 8 (LA, IVIEW) use retail
-`VOICES.BLK` sample 4 for their siren; the beta's car model 3 uses `SOUND.SBK`
-sample 7. The engine's cop siren is the global `CarHasSiren` bank
-(`gamesnd.c`), so this is not the per-car horn chosen by `add_car_sounds.py`.
+**Siren wiring.** Retail cop cars at source slot 1 (MIAMI, FRISCO, LA, NEWYORK)
+and source slot 8 (LA, IVIEW) use retail `VOICES.BLK` sample 4; the beta's car
+model 3 uses `SOUND.SBK` sample 7. The imported city has ONE generic composed
+bank, so `add_car_sounds.py --city` replaces that bank's third (horn) sample with
+the siren: sample 4 for MIAMI/FRISCO/LA/NEWYORK/IVIEW, sample 7 for BETAMIAMI.
+Every imported car from that city shares the generic bank, so the siren is the
+city's generic horn. The engine's automatic `CarHasSiren` loop still uses the
+global siren bank.
 
 **Wheel-palette comparison.** The beta's set 1 has 27 CLUT rows and differs from
 retail MIAMI's set 1 in one row; the beta's set 53 has 24 rows while retail
