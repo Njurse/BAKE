@@ -30,11 +30,13 @@ SOUND_SBK_ENGINE = 1     # 2,112 bytes @11025 Hz, looping
 SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
 SOUND_SBK_HORN = (6, 7, 8)   # retail VOICES.BLK horn indices
 
-# SIREN NOTE (not the per-car horn): retail cop cars use source slot 1
-# (MIAMI/FRISCO/LA/NEWYORK) and source slot 8 (LA/IVIEW); their siren sample is
-# retail VOICES.BLK entry 4. The beta's car model 3 uses SOUND.SBK entry 7.
-# The engine's cop siren comes from the global CarHasSiren bank (gamesnd.c), so
-# this is recorded for the siren wiring, not chosen by build_bank's horn slot.
+# Siren wiring: the imported city has ONE generic composed bank, so its third
+# sample is every imported car's horn. For the cities whose cop car is being
+# imported, make that sample the siren. Retail cop source slots 1/8 use
+# VOICES.BLK sample 4; the beta's model 3 uses SOUND.SBK sample 7.
+SIREN_CITIES = ("MIAMI", "FRISCO", "LA", "NEWYORK", "IVIEW")
+SIREN_SAMPLE_RETAIL = 4
+SIREN_SAMPLE_BETA = 7
 
 
 def read_d1_voices(voices_path):
@@ -137,15 +139,19 @@ def present_models(blob, data1_off, data1_size):
     return []
 
 
-def build_sound_body(voices, models, horn_voices=None):
+def build_sound_body(voices, models, horn_voices=None, city=None):
     offsets = [-1] * MAX_CAR_MODELS
     body = bytearray(struct.pack("<ii", 1, MAX_CAR_MODELS))
     body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
     rows = []
+    city = city.upper() if city else None
+    siren_retail = city in SIREN_CITIES
+    siren_beta = (city == "BETAMIAMI")
     if voices.get("kind") == "sbk":
         # The engine composer reads model 1 sample 0 as the engine, the next
         # model's sample 0 as the idle (a different length), and model 1
-        # sample 2 as the horn. The horns come from the retail bank.
+        # sample 2 as the horn. The horns come from the retail bank, except the
+        # beta city's generic horn, which is the beta's siren sample.
         if horn_voices is None:
             raise SystemExit("the beta SOUND.SBK needs a retail horn bank")
         for rank, model in enumerate(sorted(models)):
@@ -155,15 +161,23 @@ def build_sound_body(voices, models, horn_voices=None):
             else:
                 engine = idle = SOUND_SBK_ENGINE
                 engine_rate = voices["entries"][engine][3] * 2 // 3   # -33% pitch (2/3 rate)
-            horn = SOUND_SBK_HORN[rank % len(SOUND_SBK_HORN)]
+            if rank == 0 and siren_beta:
+                horn = SIREN_SAMPLE_BETA
+                horn_src = None          # the beta bank's own siren sample
+            else:
+                horn = SOUND_SBK_HORN[rank % len(SOUND_SBK_HORN)]
+                horn_src = horn_voices
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn, idle,
-                               horn_voices=horn_voices, engine_rate=engine_rate)
+                               horn_voices=horn_src, engine_rate=engine_rate)
             rows.append((model, engine, horn, idle))
     else:
         for rank, model in enumerate(sorted(models)):
             engine = D1_ENGINE_SAMPLE[rank % len(D1_ENGINE_SAMPLE)]
-            horn = D1_HORN_SAMPLE[rank % len(D1_HORN_SAMPLE)]
+            if rank == 0 and siren_retail:
+                horn = SIREN_SAMPLE_RETAIL
+            else:
+                horn = D1_HORN_SAMPLE[rank % len(D1_HORN_SAMPLE)]
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn)
             rows.append((model, engine, horn, None))
@@ -206,6 +220,9 @@ def main(argv=None):
     ap.add_argument("--horns", default=None,
                     help="retail VOICES.BLK supplying the horns for a beta SOUND.SBK "
                          "(default: DRIVER/SOUND/VOICES.BLK beside the LEV)")
+    ap.add_argument("--city", default=None,
+                    help="city name; makes the generic horn the cop siren for "
+                         "MIAMI/FRISCO/LA/NEWYORK/IVIEW (sample 4) or BETAMIAMI (sample 7)")
     ap.add_argument("--out", default=None, help="write here (default: in place)")
     args = ap.parse_args(argv)
 
@@ -240,7 +257,7 @@ def main(argv=None):
     if not models:
         raise SystemExit("no car models in %s" % args.lev)
 
-    sound_body, rows = build_sound_body(voices, models, horn_voices)
+    sound_body, rows = build_sound_body(voices, models, horn_voices, args.city)
     out = insert_sound_segment(blob, sound_body)
 
     dst = args.out or args.lev
@@ -250,10 +267,11 @@ def main(argv=None):
     print("patched %s: %d models, %d -> %d bytes" %
           (dst, len(rows), len(blob), len(out)))
     if voices.get("kind") == "sbk":
-        print("   beta composed bank: engine %d @%d Hz, idle %d @%d Hz, horn %d (retail)"
+        siren_horn = SIREN_SAMPLE_BETA if (args.city or "").upper() == "BETAMIAMI" else SOUND_SBK_HORN[0]
+        print("   beta composed bank: engine %d @%d Hz, idle %d @%d Hz, horn %d"
               % (SOUND_SBK_ENGINE, voices["entries"][SOUND_SBK_ENGINE][3] * 2 // 3,
                  SOUND_SBK_IDLE, voices["entries"][SOUND_SBK_IDLE][3],
-                 SOUND_SBK_HORN[0]))
+                 siren_horn))
     for model, engine, horn, idle in rows:
         if idle is None:
             print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
