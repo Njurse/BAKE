@@ -19,7 +19,6 @@ MAX_CAR_MODELS = 13
 
 # Measured mapping; see JERICHO/MODS/d1cars/tools/bake.py.
 D1_ENGINE_SAMPLE = (1, 2, 3, 4, 5)
-D1_HORN_SAMPLE = (6, 7, 8)
 
 # The Euro-43 SOUND.SBK has its own bank order. The engine's composer takes the
 # FIRST model bank's sample 0 as the engine, the NEXT bank's sample 0 as the
@@ -28,13 +27,20 @@ D1_HORN_SAMPLE = (6, 7, 8)
 # the retail Driver 1 ones (VOICES.BLK 6/7/8), mixed into the same bank.
 SOUND_SBK_ENGINE = 1     # 2,112 bytes @11025 Hz, looping
 SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
-SOUND_SBK_HORN = (6, 7, 8)   # retail VOICES.BLK horn indices
 
-# Siren wiring: the imported city has ONE generic composed bank, so its third
-# sample is every imported car's horn. For the cities whose cop car is being
-# imported, make that sample the siren. Retail cop source slots 1/8 use
-# VOICES.BLK sample 4; the beta's model 3 uses SOUND.SBK sample 7.
-SIREN_CITIES = ("MIAMI", "FRISCO", "LA", "NEWYORK", "IVIEW")
+# Per-model horn/siren map, by baked Driver 2 model slot. The engine loads each
+# imported model's own 3-sample bank, so these are the actual third samples:
+# 8 = retail VOICES.BLK big-car horn, 7 = beefier, 9 = smaller, 4 = retail cop
+# siren (only on the police list), 7 = beta SOUND.SBK siren (BETAMIAMI cop).
+POLICE_MODELS = {
+    "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 9), "NEWYORK": (1, 9),
+    "IVIEW": (1,), "BETAMIAMI": (3,),
+}
+HORN8_MODELS = {
+    "MIAMI": (4,), "FRISCO": (4,), "LA": (4,), "NEWYORK": (4,),
+    "NEWCASTLE": (3,), "BETAMIAMI": (4,),
+}
+SMALL_MODELS = {"FRISCO": (3,), "BETAMIAMI": (1, 2)}
 SIREN_SAMPLE_RETAIL = 4
 SIREN_SAMPLE_BETA = 7
 
@@ -145,27 +151,24 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
     body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
     rows = []
     city = city.upper() if city else None
-    siren_retail = city in SIREN_CITIES
-    siren_beta = (city == "BETAMIAMI")
+    police = set(POLICE_MODELS.get(city, ()))
+    horn8 = set(HORN8_MODELS.get(city, ()))
+    small = set(SMALL_MODELS.get(city, ()))
     if voices.get("kind") == "sbk":
-        # The engine composer reads model 1 sample 0 as the engine, the next
-        # model's sample 0 as the idle (a different length), and model 1
-        # sample 2 as the horn. The horns come from the retail bank, except the
-        # beta city's generic horn, which is the beta's siren sample.
+        # Every imported model gets its OWN 3-sample bank: engine, idle, horn.
+        # The engine loads these per model, so the third sample is the actual
+        # per-slot horn (or the cop siren), not one city-wide sample.
         if horn_voices is None:
             raise SystemExit("the beta SOUND.SBK needs a retail horn bank")
-        for rank, model in enumerate(sorted(models)):
-            if rank == 1:
-                engine = idle = SOUND_SBK_IDLE
-                engine_rate = None
-            else:
-                engine = idle = SOUND_SBK_ENGINE
-                engine_rate = voices["entries"][engine][3] * 2 // 3   # -33% pitch (2/3 rate)
-            if rank == 0 and siren_beta:
+        for model in sorted(models):
+            engine = SOUND_SBK_ENGINE
+            idle = SOUND_SBK_IDLE
+            engine_rate = voices["entries"][engine][3] * 2 // 3   # -33% pitch (2/3 rate)
+            if model in police:
                 horn = SIREN_SAMPLE_BETA
                 horn_src = None          # the beta bank's own siren sample
             else:
-                horn = SOUND_SBK_HORN[rank % len(SOUND_SBK_HORN)]
+                horn = 8 if model in horn8 else (9 if model in small else 7)
                 horn_src = horn_voices
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn, idle,
@@ -174,10 +177,14 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
     else:
         for rank, model in enumerate(sorted(models)):
             engine = D1_ENGINE_SAMPLE[rank % len(D1_ENGINE_SAMPLE)]
-            if rank == 0 and siren_retail:
+            if model in police:
                 horn = SIREN_SAMPLE_RETAIL
+            elif model in horn8:
+                horn = 8
+            elif model in small:
+                horn = 9
             else:
-                horn = D1_HORN_SAMPLE[rank % len(D1_HORN_SAMPLE)]
+                horn = 7
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn)
             rows.append((model, engine, horn, None))
@@ -266,12 +273,6 @@ def main(argv=None):
 
     print("patched %s: %d models, %d -> %d bytes" %
           (dst, len(rows), len(blob), len(out)))
-    if voices.get("kind") == "sbk":
-        siren_horn = SIREN_SAMPLE_BETA if (args.city or "").upper() == "BETAMIAMI" else SOUND_SBK_HORN[0]
-        print("   beta composed bank: engine %d @%d Hz, idle %d @%d Hz, horn %d"
-              % (SOUND_SBK_ENGINE, voices["entries"][SOUND_SBK_ENGINE][3] * 2 // 3,
-                 SOUND_SBK_IDLE, voices["entries"][SOUND_SBK_IDLE][3],
-                 siren_horn))
     for model, engine, horn, idle in rows:
         if idle is None:
             print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
