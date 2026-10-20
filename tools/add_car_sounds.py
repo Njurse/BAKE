@@ -21,32 +21,57 @@ MAX_CAR_MODELS = 13
 D1_ENGINE_SAMPLE = (1, 2, 3, 4, 5)
 D1_HORN_SAMPLE = (6, 7, 8)
 
+# The Euro-43 SOUND.SBK has its own bank order: 6 is the 24,800-byte 22050 Hz
+# engine loop (the same shape as retail entry 3), 7 the 1,920-byte idle, and
+# 8/9 one-shot horns. 11/12 are the beta's other long loops.
+SOUND_SBK_ENGINE = (6, 11, 12)
+SOUND_SBK_IDLE = (7, 10, 7)
+SOUND_SBK_HORN = (8, 9, 3)
+
 
 def read_d1_voices(voices_path):
     blob = open(voices_path, "rb").read()
     if len(blob) < 44:
         return None
     table = struct.unpack_from("<11i", blob, 0)
-    if table[0] != 44 or table[0] >= table[1] or table[1] > len(blob):
+    if table[0] == 44 and table[0] < table[1] <= len(blob):
+        body = blob[table[0]:table[1]]
+        if len(body) < 4:
+            return None
+        count = struct.unpack_from("<i", body, 0)[0]
+        dir_size = 4 + count * 16
+        if count < 1 or dir_size > len(body):
+            return None
+        vag = body[dir_size:]
+        entries = []
+        for i in range(count):
+            a, length, loop, rate = struct.unpack_from("<IIII", body, 4 + i * 16)
+            if a + length > len(vag):
+                return None
+            entries.append((a, length, loop, rate))
+        return {"entries": entries, "vag": vag, "kind": "voices"}
+
+    # The Euro-43 beta ships a SOUND.SBK: a bare count + the same 16-byte
+    # (address, length, loop, rate) directory, with the VAG data right after it.
+    count = struct.unpack_from("<i", blob, 0)[0]
+    if not (1 <= count <= 64):
         return None
-    body = blob[table[0]:table[1]]
-    if len(body) < 4:
-        return None
-    count = struct.unpack_from("<i", body, 0)[0]
     dir_size = 4 + count * 16
-    if count < 1 or dir_size > len(body):
+    if dir_size > len(blob):
         return None
-    vag = body[dir_size:]
+    vag = blob[dir_size:]
     entries = []
     for i in range(count):
-        a, length, loop, rate = struct.unpack_from("<IIII", body, 4 + i * 16)
+        a, length, loop, rate = struct.unpack_from("<IIII", blob, 4 + i * 16)
         if a + length > len(vag):
             return None
         entries.append((a, length, loop, rate))
-    return {"entries": entries, "vag": vag}
+    if not entries or entries[0][0] != 0:
+        return None
+    return {"entries": entries, "vag": vag, "kind": "sbk"}
 
 
-def build_bank(voices, engine_index, horn_index):
+def build_bank(voices, engine_index, horn_index, idle_index=None):
     payload = bytearray()
     entries = []
 
@@ -56,7 +81,10 @@ def build_bank(voices, engine_index, horn_index):
         payload.extend(voices["vag"][addr:addr + length])
 
     append(engine_index)
-    entries.append(entries[-1])          # idle shares the one D1 loop
+    if idle_index is None:
+        entries.append(entries[-1])      # retail: idle shares the one D1 loop
+    else:
+        append(idle_index)               # beta bank carries its own idle
     append(horn_index)
 
     bank = bytearray(struct.pack("<i", 3))
@@ -102,12 +130,17 @@ def build_sound_body(voices, models):
     body = bytearray(struct.pack("<ii", 1, MAX_CAR_MODELS))
     body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
     rows = []
+    if voices.get("kind") == "sbk":
+        engines, idles, horns = SOUND_SBK_ENGINE, SOUND_SBK_IDLE, SOUND_SBK_HORN
+    else:
+        engines, idles, horns = D1_ENGINE_SAMPLE, None, D1_HORN_SAMPLE
     for rank, model in enumerate(sorted(models)):
-        engine = D1_ENGINE_SAMPLE[rank % len(D1_ENGINE_SAMPLE)]
-        horn = D1_HORN_SAMPLE[rank % len(D1_HORN_SAMPLE)]
+        engine = engines[rank % len(engines)]
+        horn = horns[rank % len(horns)]
+        idle = idles[rank % len(idles)] if idles else None
         offsets[model] = len(body)
-        body += build_bank(voices, engine, horn)
-        rows.append((model, engine, horn))
+        body += build_bank(voices, engine, horn, idle)
+        rows.append((model, engine, horn, idle))
     struct.pack_into("<%di" % MAX_CAR_MODELS, body, 8, *offsets)
     return bytes(body), rows
 
@@ -176,8 +209,11 @@ def main(argv=None):
 
     print("patched %s: %d models, %d -> %d bytes" %
           (dst, len(rows), len(blob), len(out)))
-    for model, engine, horn in rows:
-        print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
+    for model, engine, horn, idle in rows:
+        if idle is None:
+            print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
+        else:
+            print("   model %2d: beta engine %d, idle %d, horn %d" % (model, engine, idle, horn))
 
 
 if __name__ == "__main__":
