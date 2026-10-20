@@ -404,8 +404,14 @@ def _uvs(rec, kind, n):
     return tuple(struct.unpack_from("<BB", rec, off + i * 2) for i in range(n))
 
 
-def decode_polys(blob, base, n_polys, num_vertices):
-    """Walk `n_polys` polys from `base` by PolySizes; decode each into a Poly."""
+def decode_polys(blob, base, n_polys, num_vertices, wide_id=False):
+    """Walk `n_polys` polys from `base` by PolySizes; decode each into a Poly.
+
+    `wide_id` reads a 16-bit texture id. The EURO-43 beta stores the page's
+    TEXINF id there (e.g. 5004), not the retail CLUT row; euro43.map_model_ids
+    translates it after decoding. The retail records keep a 0 high byte, so the
+    default byte read is unchanged.
+    """
     polys = []
     errors = []
     p = base
@@ -434,7 +440,8 @@ def decode_polys(blob, base, n_polys, num_vertices):
             errors.append((i, "poly type %d record too short (%d bytes)" % (pt, size)))
             p += size
             continue
-        setid, texid = (rec[1], rec[2]) if kind in TEXTURED else (0, 0)
+        setid, texid = (rec[1], (rec[2] | (rec[3] << 8)) if wide_id else rec[2]) \
+            if kind in TEXTURED else (0, 0)
 
         bad = [x for x in v if x >= num_vertices]
         if bad:
@@ -507,7 +514,8 @@ def decode_model(blob, model_off, polys_from=None, base=None):
         nx, ny, nz, _pad = struct.unpack_from("<hhhh", blob, norm_base + pno + i * 8)
         normals.append((nx, ny, nz))
 
-    polys, errors = decode_polys(blob, poly_base + pblk, npol, nv)
+    polys, errors = decode_polys(blob, poly_base + pblk, npol, nv,
+                                 wide_id=is_raw(blob))
     return Model(shape_flags, flags2, bounding_sphere, tri_verts,
                  vertices, polys, normals or None, face_normals or None, errors)
 

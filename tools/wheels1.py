@@ -50,8 +50,12 @@ WHEEL_TEXTURE_NAMES = ("WHEEL1", "WHEEL2", "NEWWHEEL", "NEWWHCAP")
 
 def wheels_in(blob):
     """[(slot, name, Model)] for every wheel-named model in a level."""
+    import euro43
+    rows = euro43.texture_rows(blob) if lev1.is_raw(blob) else None
     out = []
     for slot, name, model in lev1.level_models(blob):
+        if rows is not None:
+            euro43.map_model_ids(blob, model, rows)
         if name in WHEEL_NAMES:
             out.append((slot, name, model))
     return out
