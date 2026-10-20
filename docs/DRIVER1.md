@@ -247,7 +247,8 @@ traffic-car lists — but that is **unverified**: no public documentation of
 ## 6. The structural work: "four cities" is baked in
 
 The hard part is not the file I/O — it is the bucket. "Four" is written into a
-row of data tables and a set of `[4]` arrays. Each of these must grow to five:
+row of data tables and a set of `[4]` arrays. Each of these must grow to seven
+(the five city levels, plus IVIEW and TRAIN, which carry car geometry of their own):
 
 **Data tables (add a row):**
 
