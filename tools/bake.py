@@ -537,7 +537,33 @@ def build_textureinfo(perms, specs):
     return bytes(body)
 
 
-def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
+def _used_palette_pairs(items, wheels=None):
+    """Every (texture set, texture id) pair the baked geometry actually names.
+
+    This is the packing key for LUMP_PALLET. The source city's lump covers every id of
+    every page it ships, but a car model draws from a handful, and the ids are COMPACTED
+    onto 0..N-1 when a page carries more rows than the engine holds (build_page_plan). An
+    unused source record must therefore be dropped before it is remapped: the old
+    `tex_remap.get(texnum, texnum)` kept the source id for unused rows, so an unused id
+    could land on a compacted id some model DOES use and overwrite its colours.
+
+    Call this AFTER apply_page_plan, when polys carry the baked set/id numbers.
+    """
+    used = set()
+
+    for g in _geom_records(items, wheels):
+        for p in g["polys"]:
+            if p["kind"] not in ("F3", "F4", "FT3", "FT4", "GT3", "GT4"):
+                continue
+            s = p.get("set", 0)
+            if s == 255:
+                continue                    # untextured marker: no page, no palette row
+            used.add((s, p.get("id", 0) & 0xFF))
+
+    return used
+
+
+def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=None):
     """LUMP_PALLET for the pool, in the ENGINE's record shape.
 
     Driver 1's own LUMP_PALLET is a 44-byte record (three ints + an inline CLUT,
@@ -552,13 +578,22 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
     into slot 5 and slots 1..4 stayed empty - the draw then fell back to a
     NEIGHBOURING texture's colours, which is exactly "some surfaces correct, some
     wrong". Reading D1's real pallet fixes the field and the source in one move.
+
+    PACKING (2026-10): only the (set, id) pairs the baked cars and wheels actually
+    name are emitted. Every colour variant of a used pair is kept; an unused pair is
+    dropped rather than remapped onto a used id. The flat-colour page is emitted
+    separately, and the fill pass below still supplies a used pair the source lump
+    has no record for.
     """
     import pages1
 
+    used = _used_palette_pairs(items, wheels) if items is not None else None
     body = bytearray()
     body += struct.pack("<i", 0)                     # total_cluts: a CLUT count
     count = 0
     have = set()
+    packed = set()                                   # unused (set, id) pairs dropped
+    records = 0                                      # source palette records walked
 
     by_level = {}
     for new_set, level, old_set, _bytes, _size in page_list:
@@ -577,10 +612,21 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
             key = (level, r["tpageindex"])
             if key not in remap:
                 continue                        # a set this city's cars do not use
+            records += 1
             new_set = remap[key]
             texnum = r["texnum"]
-            if key in tex_remap:
-                texnum = tex_remap[key].get(texnum, texnum)
+            tm = tex_remap.get(key)
+
+            if tm is not None:
+                if texnum not in tm:
+                    packed.add((new_set, texnum))
+                    continue                    # unused id: must not overwrite a compacted one
+                texnum = tm[texnum]
+
+            if used is not None and (new_set, texnum) not in used:
+                packed.add((new_set, texnum))
+                continue
+
             body += struct.pack("<4i", r["palette"], texnum, new_set, -1)
             body += r["row"]
             count += 1
@@ -597,20 +643,20 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
             body += struct.pack("<4i", 0, i, new_set, -1)
             body += entry[4 + i * 32:4 + i * 32 + 32]
             count += 1
+            have.add((new_set, i))
 
     # Fill the used ids the source PALLET does not cover from the page's own CLUT
     # row. The EURO-43 beta has no palette records for its set 31 (the clean
     # model's low-detail page), and those rows otherwise stay empty and draw the
     # page CLUT by fallback. The compacted entry is already indexed by the new
     # texture id, so this is the exact row the poly names.
-    if items:
+    if used is not None:
         page_entries = {}
         for new_set, level, _old_set, entry, _size in page_list:
             if level is not None:
                 page_entries[new_set] = entry
 
-        for it in items:
-            g = it.get("geom")
+        for g in _geom_records(items, wheels):
             if not g:
                 continue
             for p in g["polys"]:
@@ -633,6 +679,27 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None):
                 body += struct.pack("<4i", 0, tid, s, -1) + row
                 count += 1
                 have.add((s, tid))
+
+    # PACKING INVARIANT: every record emitted must belong to a pair the geometry names.
+    # If this fails, the bake has just written a colour no poly can read (or, worse, one
+    # that shadows a used id after compaction) - fail here, where the city name is known,
+    # rather than leaving it to be rediscovered as "some panels are wrong".
+    if used is not None:
+        stray = sorted(have - used)
+
+        if stray:
+            raise SystemExit("palette packing: %d emitted (set,id) pair(s) no geometry names: %s"
+                             % (len(stray), ", ".join("%d/%d" % p for p in stray[:8])))
+
+        print("   palette: %d record(s) for %d used (set,id) pair(s); "
+              "%d unused pair(s) packed away (%d source record(s) walked)"
+              % (count, len(used), len(packed), records))
+
+        missing = sorted(used - have)
+        if missing:
+            print("   palette: WARNING %d used pair(s) have no emitted row (they draw the "
+                  "page CLUT): %s"
+                  % (len(missing), ", ".join("%d/%d" % p for p in missing[:8])))
 
     body += struct.pack("<i", -1)                    # the lone terminator
     struct.pack_into("<i", body, 0, count)           # total_cluts := rows written
@@ -800,7 +867,7 @@ def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None, s
     tex = build_textureinfo(perms, specs)
     segs += struct.pack("<ii", LUMP_TEXTUREINFO, len(tex)) + tex
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
-    pal = build_pallet(perms + specs, levels_dir, remap, tex_remap, items)
+    pal = build_pallet(perms + specs, levels_dir, remap, tex_remap, items, wheels)
     segs += struct.pack("<ii", LUMP_PALLET, len(pal)) + pal
     segs += b"\x00" * ((4 - len(segs) % 4) % 4)
 
