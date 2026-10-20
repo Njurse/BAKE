@@ -95,6 +95,66 @@ def _variant(name, base):
     return None
 
 
+def texture_rows(blob):
+    """{page/set: {TEXINF id: CLUT row}} from the TEXTURES header.
+
+    The beta's poly records carry the page's 16-bit TEXINF id, not the retail
+    CLUT row. The row is the record's index in that page's TEXINF array, which
+    is exactly what the engine's texture_cluts[set][id] wants.
+    """
+    got = find(blob, LUMP_TEXTURES)
+    if not got:
+        return {}
+    body, _size = got
+    n = struct.unpack_from("<i", blob, body)[0]
+    o = body + 8 + 8 * (n + 1)
+    rows = {}
+    for page in range(n):
+        cnt = struct.unpack_from("<i", blob, o)[0]
+        o += 4
+        table = {}
+        for k in range(cnt):
+            tid, _noff, _x, _y, _w, _h = struct.unpack_from("<HHBBBB", blob, o)
+            table[tid] = k
+            o += 8
+        rows[page] = table
+    return rows
+
+
+def map_model_ids(blob, model, rows=None):
+    """Translate a raw model's 16-bit TEXINF ids to retail CLUT rows in place.
+
+    The same id can be shared by another page (the beta's set 1 poly with id
+    1789 lives on page 31), so a miss in the poly's own page is looked up
+    globally. The low-detail models carry a 0x100 flag on the low byte; that
+    low byte is tried before leaving the id alone.
+    """
+    if rows is None:
+        rows = texture_rows(blob)
+    global_ids = {}
+    for page, table in rows.items():
+        for tid, row in table.items():
+            global_ids.setdefault(tid, []).append((page, row))
+
+    for p in model.polys:
+        if p.kind not in ("FT3", "FT4", "GT3", "GT4") or p.texture_set == 255:
+            continue
+        page = p.texture_set
+        row = rows.get(page, {}).get(p.texture_id)
+        if row is not None:
+            p.texture_id = row
+            continue
+        hits = global_ids.get(p.texture_id, [])
+        if len(hits) == 1:
+            p.texture_set, p.texture_id = hits[0]
+            continue
+        low = p.texture_id & 0xFF
+        row = rows.get(page, {}).get(low)
+        if row is not None:
+            p.texture_id = row
+    return model
+
+
 def car_groups(blob, level_models):
     """[(group_index, {variant: Model})] from the beta's named level models.
 
@@ -105,7 +165,10 @@ def car_groups(blob, level_models):
     """
     groups = {}
     order = []
+    rows = texture_rows(blob)
     for _slot, name, model in level_models(blob):
+        if model is not None:
+            map_model_ids(blob, model, rows)
         if not name:
             continue
         base = next((b for b in CAR_BASES if name.startswith(b)), None)
