@@ -24,10 +24,11 @@ D1_HORN_SAMPLE = (6, 7, 8)
 # The Euro-43 SOUND.SBK has its own bank order. The engine's composer takes the
 # FIRST model bank's sample 0 as the engine, the NEXT bank's sample 0 as the
 # idle (it only needs a different length), and the first bank's sample 2 as the
-# horn. These three constants are therefore the actual composed sounds.
-SOUND_SBK_ENGINE = 6     # 24,800 bytes @22050 Hz, looping
-SOUND_SBK_IDLE = 11      # 36,800 bytes @11025 Hz, looping (pitched-down traffic)
-SOUND_SBK_HORN = 8       # 31,552 bytes @22050 Hz, one-shot
+# horn. The beta's sample 01 is the engine and sample 00 the idle; the horns are
+# the retail Driver 1 ones (VOICES.BLK 6/7/8), mixed into the same bank.
+SOUND_SBK_ENGINE = 1     # 2,112 bytes @11025 Hz, looping
+SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
+SOUND_SBK_HORN = (6, 7, 8)   # retail VOICES.BLK horn indices
 
 
 def read_d1_voices(voices_path):
@@ -72,21 +73,22 @@ def read_d1_voices(voices_path):
     return {"entries": entries, "vag": vag, "kind": "sbk"}
 
 
-def build_bank(voices, engine_index, horn_index, idle_index=None):
+def build_bank(voices, engine_index, horn_index, idle_index=None, horn_voices=None):
     payload = bytearray()
     entries = []
 
-    def append(index):
-        addr, length, loop, rate = voices["entries"][index]
+    def append(index, src=None):
+        src = voices if src is None else src
+        addr, length, loop, rate = src["entries"][index]
         entries.append((len(payload), length, loop, rate))
-        payload.extend(voices["vag"][addr:addr + length])
+        payload.extend(src["vag"][addr:addr + length])
 
     append(engine_index)
     if idle_index is None:
         entries.append(entries[-1])      # retail: idle shares the one D1 loop
     else:
         append(idle_index)               # beta bank carries its own idle
-    append(horn_index)
+    append(horn_index, horn_voices)
 
     bank = bytearray(struct.pack("<i", 3))
     for addr, length, loop, rate in entries:
@@ -126,7 +128,7 @@ def present_models(blob, data1_off, data1_size):
     return []
 
 
-def build_sound_body(voices, models):
+def build_sound_body(voices, models, horn_voices=None):
     offsets = [-1] * MAX_CAR_MODELS
     body = bytearray(struct.pack("<ii", 1, MAX_CAR_MODELS))
     body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
@@ -134,15 +136,18 @@ def build_sound_body(voices, models):
     if voices.get("kind") == "sbk":
         # The engine composer reads model 1 sample 0 as the engine, the next
         # model's sample 0 as the idle (a different length), and model 1
-        # sample 2 as the horn. Write exactly that pair; sample 1 is unused.
+        # sample 2 as the horn. The horns come from the retail bank.
+        if horn_voices is None:
+            raise SystemExit("the beta SOUND.SBK needs a retail horn bank")
         for rank, model in enumerate(sorted(models)):
             if rank == 1:
                 engine = idle = SOUND_SBK_IDLE
             else:
                 engine = idle = SOUND_SBK_ENGINE
-            horn = SOUND_SBK_HORN
+            horn = SOUND_SBK_HORN[rank % len(SOUND_SBK_HORN)]
             offsets[model] = len(body)
-            body += build_bank(voices, engine, horn, idle)
+            body += build_bank(voices, engine, horn, idle,
+                               horn_voices=horn_voices)
             rows.append((model, engine, horn, idle))
     else:
         for rank, model in enumerate(sorted(models)):
@@ -187,6 +192,9 @@ def main(argv=None):
     ap.add_argument("--lev", required=True)
     ap.add_argument("--voices", default=None,
                     help="DRIVER/SOUND/VOICES.BLK (default: sibling of the LEV)")
+    ap.add_argument("--horns", default=None,
+                    help="retail VOICES.BLK supplying the horns for a beta SOUND.SBK "
+                         "(default: DRIVER/SOUND/VOICES.BLK beside the LEV)")
     ap.add_argument("--out", default=None, help="write here (default: in place)")
     args = ap.parse_args(argv)
 
@@ -201,6 +209,17 @@ def main(argv=None):
     if voices is None:
         raise SystemExit("cannot read bank 0 from %s" % voices_path)
 
+    horn_voices = None
+    if voices.get("kind") == "sbk":
+        horns_path = args.horns
+        if horns_path is None:
+            horns_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(args.lev))),
+                "SOUND", "VOICES.BLK")
+        horn_voices = read_d1_voices(horns_path)
+        if horn_voices is None:
+            raise SystemExit("cannot read retail horn bank from %s" % horns_path)
+
     blob = open(args.lev, "rb").read()
     parsed = find_data1(blob)
     if parsed is None:
@@ -210,7 +229,7 @@ def main(argv=None):
     if not models:
         raise SystemExit("no car models in %s" % args.lev)
 
-    sound_body, rows = build_sound_body(voices, models)
+    sound_body, rows = build_sound_body(voices, models, horn_voices)
     out = insert_sound_segment(blob, sound_body)
 
     dst = args.out or args.lev
@@ -219,6 +238,9 @@ def main(argv=None):
 
     print("patched %s: %d models, %d -> %d bytes" %
           (dst, len(rows), len(blob), len(out)))
+    if voices.get("kind") == "sbk":
+        print("   beta composed bank: engine %d, idle %d, horn %d (retail)"
+              % (SOUND_SBK_ENGINE, SOUND_SBK_IDLE, SOUND_SBK_HORN[0]))
     for model, engine, horn, idle in rows:
         if idle is None:
             print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))

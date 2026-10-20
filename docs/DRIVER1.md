@@ -659,11 +659,11 @@ python $T/textured.py --baked $D/DRIVER/D1CARS/BETAMIAMI.LEV --wheeled
 `d1pool.CITY_SOURCE_FILE` maps `BETAMIAMI` to
 `../../EURO43/LEVELS/BETAMIAMI`, so the tools read it from beside `DRIVER/`.
 Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
-`(address, length, loop, rate)` directory + VAG data. The beta bank's 24,800-byte
-22050 Hz loop is the acceleration engine; the engine's composer picks the next
-model bank's 36,800-byte 11025 Hz loop as the pitched-down traffic idle. The
-retail `DRIVER/SOUND/VOICES.BLK` remains the fallback. The bank is registered in
-`JERICHO/CONFIG/cities.ini`:
+`(address, length, loop, rate)` directory + VAG data. The beta bank's sample 1
+(2,112 bytes, 11025 Hz) is the acceleration engine and sample 0 (3,200 bytes,
+11025 Hz) the idle; the horns are the retail `VOICES.BLK` samples 6/7/8, mixed
+into the same composed bank. The retail bank remains the fallback. The bank is
+registered in `JERICHO/CONFIG/cities.ini`:
 
 ```ini
 city_0 = BETAMIAMI, ..\DRIVER\D1CARS\BETAMIAMI.LEV, ..\DRIVER\D1CARS\BETAMIAMI.LCF
