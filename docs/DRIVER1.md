@@ -611,7 +611,7 @@ Run from `src_rebuild/bin/Release_dev/DRIVER` (gitignored, local-only — §1).
 
 ## 11. The EURO-43 beta (BETAMIAMI)
 
-`EURO43/BETAMIAMI.LEV` (the leaked Euro-43 build's Miami level) is Driver 1's
+`EURO43/LEVELS/BETAMIAMI.LEV` (the leaked Euro-43 build's Miami level) is Driver 1's
 car data in a **headerless** stream: no `LUMPDESC`, no `DATA1`/`DATA2`
 containers, just a flat sequence of `{type, size}` lumps starting with
 `TEXTURENAMES` (5). The lump ids are the retail ones:
@@ -636,6 +636,13 @@ The texture pages are not the retail `TEXTUREINFO` + separate region: the
 TP[s].offset`; its size is the next entry's offset. `pages1.py` returns those
 as page entries, and `read_page`/`decomp_asm` decode them unchanged.
 
+**The beta's poly texture ids are 16-bit TEXINF ids, not retail CLUT rows.**
+A beta poly stores e.g. `5004` in the two bytes where retail stores a row
+`0..31`. `euro43.map_model_ids()` looks that id up in its page's TEXINF array
+and rewrites the poly to the record's index (the CLUT row the engine expects),
+including ids shared on another page and the low-detail `0x100` flag. Without
+that translation every car drew the page's last CLUT row and looked flat.
+
 Bake and register it exactly like a retail city:
 
 ```bash
@@ -644,12 +651,18 @@ D=src_rebuild/bin/Release_dev
 python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $D/DRIVER/D1CARS
 python $T/cosmetics1.py --levels $D/DRIVER/LEVELS --donor $D/DRIVER2/LEVELS \
        --cities BETAMIAMI --write $D/DRIVER/D1CARS
-python $T/add_car_sounds.py --lev $D/DRIVER/D1CARS/BETAMIAMI.LEV
+python $T/add_car_sounds.py --lev $D/DRIVER/D1CARS/BETAMIAMI.LEV \
+       --voices $D/EURO43/SOUND/SOUND.SBK
 python $T/textured.py --baked $D/DRIVER/D1CARS/BETAMIAMI.LEV --wheeled
 ```
 
-`d1pool.CITY_SOURCE_FILE` maps `BETAMIAMI` to `../../EURO43/BETAMIAMI`, so the
-tools read it from beside `DRIVER/`. The bank is registered in
+`d1pool.CITY_SOURCE_FILE` maps `BETAMIAMI` to
+`../../EURO43/LEVELS/BETAMIAMI`, so the tools read it from beside `DRIVER/`.
+Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
+`(address, length, loop, rate)` directory + VAG data. The beta bank's 24,800-byte
+22050 Hz loop is the acceleration engine; the engine's composer picks the next
+model bank's 36,800-byte 11025 Hz loop as the pitched-down traffic idle. The
+retail `DRIVER/SOUND/VOICES.BLK` remains the fallback. The bank is registered in
 `JERICHO/CONFIG/cities.ini`:
 
 ```ini

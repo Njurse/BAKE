@@ -229,9 +229,9 @@ def render_sheet(items, path, cell=112, cols=8):
 # describe different cars.
 CITY_SOURCE_FILE = {
     "NEWCASTLE": "CREDITS",
-    # The EURO-43 beta level lives beside DRIVER/, not inside its LEVELS folder.
-    # From DRIVER/LEVELS this reaches <install>/EURO43/BETAMIAMI.LEV.
-    "BETAMIAMI": "../../EURO43/BETAMIAMI",
+    # The EURO-43 beta level lives under EURO43/LEVELS, beside DRIVER/.
+    # From DRIVER/LEVELS this reaches <install>/EURO43/LEVELS/BETAMIAMI.LEV.
+    "BETAMIAMI": "../../EURO43/LEVELS/BETAMIAMI",
 }
 
 
