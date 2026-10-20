@@ -175,8 +175,12 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
                                horn_voices=horn_src, engine_rate=engine_rate)
             rows.append((model, engine, horn, idle))
     else:
-        for rank, model in enumerate(sorted(models)):
-            engine = D1_ENGINE_SAMPLE[rank % len(D1_ENGINE_SAMPLE)]
+        # Keep the city-wide engine/idle pair the old generic composer used:
+        # engine = the first model's engine loop, idle = the next model's engine
+        # loop (a different loop length). Only the horn is per model now.
+        engine = D1_ENGINE_SAMPLE[0]
+        idle = D1_ENGINE_SAMPLE[1]
+        for model in sorted(models):
             if model in police:
                 horn = SIREN_SAMPLE_RETAIL
             elif model in horn8:
@@ -186,8 +190,8 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
             else:
                 horn = 7
             offsets[model] = len(body)
-            body += build_bank(voices, engine, horn)
-            rows.append((model, engine, horn, None))
+            body += build_bank(voices, engine, horn, idle)
+            rows.append((model, engine, horn, idle))
     struct.pack_into("<%di" % MAX_CAR_MODELS, body, 8, *offsets)
     return bytes(body), rows
 
@@ -275,9 +279,9 @@ def main(argv=None):
           (dst, len(rows), len(blob), len(out)))
     for model, engine, horn, idle in rows:
         if idle is None:
-            print("   model %2d: D1 loop %d (engine + idle), horn %d" % (model, engine, horn))
+            print("   model %2d: engine %d, horn %d" % (model, engine, horn))
         else:
-            print("   model %2d: beta engine %d, idle %d, horn %d" % (model, engine, idle, horn))
+            print("   model %2d: engine %d, idle %d, horn %d" % (model, engine, idle, horn))
 
 
 if __name__ == "__main__":
