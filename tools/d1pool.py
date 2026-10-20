@@ -227,7 +227,12 @@ def render_sheet(items, path, cell=112, cols=8):
 # CREDITS.LEV. This mapping lives HERE and only here: the bake and the cosmetics
 # file both read it, because if they disagreed the geometry and the colours would
 # describe different cars.
-CITY_SOURCE_FILE = {"NEWCASTLE": "CREDITS"}
+CITY_SOURCE_FILE = {
+    "NEWCASTLE": "CREDITS",
+    # The EURO-43 beta level lives beside DRIVER/, not inside its LEVELS folder.
+    # From DRIVER/LEVELS this reaches <install>/EURO43/BETAMIAMI.LEV.
+    "BETAMIAMI": "../../EURO43/BETAMIAMI",
+}
 
 
 def source_file(city):
@@ -244,7 +249,7 @@ def collect(levels_dir, variants):
         level = os.path.basename(path)[:-4]
         with open(path, "rb") as f:
             blob = f.read()
-        if lev1.car_models_lump(blob) is None:
+        if not lev1.has_car_models(blob):
             continue
         for m, models in lev1.car_models(blob):
             for variant in variants:

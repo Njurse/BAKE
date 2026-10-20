@@ -52,6 +52,8 @@ LUMP_CAR_WHEELS = 200
 
 # The one D1 city whose wheels every baked city carries (see collect_wheels).
 WHEEL_SOURCE_CITY = "MIAMI"
+# Cities whose own wheel art is good enough to carry, rather than MIAMI's.
+SELF_WHEEL_CITIES = ("BETAMIAMI",)
 MAX_CAR_MODELS = 13
 WHEEL_ORDER = ("CLEANWHEEL", "DAMWHEEL", "FASTWHEEL")
 
@@ -980,7 +982,9 @@ def bake_one_city(args, levels_dir):
 
     # Every D1 city wears MIAMI's wheel art: its own city's fast/damaged sprites
     # are not all usable (FRISCO's FASTWHEEL drew its sprite background).
-    wheels = collect_wheels(levels_dir, WHEEL_SOURCE_CITY)
+    wheels = collect_wheels(levels_dir,
+                            args.city if args.city in SELF_WHEEL_CITIES
+                            else WHEEL_SOURCE_CITY)
     remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir, wheels)
     for w in wheels:
         if w is None:

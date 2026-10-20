@@ -42,7 +42,8 @@ import scalemodels  # noqa: E402
 import wheelgeom   # noqa: E402
 
 SCALE = float(scalemodels.D2_CELL_SIZE) / scalemodels.D1_CELL_SIZE   # 0.68267
-D1_CITIES = ("MIAMI", "FRISCO", "LA", "NEWYORK", "NEWCASTLE", "IVIEW", "TRAIN")
+D1_CITIES = ("MIAMI", "FRISCO", "LA", "NEWYORK", "NEWCASTLE", "IVIEW", "TRAIN",
+             "BETAMIAMI")
 
 RECORD_SIZE = 236
 LCF_TABLE = 52          # 13 int32 offsets, then the records

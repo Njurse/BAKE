@@ -609,6 +609,59 @@ Run from `src_rebuild/bin/Release_dev/DRIVER` (gitignored, local-only — §1).
 
 ---
 
+## 11. The EURO-43 beta (BETAMIAMI)
+
+`EURO43/BETAMIAMI.LEV` (the leaked Euro-43 build's Miami level) is Driver 1's
+car data in a **headerless** stream: no `LUMPDESC`, no `DATA1`/`DATA2`
+containers, just a flat sequence of `{type, size}` lumps starting with
+`TEXTURENAMES` (5). The lump ids are the retail ones:
+
+| offset | type | what |
+|---|---|---|
+| `0x1460` | 0 | `TEXTURES` — 75 texture pages **and** the texture-info header |
+| `0x1581EC` | 25 | `PALLET` — 92 records, exact `4 + 92*44` |
+| `0x15A9E0` | 1 | `MODELS` — 556 slots, the same `MODEL`/`POLYFT` records as retail |
+| `0x1CBBF8` | 12 | `MODELNAMES` — 557 slot names |
+
+The cars are **named level models**, not a type-28 `CAR_MODELS` table:
+`CIVCAR1LOW`, `CIVCAR2LOW`, `COPCARCLEAN/DAM/LOW`, `PLAYERCAR1CLEAN/DAM_OLD/
+DAM/LOW`, `PLAYERCAR2CLEAN/DAM/LOW`, `PONTIAC*/TORINO*/PICKUP*`. `lev1.py`
+groups them by base name into the eight cars the bake consumes. The wheels are
+the same named slots (`CLEANWHEEL` 4, `FASTWHEEL` 6, `HUBCAP` 77, `DAMWHEEL`
+78), so the bake carries the beta's own wheel models and art.
+
+The texture pages are not the retail `TEXTUREINFO` + separate region: the
+`TEXTURES` lump starts with `[tpage_amount][field4]` and then a table of 8-byte
+`{flags, offset}` entries. Page **set s** begins at `TEXTURES_body + 8 +
+TP[s].offset`; its size is the next entry's offset. `pages1.py` returns those
+as page entries, and `read_page`/`decomp_asm` decode them unchanged.
+
+Bake and register it exactly like a retail city:
+
+```bash
+T=JERICHO/MODS/d1cars/tools
+D=src_rebuild/bin/Release_dev
+python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $D/DRIVER/D1CARS
+python $T/cosmetics1.py --levels $D/DRIVER/LEVELS --donor $D/DRIVER2/LEVELS \
+       --cities BETAMIAMI --write $D/DRIVER/D1CARS
+python $T/add_car_sounds.py --lev $D/DRIVER/D1CARS/BETAMIAMI.LEV
+python $T/textured.py --baked $D/DRIVER/D1CARS/BETAMIAMI.LEV --wheeled
+```
+
+`d1pool.CITY_SOURCE_FILE` maps `BETAMIAMI` to `../../EURO43/BETAMIAMI`, so the
+tools read it from beside `DRIVER/`. The bank is registered in
+`JERICHO/CONFIG/cities.ini`:
+
+```ini
+city_0 = BETAMIAMI, ..\DRIVER\D1CARS\BETAMIAMI.LEV, ..\DRIVER\D1CARS\BETAMIAMI.LCF
+```
+
+`city_0` is city index 11. It appears in the frontend car list and the mp
+picker like the seven stock Driver 1 car-data cities; it is a car source, not a
+playable map.
+
+---
+
 ## 11. Sources
 
 - **Local bytes:** `src_rebuild/bin/Release_dev/DRIVER/**` (this install).

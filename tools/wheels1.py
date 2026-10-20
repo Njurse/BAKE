@@ -203,7 +203,7 @@ def verify(levels_dir, out_root):
         if not fn.upper().endswith(".LEV"):
             continue
         blob = open(os.path.join(levels_dir, fn), "rb").read()
-        if lev1.car_models_lump(blob) is not None:
+        if lev1.has_car_models(blob):
             car_levels.add(fn[:-4])
 
     by_level = {}
