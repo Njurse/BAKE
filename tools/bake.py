@@ -91,6 +91,22 @@ DATA1_OFF = 2048            # as in the real level files
 MODEL_HDR = 36              # sizeof(MODEL): 9 fields, 36 bytes
 FLAT_COLOR = (0x7F, 0x7F, 0x7F)
 
+# Beta Miami's early name table names 33 car paint schemes. The bake groups
+# the level's named models into the 8 BODIES those schemes paint; this list is
+# the level's own, checked after the model table is built so a short or mis-read
+# BETAMIAMI.LEV fails the bake instead of exporting a truncated table.
+BETA_MIAMI_EARLY_CAR_NAMES = (
+    "0TOR0", "0TOR1", "7TOR0", "7TOR1", "2TOR0", "POLICE10", "2TOR1",
+    "1COP1", "1TOR0", "5TOR0", "1TOR1", "5TOR1", "9TOR0", "8TOR0",
+    "POLICE4", "6TOR0", "POLICE3", "6TOR1", "4COP1", "POLICE7", "3TOR0",
+    "6COP1", "3TOR1", "POLICE9", "POLICE2", "2COP1", "7COP1", "POLICE6",
+    "POLICE5", "3COP1", "5COP1", "4TOR0", "POLICE",
+)
+# The beta's car-list index 4 is 2TOR0. Keep that source on the destination
+# model D2's frontend offers (select slot 3 -> model 4).
+BETA_MIAMI_SRC = 4
+BETA_MIAMI_DST = 4
+
 
 def _flat_555(rgb8):
     """8-bit (r,g,b) -> a PSX RGB555 word (STP bit clear, so opaque)."""
@@ -481,7 +497,8 @@ def _geom_records(items, wheels):
     return out
 
 
-def apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index):
+def apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index,
+                    grey_fallback=False):
     """Rewrite every car and wheel poly onto the baked set/id numbers.
 
     Driver 1 marks an UNTEXTURED poly with texture set 255 (lev1's wheel builder
@@ -496,9 +513,10 @@ def apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index):
     for g in _geom_records(items, wheels):
         level = g["sources"][0][0]
         for p in g["polys"]:
-            if p["kind"] in ("F3", "F4") or (id(g) in car_ids and p.get("set", 0) == 255):
+            if id(g) in car_ids and _solid_fallback(p, level, remap, grey_fallback):
                 p["set"] = flat_set
-                p["id"] = flat_index.get(tuple(p.get("color", (0, 0, 0))), 0)
+                p["id"] = flat_index.get(
+                    FLAT_COLOR if grey_fallback else tuple(p.get("color", (0, 0, 0))), 0)
                 p["color"] = list(FLAT_COLOR)
                 continue
             key = (level, p["set"])
@@ -725,7 +743,23 @@ def _compact_page_entry(entry, texmap):
     return out
 
 
-def build_page_plan(items, levels_dir, wheels=None):
+def _solid_fallback(p, level, remap, grey):
+    """True when this car poly must draw from the synthesized solid page.
+
+    F3/F4 flats and the 255 untextured marker always did. With `grey` (the
+    Beta Miami bake) anything that still has no usable page - set 0, the 255
+    marker, or a set the source level does not list - joins them, so the engine
+    never sees a car poly pointing at set 0 or at a page the blob does not carry.
+    """
+    if p["kind"] in ("F3", "F4"):
+        return True
+    setid = p.get("set", 0)
+    if setid == 255:
+        return True
+    return bool(grey and (setid == 0 or (level, setid) not in remap))
+
+
+def build_page_plan(items, levels_dir, wheels=None, grey_fallback=False):
     """Assign every distinct (source level, texture set) a fresh set number.
 
     Set numbers are per-level, so the same number means a different page in
@@ -741,6 +775,11 @@ def build_page_plan(items, levels_dir, wheels=None):
     `wheels` (optional) adds the wheel models' pages to the same plan, so an
     imported car's wheels carry their own texture rather than borrowing the host
     level's shared wheel sprite.
+
+    `grey_fallback` is the Beta Miami rule: every poly that still has no usable
+    page (F3/F4 flats, set 255, set 0, or a set the level does not list) is drawn
+    from one neutral-grey solid page instead of its own colour or set 0. Other
+    cities keep their existing flat colours.
 
     Also compacts each set's texture ids to 0..N-1 when a page carries an id the
     engine cannot hold: Driver 1 pages have up to 33 CLUT rows (texture ids
@@ -770,9 +809,10 @@ def build_page_plan(items, levels_dir, wheels=None):
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
                 continue
-            if p.get("set", 0) == 255:
-                continue                    # untextured: the flat page handles it
-            used_ids.setdefault((level, p["set"]), set()).add(p["id"])
+            setid = p.get("set", 0)
+            if setid == 255 or (grey_fallback and setid == 0):
+                continue                    # untextured/flat: the solid page handles it
+            used_ids.setdefault((level, setid), set()).add(p["id"])
 
     tex_remap = {}
     for key, ids in used_ids.items():
@@ -789,9 +829,10 @@ def build_page_plan(items, levels_dir, wheels=None):
         for p in g["polys"]:
             if p["kind"] not in ("FT3", "FT4", "GT3", "GT4"):
                 continue
-            if p.get("set", 0) == 255:
-                continue                    # untextured: the flat page handles it
-            key = (level, p["set"])
+            setid = p.get("set", 0)
+            if setid == 255 or (grey_fallback and setid == 0):
+                continue                    # untextured/flat: the solid page handles it
+            key = (level, setid)
             if key in remap:
                 continue
             if level not in listed:
@@ -838,10 +879,11 @@ def build_page_plan(items, levels_dir, wheels=None):
         if g is None:
             continue
 
+        level = g["sources"][0][0]
         for p in g["polys"]:
-            if p["kind"] not in ("F3", "F4") and p.get("set", 0) != 255:
+            if not _solid_fallback(p, level, remap, grey_fallback):
                 continue
-            c = tuple(p.get("color", (0, 0, 0)))
+            c = FLAT_COLOR if grey_fallback else tuple(p.get("color", (0, 0, 0)))
             if c not in flat_index:
                 flat_index[c] = len(flat_colours)
                 flat_colours.append(c)
@@ -1044,6 +1086,171 @@ def verify(blob):
     return None, {"models": n, "gt": ngt, "hemisphere": same, "wheels": wheel_count}
 
 
+def destination_slots(city, src_slots):
+    """D2 model slots for a city's ascending source models, in order.
+
+    BETAMIAMI pins source index 4 (the beta car list's 2TOR0) to destination
+    model 4: the frontend offers models 1..4, and this is the export's point.
+    Swapping the two destinations keeps the same compliant model set.
+    """
+    dst = list(D2_COMPLIANT_MODELS[:len(src_slots)])
+    if city == "BETAMIAMI" and BETA_MIAMI_SRC in src_slots and BETA_MIAMI_DST in dst:
+        i = src_slots.index(BETA_MIAMI_SRC)
+        j = dst.index(BETA_MIAMI_DST)
+        dst[i], dst[j] = dst[j], dst[i]
+    return dst
+
+
+def _beta_miami_body_base(name):
+    """The body a beta paint name belongs to.
+
+    The early table names textures (0TOR0, POLICE10, 1COP1), not level models;
+    the body token is TOR (Torino) or COP/POLICE (the cop car).
+    """
+    if "TOR" in name:
+        return "TORINO"
+    if "COP" in name or "POLICE" in name:
+        return "COPCAR"
+    return None
+
+
+def _source_car_group_bases(blob):
+    """The car groups in the order lev1.car_models yields them."""
+    import euro43
+    import lev1
+    order = []
+    for _slot, name, _model in lev1.level_models(blob):
+        if not name:
+            continue
+        base = next((b for b in euro43.CAR_BASES if name.startswith(b)), None)
+        if base is not None and base not in order:
+            order.append(base)
+    return order
+
+
+def _beta_miami_name_groups(blob):
+    """{paint name: {source group index}} from the polys that draw it."""
+    import euro43
+    import lev1
+    import pages1
+
+    rows = euro43.texture_rows(blob)
+    by_row = {}
+    for page, detail in pages1.details(blob):
+        name = detail.get("name")
+        if not name:
+            continue
+        row = rows.get(page, {}).get(detail.get("id"))
+        if row is not None:
+            by_row.setdefault((page, row), set()).add(name)
+
+    out = {}
+    for m, variants in lev1.car_models(blob):
+        clean = variants.get("clean")
+        if clean is None:
+            continue
+        for p in clean.polys:
+            if p.kind not in ("FT3", "FT4", "GT3", "GT4"):
+                continue
+            for name in by_row.get((p.texture_set, p.texture_id), ()):
+                out.setdefault(name, set()).add(m)
+    return out
+
+
+def verify_beta_miami_cars(blob, items, baked, perms, specs):
+    """Assert every beta car name and the 4 -> 4 pin survive the bake.
+
+    The early names are paint/texture names, not level-model names; each is
+    resolved to the source car group(s) that draw it (or, for a paint name no
+    baked model uses, to its body by the TOR/COP token). A name fails when it is
+    absent from the level, or when none of its bodies is baked with a non-empty
+    clean record. Also checks the pin and that no baked car poly still names set
+    0, 255, or a page the blob does not carry.
+    """
+    import lev1
+    import pages1
+    import scalemodels as sm
+
+    names = [s.decode("ascii", "replace")
+             for s in pages1.texture_names(blob).split(b"\x00") if s]
+    if not names:
+        raise SystemExit("BETAMIAMI: the early name table is empty")
+    present = set(names)
+
+    problems = []
+    if BETA_MIAMI_EARLY_CAR_NAMES[BETA_MIAMI_SRC] != "2TOR0":
+        problems.append("pin: car-list index %d is %s, not 2TOR0"
+                        % (BETA_MIAMI_SRC,
+                           BETA_MIAMI_EARLY_CAR_NAMES[BETA_MIAMI_SRC]))
+
+    group_bases = _source_car_group_bases(blob)
+    name_groups = _beta_miami_name_groups(blob)
+    src_to_dst = {it["d1_slot"]: dst for dst, it in enumerate(items)
+                  if it.get("geom") is not None}
+
+    got = sm.d2_car_lump(baked)
+    if not got:
+        raise SystemExit("BETAMIAMI: the baked blob has no car-models segment")
+    body, _size = got
+
+    def clean_model(dst):
+        c, _d, _l = struct.unpack_from("<3i", baked, body + 4 + dst * 12)
+        if c == -1:
+            return None
+        model = lev1.decode_model(baked, body + 164 + c)
+        if not model.vertices or not model.polys:
+            return None
+        return model
+
+    for name in BETA_MIAMI_EARLY_CAR_NAMES:
+        if name not in present:
+            problems.append("%s: not in BETAMIAMI's early name table" % name)
+            continue
+        groups = set(name_groups.get(name, ()))
+        if not groups:
+            base = _beta_miami_body_base(name)
+            if base in group_bases:
+                groups.add(group_bases.index(base))
+        if not groups:
+            problems.append("%s: no car body in the source level" % name)
+            continue
+        if not any(src_to_dst.get(src) is not None and
+                   clean_model(src_to_dst[src]) is not None
+                   for src in groups):
+            problems.append("%s: car body %s has no non-empty clean record"
+                            % (name, ", ".join(str(src) for src in sorted(groups))))
+
+    pin_item = items[BETA_MIAMI_DST]
+    if pin_item.get("d1_slot") != BETA_MIAMI_SRC:
+        problems.append("pin: destination %d is source %s, expected %d"
+                        % (BETA_MIAMI_DST, pin_item.get("d1_slot"), BETA_MIAMI_SRC))
+    elif clean_model(BETA_MIAMI_DST) is None:
+        problems.append("pin: destination %d has no non-empty clean record"
+                        % BETA_MIAMI_DST)
+
+    allowed = {s for s, _l, _o, _b, _z in perms + specs}
+    for dst, it in enumerate(items):
+        if it.get("geom") is None:
+            continue
+        model = clean_model(dst)
+        if model is None:
+            problems.append("model %d: no non-empty clean record" % dst)
+            continue
+        bad = [p for p in model.polys
+               if p.texture_set == 0 or p.texture_set == 255
+               or p.texture_set not in allowed]
+        if bad:
+            problems.append("model %d: %d car poly(s) name set 0/255 or a missing page"
+                            % (dst, len(bad)))
+
+    if problems:
+        raise SystemExit("BETAMIAMI: the bake would leave cars unloadable:\n  "
+                         + "\n  ".join(problems))
+    print("   beta check: %d car names, %d models, %d baked page sets, no untextured polys"
+          % (len(BETA_MIAMI_EARLY_CAR_NAMES),
+             sum(1 for it in items if it.get("geom") is not None), len(allowed)))
+
+
 def bake_one_city(args, levels_dir):
     """Bake ONE Driver 1 city's own car models, in its own SLOT order.
 
@@ -1058,7 +1265,8 @@ def bake_one_city(args, levels_dir):
     import lev1
     import d1pool
 
-    blob = open(os.path.join(levels_dir, d1pool.source_file(args.city) + ".LEV"), "rb").read()
+    src_blob = open(os.path.join(levels_dir, d1pool.source_file(args.city) + ".LEV"), "rb").read()
+    blob = src_blob
 
     by_slot = {}
     for m, variants in lev1.car_models(blob):
@@ -1090,8 +1298,9 @@ def bake_one_city(args, levels_dir):
                          % (args.city, len(src_slots), len(D2_COMPLIANT_MODELS)))
 
     empty = {"pool_index": 0, "geom": None, "scale": d1pool.SCALE}
+    dst_slots = destination_slots(args.city, src_slots)
     items = [dict(empty, pool_index=s) for s in range(MAX_CAR_MODELS)]
-    for d1_slot, d2_slot in zip(src_slots, D2_COMPLIANT_MODELS):
+    for d1_slot, d2_slot in zip(src_slots, dst_slots):
         it = dict(by_slot[d1_slot])
         it["pool_index"] = d2_slot
         it["d1_slot"] = d1_slot          # provenance: where the car really came from
@@ -1109,7 +1318,9 @@ def bake_one_city(args, levels_dir):
     wheels = collect_wheels(levels_dir,
                             args.city if args.city in SELF_WHEEL_CITIES
                             else WHEEL_SOURCE_CITY)
-    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(items, levels_dir, wheels)
+    grey = (args.city == "BETAMIAMI")
+    remap, tex_remap, perms, specs, (flat_set, flat_index) = build_page_plan(
+        items, levels_dir, wheels, grey_fallback=grey)
     for w in wheels:
         if w is None:
             continue
@@ -1120,10 +1331,13 @@ def bake_one_city(args, levels_dir):
                 raise SystemExit("%s wheel %s names set %d, which is not in that "
                                  "level's page lists" % (args.city, w["name"], p["set"]))
 
-    apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
+    apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index,
+                    grey_fallback=grey)
     siren_models = set(COP_DEST_MODELS.get(args.city, ()))
     out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels,
                      siren_models)
+    if grey:
+        verify_beta_miami_cars(src_blob, items, out, perms, specs)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
