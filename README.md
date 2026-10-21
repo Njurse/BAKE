@@ -1,4 +1,4 @@
-# d1cars — Driver 1 (1999) traffic car shapes as a fifth car-data source
+# BAKE Car Toolkit (d1cars) — Driver 1 (1999) traffic car shapes as a fifth car-data source
 
 A JERICHO module that lifts the civilian traffic car **shapes** out of the
 original Driver 1 PSX level files and offers them as a car-data source that sits

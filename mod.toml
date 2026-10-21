@@ -1,6 +1,6 @@
 id = "d1cars"
-name = "Driver 1 Cars"
-version = "0.2.0"
+name = "BAKE Car Toolkit"
+version = "0.2.1"
 author = "Jaret Ludvik"
 description = "Driver 1 (1999) traffic car shapes as a fifth, synthetic car-data source alongside the four Driver 2 cities. SCAFFOLD ONLY - no behaviour yet; see docs/DRIVER1.md."
 dependencies = []

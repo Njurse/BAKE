@@ -23,8 +23,8 @@ JER_MODULE_ENTRY(jer_module_d1cars_entry)(JERICHO_CONTEXT* ctx)
 {
 	ctx->jer_register_module(ctx,
 		"d1cars",			/* id (must match the folder + mod.toml) */
-		"Driver 1 Cars",		/* name */
-		"0.1.0",			/* version */
+		"BAKE Car Toolkit",		/* name */
+		"0.2.1",			/* version */
 		"Jaret Ludvik",			/* author */
 		"Driver 1 (1999) traffic car shapes as a fifth, synthetic car-data "
 		"source alongside the four Driver 2 cities. SCAFFOLD ONLY - no "
