@@ -129,7 +129,7 @@ def halves_from_bbox(bb):
     return [(bb[1][i] - bb[0][i]) / 2.0 for i in range(3)]
 
 
-def build_record(verts, scale, centres, radius, donor, donor_bbox):
+def build_record(verts, scale, centres, radius, donor, donor_bbox, model_id=None):
     """One car's CAR_COSMETICS.
 
     `verts` is the car's own (unscaled) vertices, `scale` the bake scale,
@@ -157,6 +157,16 @@ def build_record(verts, scale, centres, radius, donor, donor_bbox):
     # front/rear/height.
     for o, p in zip(POS_OFFSETS[:9], donor["anchors"]):
         struct.pack_into("<3h", out, o, *scaled(p))
+
+    # TODO: per-model policeLight override for exported D1 cars.
+    # policeLight is the SVECTOR at offset 40. Edit the three int16s
+    # (x, y, z) here after the donor re-proportion if the baked position
+    # is wrong. Example:
+    # if model_id == SOME_D1_COP:
+    #     police_light_x, police_light_y, police_light_z = 0, -200, 50
+    police_light_x, police_light_y, police_light_z = struct.unpack_from("<3h", out, 40)
+    struct.pack_into("<3h", out, 40,
+                     police_light_x, police_light_y, police_light_z)
     # colBox is ours outright, measured from this car's own bbox.
     struct.pack_into("<3h", out, 212, int(round(half[0])), int(round(half[1])),
                      int(round(half[2])))
@@ -245,7 +255,8 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
         zs = sorted(c[2] for c in centres)
         track = (max(c[0] for c in centres) - min(c[0] for c in centres)) / 2.0
         rec = build_record(model.vertices, SCALE, centres,
-                           _wheel_radius(wheel_model, SCALE), drec, donor_bb[di])
+                           _wheel_radius(wheel_model, SCALE), drec, donor_bb[di],
+                           model_id=m)
         out.append((m, rec, di, zs[-1] - zs[0], track))
 
     # REMAP onto the same models the .LEV bake uses. The .LEV and the .LCF are two

@@ -445,6 +445,14 @@ front, exhaust at the rear — but at this car's own front/rear/height. The hand
 scalars (`powerRatio` / `mass` / `traction` / `susCoeff` / twist) come from the
 nearest-scaled-length donor.
 
+**Hand-tuning the bar for an exported car.** `policeLight` is the sixth anchor
+(offset 40, three int16s). It is re-proportioned from the donor like the other
+anchors, which is the right default but not proof for a transplanted body.
+`build_record` therefore has a per-model override immediately after the anchor
+write: uncomment the `model_id == SOME_D1_COP` example and set x, y and z. The
+colour side is the matching commented override at the top of `AddCopCarLight`
+(`cosmetic.c`), for verifying the bar before the values are made permanent.
+
 **The wheel arithmetic is the one part that can be proved.** `cars.c:1273` places a
 wheel as
 
