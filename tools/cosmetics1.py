@@ -273,7 +273,8 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
                          % (city, len(filled), len(bake.D2_COMPLIANT_MODELS)))
     remapped = [(m, None, None, None, None) for m in range(scalemodels.MAX_CAR_MODELS)]
     SLOT_MAP[city] = []
-    for (src_m, rec, di, r, t), dst_m in zip(filled, bake.D2_COMPLIANT_MODELS):
+    dst_slots = bake.destination_slots(city, [e[0] for e in filled])
+    for (src_m, rec, di, r, t), dst_m in zip(filled, dst_slots):
         remapped[dst_m] = (dst_m, rec, di, r, t)
         SLOT_MAP[city].append([src_m, dst_m])
     for gap in bake.D2_GAP_MODELS:
