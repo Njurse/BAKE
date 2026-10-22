@@ -619,7 +619,7 @@ Run from `src_rebuild/bin/Release_dev/DRIVER` (gitignored, local-only — §1).
 
 ## 11. The EURO-43 beta (BETAMIAMI)
 
-`EURO43/LEVELS/BETAMIAMI.LEV` (the leaked Euro-43 build's Miami level) is Driver 1's
+`EURO43/LEVELS/MIAMI.LEV` (the leaked Euro-43 build's Miami level) is Driver 1's
 car data in a **headerless** stream: no `LUMPDESC`, no `DATA1`/`DATA2`
 containers, just a flat sequence of `{type, size}` lumps starting with
 `TEXTURENAMES` (5). The lump ids are the retail ones:
@@ -656,16 +656,23 @@ Bake and register it exactly like a retail city:
 ```bash
 T=JERICHO/MODS/d1cars/tools
 D=src_rebuild/bin/Release_dev
-python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $D/DRIVER/D1CARS
+O=$D/JERICHO/MODS/carhacks/D1CARS
+python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $O
 python $T/cosmetics1.py --levels $D/DRIVER/LEVELS --donor $D/DRIVER2/LEVELS \
-       --cities BETAMIAMI --write $D/DRIVER/D1CARS
-python $T/add_car_sounds.py --lev $D/DRIVER/D1CARS/BETAMIAMI.LEV \
+       --cities BETAMIAMI --write $O
+python $T/add_car_sounds.py --lev $O/BETAMIAMI.LEV \
        --voices $D/EURO43/SOUND/SOUND.SBK
-python $T/textured.py --baked $D/DRIVER/D1CARS/BETAMIAMI.LEV --wheeled
+python $T/textured.py --baked $O/BETAMIAMI.LEV --wheeled
 ```
 
-`d1pool.CITY_SOURCE_FILE` maps `BETAMIAMI` to
-`../../EURO43/LEVELS/BETAMIAMI`, so the tools read it from beside `DRIVER/`.
+`d1pool.source_file()` maps `BETAMIAMI` to `../../EURO43/LEVELS/MIAMI`, so the
+tools read the demo's own Miami level from beside `DRIVER/`. A copy somebody
+renamed to `BETAMIAMI.LEV` is still accepted as a fallback.
+
+All baked Driver 1 car data lives INSIDE carhacks -
+`JERICHO/MODS/carhacks/D1CARS/` - because it is carhacks' modded level data,
+not part of the player's Driver 1 disc. The folder is gitignored in the mod and
+must never be packaged.
 Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
 `(address, length, loop, rate)` directory + VAG data. The beta bank's sample 1
 (2,112 bytes, 11025 Hz) is the acceleration engine and sample 0 (3,200 bytes,
@@ -694,7 +701,7 @@ engine derives the wheel palette from the MIAMI wheel sprites (rows 6/6 of 27).
 The bank is registered in `JERICHO/CONFIG/cities.ini`:
 
 ```ini
-city_0 = BETAMIAMI, ..\DRIVER\D1CARS\BETAMIAMI.LEV, ..\DRIVER\D1CARS\BETAMIAMI.LCF
+city_0 = BETAMIAMI, ..\JERICHO\MODS\carhacks\D1CARS\BETAMIAMI.LEV, ..\JERICHO\MODS\carhacks\D1CARS\BETAMIAMI.LCF
 ```
 
 `city_0` is city index 11. It appears in the frontend car list and the mp

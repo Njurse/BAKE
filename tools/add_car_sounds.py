@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """add_car_sounds.py - add LUMP_CAR_SOUNDS to an existing synthetic D1 LEV.
 
-The bake that writes DRIVER/D1CARS/*.LEV also writes the car geometry, palettes
-and wheels. Re-running that whole bake just to add sounds can change the car
-mesh (a different bake produces a different model), so this tool patches ONLY
-the sound segment into a known-good LEV. It reads bank 0 of VOICES.BLK, builds
-one D2-shaped 3-sample bank per present model, appends the type-201 segment to
-DATA1 and moves the page data to the new pageBase. Geometry bytes are untouched.
+The bake that writes JERICHO/MODS/carhacks/D1CARS/*.LEV also writes the car
+geometry, palettes and wheels. Re-running that whole bake just to add sounds can
+change the car mesh (a different bake produces a different model), so this tool
+patches ONLY the sound segment into a known-good LEV. It reads bank 0 of
+VOICES.BLK, builds one D2-shaped 3-sample bank per present model, appends the
+type-201 segment to DATA1 and moves the page data to the new pageBase. Geometry
+bytes are untouched.
 """
 import argparse
 import os
@@ -227,10 +228,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lev", required=True)
     ap.add_argument("--voices", default=None,
-                    help="DRIVER/SOUND/VOICES.BLK (default: sibling of the LEV)")
+                    help="DRIVER/SOUND/VOICES.BLK, or the beta's EURO43/SOUND/SOUND.SBK "
+                         "(default: <install>/DRIVER/SOUND/VOICES.BLK)")
     ap.add_argument("--horns", default=None,
                     help="retail VOICES.BLK supplying the horns for a beta SOUND.SBK "
-                         "(default: DRIVER/SOUND/VOICES.BLK beside the LEV)")
+                         "(default: <install>/DRIVER/SOUND/VOICES.BLK)")
     ap.add_argument("--city", default=None,
                     help="city name; makes the generic horn the cop siren for "
                          "MIAMI/FRISCO/LA/NEWYORK/IVIEW (sample 4) or BETAMIAMI (sample 7)")
@@ -239,10 +241,14 @@ def main(argv=None):
 
     voices_path = args.voices
     if voices_path is None:
-        # DRIVER/D1CARS/*.LEV -> DRIVER/SOUND/VOICES.BLK
-        voices_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(args.lev))),
-            "SOUND", "VOICES.BLK")
+        # <install>/JERICHO/MODS/carhacks/D1CARS/<CITY>.LEV ->
+        # <install>/DRIVER/SOUND/VOICES.BLK. The second spelling is the old
+        # DRIVER/D1CARS location, still accepted for a legacy bake.
+        base = os.path.dirname(os.path.abspath(args.lev))
+        voices_path = os.path.join(base, "..", "..", "..", "..",
+                                   "DRIVER", "SOUND", "VOICES.BLK")
+        if not os.path.isfile(voices_path):
+            voices_path = os.path.join(base, "..", "..", "SOUND", "VOICES.BLK")
 
     voices = read_d1_voices(voices_path)
     if voices is None:
@@ -252,9 +258,13 @@ def main(argv=None):
     if voices.get("kind") == "sbk":
         horns_path = args.horns
         if horns_path is None:
-            horns_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(args.lev))),
-                "SOUND", "VOICES.BLK")
+            # Same layout as --voices: the retail horns come from the player's
+            # own Driver 1 disc, not from beside the baked blob.
+            base = os.path.dirname(os.path.abspath(args.lev))
+            horns_path = os.path.join(base, "..", "..", "..", "..",
+                                      "DRIVER", "SOUND", "VOICES.BLK")
+            if not os.path.isfile(horns_path):
+                horns_path = os.path.join(base, "..", "..", "SOUND", "VOICES.BLK")
         horn_voices = read_d1_voices(horns_path)
         if horn_voices is None:
             raise SystemExit("cannot read retail horn bank from %s" % horns_path)
