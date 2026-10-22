@@ -698,14 +698,21 @@ rendered wrong). BETAMIAMI therefore uses MIAMI's known-good CLEAN/DAM/FAST
 wheel art (`SELF_WHEEL_CITIES` is empty), exactly like the other D1 cities; the
 engine derives the wheel palette from the MIAMI wheel sprites (rows 6/6 of 27).
 
-The bank is registered in `JERICHO/CONFIG/cities.ini`:
+The bank is registered AUTOMATICALLY from the baked file: carhacks asks the
+engine for `BETAMIAMI` pointing at
+`JERICHO/MODS/carhacks/D1CARS/BETAMIAMI.LEV`, and a module-owned row survives
+the registry's config refresh. It takes the first free bank index (city 11 when
+no other bank is configured), so it appears after the seven retail Driver 1
+cities in the frontend car list and the mp picker; it is a car source, not a
+playable map.
+
+`BAKE_D1_CARS` also writes a `city_N` row to `JERICHO/CONFIG/cities.ini` for
+older builds. An explicit row still takes ownership of the slot if you want to
+pin the index:
 
 ```ini
 city_0 = BETAMIAMI, ..\JERICHO\MODS\carhacks\D1CARS\BETAMIAMI.LEV, ..\JERICHO\MODS\carhacks\D1CARS\BETAMIAMI.LCF
 ```
-
-`city_0` is city index 11. It appears in the frontend car list and the mp
-picker like the seven stock Driver 1 car-data cities; it is a car source, not a
 playable map.
 
 ---
