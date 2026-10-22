@@ -32,8 +32,8 @@ SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
 # Beta engine/idle pitch, as a percentage of the SOUND.SBK sample's own rate.
 # Two separate knobs so the engine loop and the idle loop can be tuned
 # independently without touching each other.
-BETA_ENGINE_PITCH = 85    # % of the raw sample rate
-BETA_IDLE_PITCH = 53      # % of the raw sample rate
+BETA_ENGINE_PITCH = 80    # % of the raw sample rate
+BETA_IDLE_PITCH = 75      # % of the raw sample rate
 
 # Per-model horn/siren map, by baked Driver 2 model slot. The engine loads each
 # imported model's own 3-sample bank, so these are the actual third samples:

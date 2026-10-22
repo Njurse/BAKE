@@ -14,6 +14,7 @@ against the game data and runs from the repo root. `tools/out/` is gitignored.
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
+| `driveby.py` | live window: one pool car with spinning wheels, 3 s of the beta idle then six gears of the Euro-43 engine loop at `--engine-pitch` / `--idle-pitch`; Space replays (winsound) |
 | `wheels1.py` | the level's wheel models and the shared wheel textures, to the side (`--verify`); `--place` writes the per-car placement record; `--check` pins the placement invariants |
 | `wheelgeom.py` | where a wheel goes: the donor derivation and its measured bands (`--donor`, from Driver 2's own `.LCF`s), and `placement_from_donor()` — the per-car wheelbase, track and ride height |
 | `wheelrender.py` | the shared "draw a wheel" used by all three renderers — the wheel model, its sprite texture and its transparency, replicated at each centre and optionally spun about its axle |
