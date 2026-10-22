@@ -102,10 +102,15 @@ BETA_MIAMI_EARLY_CAR_NAMES = (
     "6COP1", "3TOR1", "POLICE9", "POLICE2", "2COP1", "7COP1", "POLICE6",
     "POLICE5", "3COP1", "5COP1", "4TOR0", "POLICE",
 )
-# The beta's car-list index 4 is 2TOR0. Keep that source on the destination
-# model D2's frontend offers (select slot 3 -> model 4).
+# Pin the beta bodies the frontend offers by car-select slot. Source 3 is the
+# cop and source 4 is the beta car-list's 2TOR0 (the big buick); both must land
+# on the matching Driver 2 model, not on the next free compliant slot.
+BETA_MIAMI_PINS = {
+    3: 3,   # cop -> model 3 (select slot 2)
+    4: 4,   # 2TOR0 -> model 4 (select slot 3)
+}
 BETA_MIAMI_SRC = 4
-BETA_MIAMI_DST = 4
+BETA_MIAMI_DST = BETA_MIAMI_PINS[BETA_MIAMI_SRC]
 
 
 def _flat_555(rgb8):
@@ -1089,16 +1094,22 @@ def verify(blob):
 def destination_slots(city, src_slots):
     """D2 model slots for a city's ascending source models, in order.
 
-    BETAMIAMI pins source index 4 (the beta car list's 2TOR0) to destination
-    model 4: the frontend offers models 1..4, and this is the export's point.
-    Swapping the two destinations keeps the same compliant model set.
+    BETAMIAMI pins source 3 (the cop) and source 4 (the car-list's 2TOR0) to
+    destination models 3 and 4: the frontend offers models 1..4, and this is
+    the export's point. The other sources fill the remaining compliant slots
+    in order, so a pin never displaces a body.
     """
     dst = list(D2_COMPLIANT_MODELS[:len(src_slots)])
-    if city == "BETAMIAMI" and BETA_MIAMI_SRC in src_slots and BETA_MIAMI_DST in dst:
-        i = src_slots.index(BETA_MIAMI_SRC)
-        j = dst.index(BETA_MIAMI_DST)
-        dst[i], dst[j] = dst[j], dst[i]
-    return dst
+    if city != "BETAMIAMI":
+        return dst
+
+    pins = {src: d for src, d in BETA_MIAMI_PINS.items()
+            if src in src_slots and d in dst}
+    if not pins:
+        return dst
+
+    free = [d for d in dst if d not in pins.values()]
+    return [pins[src] if src in pins else free.pop(0) for src in src_slots]
 
 
 def _beta_miami_body_base(name):
@@ -1220,13 +1231,14 @@ def verify_beta_miami_cars(blob, items, baked, perms, specs):
             problems.append("%s: car body %s has no non-empty clean record"
                             % (name, ", ".join(str(src) for src in sorted(groups))))
 
-    pin_item = items[BETA_MIAMI_DST]
-    if pin_item.get("d1_slot") != BETA_MIAMI_SRC:
-        problems.append("pin: destination %d is source %s, expected %d"
-                        % (BETA_MIAMI_DST, pin_item.get("d1_slot"), BETA_MIAMI_SRC))
-    elif clean_model(BETA_MIAMI_DST) is None:
-        problems.append("pin: destination %d has no non-empty clean record"
-                        % BETA_MIAMI_DST)
+    for src, dst in sorted(BETA_MIAMI_PINS.items()):
+        pin_item = items[dst]
+        if pin_item.get("d1_slot") != src:
+            problems.append("pin: destination %d is source %s, expected %d"
+                            % (dst, pin_item.get("d1_slot"), src))
+        elif clean_model(dst) is None:
+            problems.append("pin: destination %d has no non-empty clean record"
+                            % dst)
 
     allowed = {s for s, _l, _o, _b, _z in perms + specs}
     for dst, it in enumerate(items):
