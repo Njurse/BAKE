@@ -680,8 +680,9 @@ Its sound bank is `EURO43/SOUND/SOUND.SBK`, a bare count + 16-byte
 into the same composed bank. The retail bank remains the fallback.
 
 **Siren wiring.** Retail cop cars at source slot 1 (MIAMI, FRISCO, LA, NEWYORK)
-and source slot 8 (LA, IVIEW) use retail `VOICES.BLK` sample 4; the beta's car
-model 3 uses `SOUND.SBK` sample 7. `add_car_sounds.py --city` puts the chosen
+and source slot 8 (LA, IVIEW) use retail `VOICES.BLK` sample 4; the beta cop
+(model 8) uses the same retail sample 4 instead of the beta `SOUND.SBK` siren,
+so the beta siren no longer contaminates the shared sound bank. `add_car_sounds.py --city` puts the chosen
 sample in the imported bank's third slot, and the bake writes `LUMP_CAR_SIRENS`
 (type 202), a 13-entry cop flag table. `CarHasSiren` calls
 `GetCarImportSiren(city, model)` and returns the imported bank's third sample,
@@ -689,6 +690,9 @@ so a marked imported cop uses Driver 2's siren logic: the third audio channel,
 the horn on/off control, and the AI pursuer siren loop. The city still has one
 generic bank, so the third sample is shared; only the marked model takes the
 siren channel.
+
+Only NEW bakes pick this up: an existing `BETAMIAMI.LEV` keeps the old
+`SOUND.SBK` sample-7 siren until `BAKE_D1_CARS` is re-run.
 
 **Wheel-palette comparison.** The beta's set 1 has 27 CLUT rows and differs from
 retail MIAMI's set 1 in one row; the beta's set 53 has 24 rows while retail
