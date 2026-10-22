@@ -34,11 +34,11 @@ SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
 # siren (only on the police list), 7 = beta SOUND.SBK siren (BETAMIAMI cop).
 POLICE_MODELS = {
     "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 9), "NEWYORK": (1, 9),
-    "IVIEW": (1,), "BETAMIAMI": (3,),
+    "IVIEW": (1,), "BETAMIAMI": (8,),
 }
 HORN8_MODELS = {
     "MIAMI": (4,), "FRISCO": (4,), "LA": (4,), "NEWYORK": (4,),
-    "NEWCASTLE": (3,), "BETAMIAMI": (4,),
+    "NEWCASTLE": (3,), "BETAMIAMI": (3, 4),
 }
 SMALL_MODELS = {"FRISCO": (3,), "BETAMIAMI": (1, 2)}
 SIREN_SAMPLE_RETAIL = 4
