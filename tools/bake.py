@@ -459,7 +459,7 @@ def collect_wheels(levels_dir, city=None):
     import wheels1
     import wheelgeom
 
-    source = d1pool.source_file(city) if city else None
+    source = d1pool.source_file(city, levels_dir) if city else None
     own = {}
     if source:
         blob = open(os.path.join(levels_dir, source + ".LEV"), "rb").read()
@@ -627,7 +627,7 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
         by_level.setdefault(level, []).append((new_set, old_set))
 
     for level in by_level:
-        blob = open(os.path.join(levels_dir, d1pool.source_file(level) + ".LEV"), "rb").read()
+        blob = open(os.path.join(levels_dir, d1pool.source_file(level, levels_dir) + ".LEV"), "rb").read()
         pal = pages1.pallet_lump(blob)
         if not pal:
             continue
@@ -843,7 +843,7 @@ def build_page_plan(items, levels_dir, wheels=None, grey_fallback=False):
             if key in remap:
                 continue
             if level not in listed:
-                blob = open(os.path.join(levels_dir, d1pool.source_file(level) + ".LEV"), "rb").read()
+                blob = open(os.path.join(levels_dir, d1pool.source_file(level, levels_dir) + ".LEV"), "rb").read()
                 ofs, entries, ti = pages1.level_pages(blob)
                 # The special pages carry no offset of their own: their data runs
                 # on from the end of the permanent pages, sector-aligned, in
@@ -1280,7 +1280,7 @@ def bake_one_city(args, levels_dir):
     import lev1
     import d1pool
 
-    src_blob = open(os.path.join(levels_dir, d1pool.source_file(args.city) + ".LEV"), "rb").read()
+    src_blob = open(os.path.join(levels_dir, d1pool.source_file(args.city, levels_dir) + ".LEV"), "rb").read()
     blob = src_blob
 
     by_slot = {}

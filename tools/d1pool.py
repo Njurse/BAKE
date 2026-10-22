@@ -229,14 +229,32 @@ def render_sheet(items, path, cell=112, cols=8):
 # describe different cars.
 CITY_SOURCE_FILE = {
     "NEWCASTLE": "CREDITS",
-    # The EURO-43 beta level lives under EURO43/LEVELS, beside DRIVER/.
-    # From DRIVER/LEVELS this reaches <install>/EURO43/LEVELS/BETAMIAMI.LEV.
-    "BETAMIAMI": "../../EURO43/LEVELS/BETAMIAMI",
 }
 
+# The EURO-43 beta's car data is the DEMO's own MIAMI level, so a dump of the
+# demo has EURO43/LEVELS/MIAMI.LEV - not a file named after the beta city. Older
+# builds of these tools looked for BETAMIAMI.LEV and failed on a stock dump;
+# that spelling is still accepted for a copy somebody renamed by hand.
+# Both are relative to DRIVER/LEVELS, so they reach <install>/EURO43/LEVELS/.
+BETAMIAMI_SOURCES = (
+    "../../EURO43/LEVELS/MIAMI",
+    "../../EURO43/LEVELS/BETAMIAMI",
+)
 
-def source_file(city):
-    """The .LEV a car-data city is actually stored in."""
+
+def source_file(city, levels_dir=None):
+    """The .LEV a car-data city is actually stored in.
+
+    For BETAMIAMI the demo ships MIAMI.LEV; pass levels_dir so the fallback can
+    look at the disk. Without it (a display/log label) MIAMI is the answer.
+    """
+    if city == "BETAMIAMI":
+        if levels_dir is not None:
+            for candidate in BETAMIAMI_SOURCES:
+                if os.path.isfile(os.path.join(levels_dir, candidate + ".LEV")):
+                    return candidate
+        return BETAMIAMI_SOURCES[0]
+
     return CITY_SOURCE_FILE.get(city, city)
 
 

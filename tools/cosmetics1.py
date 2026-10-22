@@ -226,7 +226,7 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
     model slots. Returns a list of (slot, record, donor_index, radius, track),
     with a record of None for a slot the city leaves empty.
     """
-    blob = open(os.path.join(levels_dir, d1pool.source_file(city) + ".LEV"), "rb").read()
+    blob = open(os.path.join(levels_dir, d1pool.source_file(city, levels_dir) + ".LEV"), "rb").read()
     donors = sorted(donor_bb)          # only the models that have a body
     donor_halves = [halves_from_bbox(donor_bb[m]) for m in donors]
     out = []
