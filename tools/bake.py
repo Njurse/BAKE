@@ -75,7 +75,7 @@ D2_COMPLIANT_MODELS = (1, 2, 3, 4, 8, 9, 10, 11, 12)
 # engine's CarHasSiren then treats them like Driver 2 police cars.
 COP_DEST_MODELS = {
     "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 9), "NEWYORK": (1, 9),
-    "IVIEW": (1,), "BETAMIAMI": (3,),
+    "IVIEW": (1,), "BETAMIAMI": (8,),
 }
 
 # Models NO Driver 2 city holds data for. A car written at one of these resolves
@@ -102,15 +102,17 @@ BETA_MIAMI_EARLY_CAR_NAMES = (
     "6COP1", "3TOR1", "POLICE9", "POLICE2", "2COP1", "7COP1", "POLICE6",
     "POLICE5", "3COP1", "5COP1", "4TOR0", "POLICE",
 )
-# Pin the beta bodies the frontend offers by car-select slot. Source 3 is the
-# cop and source 4 is the beta car-list's 2TOR0 (the big buick); both must land
-# on the matching Driver 2 model, not on the next free compliant slot.
+# Pin the beta bodies by source group: 2 is the COPCAR, 3 is the 2TOR0
+# buick, 4 is the other player car. The cop belongs on model 8 (the extra
+# compliant slot the frontend does not offer); the buick on model 3. Source 4
+# stays on model 4.
 BETA_MIAMI_PINS = {
-    3: 3,   # cop -> model 3 (select slot 2)
-    4: 4,   # 2TOR0 -> model 4 (select slot 3)
+    2: 8,   # COPCAR -> model 8 (beta siren; not in the four frontend slots)
+    3: 3,   # 2TOR0 buick -> model 3 (a frontend car)
+    4: 4,   # other player car -> model 4
 }
+# The early name table's index 4 is 2TOR0; the verifier below checks that.
 BETA_MIAMI_SRC = 4
-BETA_MIAMI_DST = BETA_MIAMI_PINS[BETA_MIAMI_SRC]
 
 
 def _flat_555(rgb8):
@@ -1094,10 +1096,11 @@ def verify(blob):
 def destination_slots(city, src_slots):
     """D2 model slots for a city's ascending source models, in order.
 
-    BETAMIAMI pins source 3 (the cop) and source 4 (the car-list's 2TOR0) to
-    destination models 3 and 4: the frontend offers models 1..4, and this is
-    the export's point. The other sources fill the remaining compliant slots
-    in order, so a pin never displaces a body.
+    BETAMIAMI pins source 2 (the COPCAR) to model 8 and source 3 (the 2TOR0
+    buick) to model 3; source 4 stays on 4. The frontend offers models 1..4,
+    so the cop sits on the extra slot and the buick on a visible one. The
+    other sources fill the remaining compliant slots in order, so a pin never
+    displaces a body.
     """
     dst = list(D2_COMPLIANT_MODELS[:len(src_slots)])
     if city != "BETAMIAMI":
