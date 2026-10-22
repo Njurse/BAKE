@@ -37,6 +37,16 @@ import pages1          # noqa: E402
 SIZE = 256
 SQUARE = 16
 MODEL_SLOT = 4
+# A set number is host-owned whenever it is a LEVEL page number (texture.c's
+# HostUseReason: tpage < tpage_amount), not only when it matches carTpages - so a low
+# set the host has not named yet is still claimed once the level's pages load. That
+# is what deferred the checker's palette (0 rows taken, 1 deferred) and drew the
+# stand-in flat. The bake renumbers pages from PAGE_SET_BASE (bake.py's
+# remap[key] = PAGE_SET_BASE + index), so the checker lands on PAGE_SET_BASE no matter
+# what its source set is: move the BASE above the level's page space, still inside
+# carTpages' 0..127. 200 overshot the range and left the slot empty, plastering raw
+# VRAM across the car.
+bake.PAGE_SET_BASE = 120
 CHECKER_SET = bake.PAGE_SET_BASE
 
 
