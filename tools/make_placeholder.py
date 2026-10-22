@@ -10,7 +10,14 @@ The checker UVs are a box projection (each poly projected on the plane its
 normal faces), so the squares stay even across the body instead of skewing
 through the donor's per-panel UVs.
 
-    python make_placeholder.py --donor D1CARS/BETAMIAMI.LEV --out PLCHLDR.LEV
+It can also carry sounds: --voices2 lifts a bank straight out of Driver 2's
+VOICES2.BLK. Those lumps are already dynamic car banks (engine, idle, horn), the
+exact shape the engine reads for an imported model, so the one named here is
+embedded as-is. Lump 12 is CHICAGO model 1.
+
+    python make_placeholder.py --donor D1CARS/BETAMIAMI.LEV \
+        --voices2 DRIVER2/SOUND/VOICES2.BLK --sound-lump 12 \
+        --out PLCHLDR.LEV
 """
 
 import argparse
@@ -21,10 +28,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import bake      # noqa: E402
-import d1pool    # noqa: E402
-import lev1      # noqa: E402
-import pages1    # noqa: E402
+import bake            # noqa: E402
+import add_car_sounds  # noqa: E402  insert_sound_segment, MAX_CAR_MODELS
+import d1pool          # noqa: E402
+import lev1            # noqa: E402
+import pages1          # noqa: E402
 
 SIZE = 256
 SQUARE = 16
@@ -103,10 +111,41 @@ def geom_for(model):
     }
 
 
+def sound_body_from_voices2(path, lump):
+    """VOICES2.BLK lump `lump` as a LUMP_CAR_SOUNDS body for MODEL_SLOT.
+
+    VOICES2.BLK is [u32 blockLimit[73]][lump data]; each car lump is already a D2
+    dynamic bank (int num_samples, SAMPLE_DATA[], VAG) - the exact shape the
+    engine's CarImportSoundEntry reads - so it is embedded unchanged.
+    """
+    d = open(path, "rb").read()
+    limits = struct.unpack_from("<73I", d, 0)
+    if lump < 0 or lump + 1 >= len(limits):
+        raise SystemExit("VOICES2.BLK has no lump %d" % lump)
+    off, end = limits[lump], limits[lump + 1]
+    bank = d[off:end]
+    n = struct.unpack_from("<i", bank, 0)[0]
+    if n != 3:
+        raise SystemExit("VOICES2 lump %d carries %d samples; the imported-car bank needs 3"
+                         % (lump, n))
+
+    body = bytearray(struct.pack("<ii", 1, add_car_sounds.MAX_CAR_MODELS))
+    body += b"\x00" * (add_car_sounds.MAX_CAR_MODELS * 4)   # the offsets table
+    offsets = [-1] * add_car_sounds.MAX_CAR_MODELS
+    offsets[MODEL_SLOT] = len(body)                         # first bank, after the table
+    body += bank
+    struct.pack_into("<%di" % add_car_sounds.MAX_CAR_MODELS, body, 8, *offsets)
+    return bytes(body)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--donor", required=True, help="a baked D1CARS/*.LEV to take model 4 from")
     ap.add_argument("--out", required=True, help="output PLCHLDR.LEV path")
+    ap.add_argument("--voices2", default=None,
+                    help="DRIVER2/SOUND/VOICES2.BLK for the placeholder's engine/idle/horn")
+    ap.add_argument("--sound-lump", type=int, default=12,
+                    help="VOICES2 bank lump (12 = CHICAGO model 1)")
     args = ap.parse_args(argv)
 
     model = load_donor_model(args.donor, MODEL_SLOT)
@@ -125,6 +164,11 @@ def main(argv=None):
     perms = [(CHECKER_SET, None, None, entry, len(entry))]
 
     out = bake.build_file(items, perms, [], HERE, {}, {}, None, None)
+
+    if args.voices2:
+        sb = sound_body_from_voices2(args.voices2, args.sound_lump)
+        out = add_car_sounds.insert_sound_segment(out, sb)
+        print("sounds: VOICES2 lump %d -> model %d" % (args.sound_lump, MODEL_SLOT))
 
     d = os.path.dirname(os.path.abspath(args.out))
     if d and not os.path.isdir(d):
