@@ -29,10 +29,16 @@ D1_ENGINE_SAMPLE = (1, 2, 3, 4, 5)
 SOUND_SBK_ENGINE = 1     # 2,112 bytes @11025 Hz, looping
 SOUND_SBK_IDLE = 0       # 3,200 bytes @11025 Hz, looping
 
+# Beta engine/idle pitch, as a percentage of the SOUND.SBK sample's own rate.
+# Two separate knobs so the engine loop and the idle loop can be tuned
+# independently without touching each other.
+BETA_ENGINE_PITCH = 85    # % of the raw sample rate
+BETA_IDLE_PITCH = 53      # % of the raw sample rate
+
 # Per-model horn/siren map, by baked Driver 2 model slot. The engine loads each
 # imported model's own 3-sample bank, so these are the actual third samples:
 # 8 = retail VOICES.BLK big-car horn, 7 = beefier, 9 = smaller, 4 = retail cop
-# siren (only on the police list), 7 = beta SOUND.SBK siren (BETAMIAMI cop).
+# siren (only on the police list).
 POLICE_MODELS = {
     "MIAMI": (1,), "FRISCO": (1,), "LA": (1, 9), "NEWYORK": (1, 9),
     "IVIEW": (1,), "BETAMIAMI": (8,),
@@ -43,7 +49,6 @@ HORN8_MODELS = {
 }
 SMALL_MODELS = {"FRISCO": (3,), "BETAMIAMI": (1,)}
 SIREN_SAMPLE_RETAIL = 4
-SIREN_SAMPLE_BETA = 7
 
 
 def read_d1_voices(voices_path):
@@ -89,7 +94,7 @@ def read_d1_voices(voices_path):
 
 
 def build_bank(voices, engine_index, horn_index, idle_index=None,
-               horn_voices=None, engine_rate=None):
+               horn_voices=None, engine_rate=None, idle_rate=None):
     payload = bytearray()
     entries = []
 
@@ -105,7 +110,7 @@ def build_bank(voices, engine_index, horn_index, idle_index=None,
     if idle_index is None:
         entries.append(entries[-1])      # retail: idle shares the one D1 loop
     else:
-        append(idle_index)               # beta bank carries its own idle
+        append(idle_index, rate=idle_rate)  # beta bank carries its own idle
     append(horn_index, horn_voices)
 
     bank = bytearray(struct.pack("<i", 3))
@@ -164,16 +169,18 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
         for model in sorted(models):
             engine = SOUND_SBK_ENGINE
             idle = SOUND_SBK_IDLE
-            engine_rate = voices["entries"][engine][3] * 2 // 3   # -33% pitch (2/3 rate)
+            engine_rate = voices["entries"][engine][3] * BETA_ENGINE_PITCH // 100
+            idle_rate = voices["entries"][idle][3] * BETA_IDLE_PITCH // 100
             if model in police:
-                horn = SIREN_SAMPLE_BETA
-                horn_src = None          # the beta bank's own siren sample
+                horn = SIREN_SAMPLE_RETAIL
+                horn_src = horn_voices   # the retail siren, like every other D1 cop
             else:
                 horn = 8 if model in horn8 else (9 if model in small else 7)
                 horn_src = horn_voices
             offsets[model] = len(body)
             body += build_bank(voices, engine, horn, idle,
-                               horn_voices=horn_src, engine_rate=engine_rate)
+                               horn_voices=horn_src, engine_rate=engine_rate,
+                               idle_rate=idle_rate)
             rows.append((model, engine, horn, idle))
     else:
         # Keep the city-wide engine/idle pair the old generic composer used:
