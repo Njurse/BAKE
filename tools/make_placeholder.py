@@ -87,8 +87,12 @@ def load_donor_model(path, slot):
     return lev1.decode_model(blob, body + 164 + clean)
 
 
-def geom_for(model):
-    vertices = [list(v) for v in model.vertices]
+def geom_for(model, lift=0):
+    # `lift` shifts the body vertically in the model's own Y axis (positive = DOWN,
+    # the engine's convention - see AddCopCarLight, where vy -= 4 moves a light up).
+    # The placeholder reuses a donor body whose ride height is a little high on the
+    # stand-in, so this is the tuning knob; the donor cars themselves are untouched.
+    vertices = [[v[0], v[1] + lift, v[2]] for v in model.vertices]
     face_n, point_n, pn, nsource = d1pool.normals_for(model)
 
     polys = []
@@ -146,10 +150,12 @@ def main(argv=None):
                     help="DRIVER2/SOUND/VOICES2.BLK for the placeholder's engine/idle/horn")
     ap.add_argument("--sound-lump", type=int, default=12,
                     help="VOICES2 bank lump (12 = CHICAGO model 1)")
+    ap.add_argument("--lift", type=int, default=0,
+                    help="body vertical shift in model units (+ = DOWN, the engine's Y axis)")
     args = ap.parse_args(argv)
 
     model = load_donor_model(args.donor, MODEL_SLOT)
-    geom = geom_for(model)
+    geom = geom_for(model, args.lift)
     print("donor model %d: %d verts, %d polys" % (MODEL_SLOT, geom["verts"], len(geom["polys"])))
 
     yes = {"geom": geom, "scale": geom["scale"]}
