@@ -135,7 +135,33 @@ def _flat_clut_row(rgb8):
 LEVELS_DIR = "src_rebuild/bin/Release_dev/DRIVER/LEVELS"
 
 
-def build_model_record(vertices, polys, face_normals, point_normals, scale):
+def _inward_normal(verts, v):
+    """A poly's own normal in the convention its point-normals table stores.
+
+    Driver 1 and Driver 2 wind so that `cross(u, v)` points INTO the surface
+    (lev1.NORMAL_SIGN), and that inward direction is what the engine's lighting
+    table holds. Checked against the measured source: FRISCO_0 poly 0's vertices
+    give (-3640, 1894, -95), and its stored face normal is (-3640, 1873, -104).
+
+    This is for a poly that carries no normal indices of its own - an FT3/FT4, or
+    a flat F3/F4 panel. The bake re-encodes those as GT3/GT4, so the engine lights
+    them from the table; pointing them at entry 0 (the old fallback) lit a whole
+    flank from one unrelated direction, which is the black right side.
+    """
+    a, b, c = (verts[i] for i in v[:3])
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+    L = (nx * nx + ny * ny + nz * nz) ** 0.5 or 1.0
+    return (int(round(nx / L * 4096)),
+            int(round(ny / L * 4096)),
+            int(round(nz / L * 4096)))
+
+
+def build_model_record(vertices, polys, face_normals, point_normals, scale,
+                       stats=None):
     """One MODEL + vertices + BOTH normal tables + a GT3/GT4 poly stream.
 
     The table order is the models' own and is load-bearing: the offsets are
@@ -167,12 +193,78 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
     pnorm = [tuple(n) for n in (point_normals or [])]
     npol = len(polys)
 
+    # A poly with no normal indices of its own (FT3/FT4, and the flat F3/F4
+    # panels) still has to name a table entry: the stream is GT, and the engine
+    # lights every GT vertex from point_normals. The old encoder fell back to
+    # index 0 for each such vertex, so a whole flank was lit from ONE unrelated
+    # direction - black on whichever side faces away from it. Give each such poly
+    # its own flat normal instead, reusing an identical entry so coplanar panels
+    # cost nothing.
+    normal_index = {}
+    for i, n in enumerate(pnorm):
+        normal_index.setdefault(n, i)
+
+    flat_of = {}
+    fallback_polys = 0
+    for k, p in enumerate(polys):
+        v = p["v"]
+        ns = list(p.get("n") or [])
+        if len(ns) >= len(v):
+            continue
+        n = _inward_normal(verts, v)
+        idx = normal_index.get(n)
+        if idx is None:
+            idx = len(pnorm)
+            pnorm.append(n)
+            normal_index[n] = idx
+        flat_of[k] = idx
+        fallback_polys += 1
+
+    # SECOND PASS - a handful of source entries point the OTHER way: measured,
+    # 10 of the pool's 7864 polys - 2 in each of FRISCO_7, IVIEW_5, MIAMI_5,
+    # MIAMI_8 and TRAIN_5 - name a normal that faces into the surface, which
+    # lights that panel from inside the car. The table is stored INWARD, so a
+    # valid entry has dot(entry, inward) > 0. Flip only this poly's reference to
+    # a negated copy - a shared entry another poly uses correctly is never
+    # rewritten.
+    resolved = {}
+    flipped_polys = 0
+    for k, p in enumerate(polys):
+        v = p["v"]
+        ns = list(p.get("n") or [])
+        if k in flat_of:
+            ns = ns + [flat_of[k]] * (len(v) - len(ns))
+        assert len(ns) >= len(v), "poly %d left without a normal index" % k
+        inward = _inward_normal(verts, v)
+        out_ns = []
+        flipped = False
+        for i in ns[:len(v)]:
+            n = pnorm[i]
+            if n[0] * inward[0] + n[1] * inward[1] + n[2] * inward[2] < 0:
+                neg = (-n[0], -n[1], -n[2])
+                j = normal_index.get(neg)
+                if j is None:
+                    j = len(pnorm)
+                    pnorm.append(neg)
+                    normal_index[neg] = j
+                out_ns.append(j)
+                flipped = True
+            else:
+                out_ns.append(i)
+        resolved[k] = out_ns
+        if flipped:
+            flipped_polys += 1
+
+    if stats is not None:
+        stats["fallback_normals"] = stats.get("fallback_normals", 0) + fallback_polys
+        stats["flipped_normals"] = stats.get("flipped_normals", 0) + flipped_polys
+
     stream = bytearray()
     npolys = 0
     for k, p in enumerate(polys):
         v = list(p["v"])
         uv = [tuple(u) for u in p.get("uv", [])]
-        ns = list(p.get("n") or [])
+        ns = resolved[k]
         setid = p.get("set", 0) & 0xFF
         texid = p.get("id", 0) & 0xFF
         col = tuple(p.get("color", FLAT_COLOR))
@@ -181,7 +273,7 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
             rec[0] = 22                                  # GT3
             rec[1], rec[2] = setid, texid
             rec[4:7] = bytes(x & 0xFF for x in v[:3])
-            rec[8:11] = bytes((ns[i] if i < len(ns) else 0) & 0xFF for i in range(3))
+            rec[8:11] = bytes(ns[i] & 0xFF for i in range(3))
             for i in range(3):
                 u = uv[i] if i < len(uv) else (0, 0)
                 rec[12 + i * 2] = u[0] & 0xFF
@@ -194,7 +286,7 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale):
             rec[0] = 23                                  # GT4
             rec[1], rec[2] = setid, texid
             rec[4:8] = bytes(x & 0xFF for x in v[:4])
-            rec[8:12] = bytes((ns[i] if i < len(ns) else 0) & 0xFF for i in range(4))
+            rec[8:12] = bytes(ns[i] & 0xFF for i in range(4))
             for i in range(4):
                 u = uv[i] if i < len(uv) else (0, 0)
                 rec[12 + i * 2] = u[0] & 0xFF
@@ -271,13 +363,17 @@ def build_damaged_record(vertices, scale, clean):
     return bytes(out)
 
 
-def build_car_models_lump(items):
+def build_car_models_lump(items, stats=None):
     """items: list of {'geom': <geom.json record> or None, 'scale': k}.
 
     A None geom is a slot the city has no car in. It still occupies its position -
     the .LCF's record for that slot has to line up with it - and gets -1 offsets,
     which is what an empty slot looks like in Driver 2's own files (and what
     lev1.decode_model tests for).
+
+    `stats` (optional dict) collects the normal-resolution counts (how many
+    polys were given a flat normal and how many source normals were flipped) so
+    the bake can report them.
     """
     blocks = []          # (clean_bytes, dam_bytes) or None
     for it in items:
@@ -287,7 +383,7 @@ def build_car_models_lump(items):
             continue
         clean = build_model_record(g["vertices"], g["polys"],
                                    g.get("face_normals"), g.get("point_normals"),
-                                   it["scale"])
+                                   it["scale"], stats=stats)
         dam = build_damaged_record(g["vertices"], it["scale"], clean)
         # A THIRD block is not optional, however little it is used: the engine's
         # GetCarImportModels rejects a model outright unless all three offsets are
@@ -909,8 +1005,9 @@ def build_page_plan(items, levels_dir, wheels=None, grey_fallback=False):
     return remap, tex_remap, perms, specs, (flat_set, flat_index)
 
 
-def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None, siren_models=None):
-    car = build_car_models_lump(items)
+def build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels=None,
+               siren_models=None, stats=None):
+    car = build_car_models_lump(items, stats=stats)
 
     segs = bytearray()
     tex = build_textureinfo(perms, specs)
@@ -1070,19 +1167,32 @@ def verify(blob):
             return "model %d ships no point_normals table" % m, {}
         table = model.normals
         for p in model.polys:
-            if not p.n:
-                continue
-            ngt += 1
+            # A baked poly is always GT, so it MUST carry one normal index per
+            # vertex and every index must resolve. The old check skipped an empty
+            # list, which is exactly how the index-0 fallback hid: an empty list
+            # decoded to nothing and the loop moved on.
+            if not p.n or len(p.n) != len(p.v):
+                return ("model %d: a %s poly carries %d normal index(es) for %d vertices"
+                        % (m, p.kind, len(p.n), len(p.v))), {}
             if any(i >= len(table) for i in p.n):
                 return "model %d: a GT normal index is outside the table" % m, {}
+            g = model._geo_normal(p)
+            if g[0] == 0 and g[1] == 0 and g[2] == 0:
+                continue                    # zero-area poly: no face normal to test
+            ngt += 1
             ns = model.poly_normals(p)
             tx = sum(x[0] for x in ns) / len(ns)
             ty = sum(x[1] for x in ns) / len(ns)
             tz = sum(x[2] for x in ns) / len(ns)
             tl = math.sqrt(tx * tx + ty * ty + tz * tz) or 1.0
-            g = model._geo_normal(p)
             if (tx * g[0] + ty * g[1] + tz * g[2]) / tl > 0:
                 same += 1
+            else:
+                # The black-flank defect: one side's polys lit from inside the
+                # car. build_model_record's flip pass exists to make this
+                # unreachable, so a blob that trips it must fail loudly.
+                return ("model %d: a %s poly's normals face into its geometry "
+                        "(indices %s)" % (m, p.kind, p.n)), {}
     if not n:
         return "no models decoded", {}
 
@@ -1349,8 +1459,9 @@ def bake_one_city(args, levels_dir):
     apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index,
                     grey_fallback=grey)
     siren_models = set(COP_DEST_MODELS.get(args.city, ()))
+    bake_stats = {}
     out = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels,
-                     siren_models)
+                     siren_models, bake_stats)
     if grey:
         verify_beta_miami_cars(src_blob, items, out, perms, specs)
 
@@ -1374,6 +1485,9 @@ def bake_one_city(args, levels_dir):
     print("   wheels: %s" % ", ".join(
         ("%s from %s" % (w["name"], w["level"])) if w else "absent" for w in wheels))
     print("   texture sets: %d permanent + %d special" % (len(perms), len(specs)))
+    print("   normal resolution: %d poly(s) got a flat normal, %d had a source normal flipped"
+          % (bake_stats.get("fallback_normals", 0),
+             bake_stats.get("flipped_normals", 0)))
     problem, stats = verify(out)
     if stats:
         print("   normals: %d GT polys, table faces the geometry in %.1f%%"
@@ -1436,7 +1550,9 @@ def main(argv=None):
                                  "level's page lists" % (w["name"], p["set"]))
 
     apply_page_plan(items, wheels, remap, tex_remap, flat_set, flat_index)
-    blob = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels)
+    bake_stats = {}
+    blob = build_file(items, perms, specs, levels_dir, remap, tex_remap, wheels,
+                      stats=bake_stats)
 
     if not os.path.isdir(args.out):
         os.makedirs(args.out)
@@ -1453,6 +1569,9 @@ def main(argv=None):
     print("   texture sets: %d permanent + %d special, from %d source levels"
           % (len(perms), len(specs),
              len({lvl for _s, lvl, _o, _b, _z in perms + specs})))
+    print("   normal resolution: %d poly(s) got a flat normal, %d had a source normal flipped"
+          % (bake_stats.get("fallback_normals", 0),
+             bake_stats.get("flipped_normals", 0)))
     problem, stats = verify(blob)
     if stats:
         print("   normals: %d GT polys, table faces the geometry in %.1f%%"

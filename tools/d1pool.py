@@ -86,6 +86,17 @@ def normals_for(model):
     Both tables are stored the way the engine wants them, i.e. in the models'
     own INWARD convention (lev1.NORMAL_SIGN), not the outward one the renderers
     shade with - the engine derives its lighting from the direction.
+
+    NOT every poly has normal indices, and that is correct for this record:
+    Driver 1 stores FT3/FT4 textured panels and the flat F3/F4 cabin/underbody as
+    records with no per-vertex normals (lev1 yields n == ()). The bake re-encodes
+    those as GT3/GT4, so `bake.build_model_record` gives each such poly its own
+    flat inward normal, and flips a source entry that points the wrong way. That
+    resolution belongs in the writer, which is the only consumer that needs an
+    index for every vertex; this record deliberately keeps the source's empty
+    list. No engine C change is involved, and the STP bit is not the mechanism:
+    the body plotters are opaque (setPolyGT3, 0x34), so a body texel cannot
+    blend.
     """
     if model.face_normals:
         face = [list(n) for n in model.face_normals]
@@ -94,6 +105,8 @@ def normals_for(model):
                 for p in model.polys]
 
     if model.normals:
+        # GT polys keep their source indices verbatim. FT/F polys come back with
+        # an empty list on purpose - see the note above; the bake resolves them.
         return face, [list(n) for n in model.normals], \
             [list(p.n) for p in model.polys], "model"
 
