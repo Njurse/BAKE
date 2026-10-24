@@ -1,6 +1,6 @@
 id = "d1cars"
 name = "BAKE Car Toolkit"
-version = "0.2.4"
+version = "0.2.5"
 author = "Jaret Ludvik"
 description = "Driver 1 (1999) traffic car shapes as a synthetic car-data source: bakes the seven retail Driver 1 cities plus the Euro-43 beta into carhacks, from your own Driver 1 data. See docs/DRIVER1.md."
 # core multiplayer suite: mandatory, first in the load order (jer_manager.c)
