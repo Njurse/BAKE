@@ -2,20 +2,19 @@
 
 This is the canonical explanation of a `JMPPED.LEV` bake: where its models,
 pages and skeleton come from, what the builder writes, and how the engine reads
-it. The toolkit quick-start stays in
-[`../tools/README.md`](../tools/README.md); this page is the full assembly map.
+it. The toolkit quick-start is in [`../README.md`](../README.md); this page is
+the full assembly map.
 
 > **Runtime ownership (interface 3).** The core order is
-> `carhacks -> bake -> pedhacks -> mp`. `pedhacks` owns the archive lifecycle
-> and the `jer_ped_archive.h` contract; `mp` consumes it and falls back to
-> Tanner when the archive is unavailable. The engine v3/v5 parser and the
-> authoring tools below remain engine/mp-owned for now; moving them is a
-> separate change.
+> `carhacks -> bake -> pedhacks -> mp`. The BAKE ped suite owns the authoring
+> tools and `JMPPED.LEV`; `pedhacks` owns the archive lifecycle and the
+> `jer_ped_archive.h` contract; `mp` consumes it and falls back to Tanner.
+> The engine v3/v5 parser remains engine-owned.
 
 ## 0. Workspace naming
 
 The authoring workspace uses plain-language names. The full contract, including
-the target layout, is in [`../tools/NAMING.md`](../tools/NAMING.md). These are
+the target layout, is in [`../NAMING.md`](../NAMING.md). These are
 the renames that matter while reading the rest of this page:
 
 | Old | New |
