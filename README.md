@@ -32,7 +32,9 @@ enumerates every one.
 | `bake_module.c` | the module wrapper — `jer_module_bake_entry` |
 | `mod.toml` | module metadata (compiled-in / deep mod, off by default) |
 | `docs/DRIVER1.md` | the format work and the roadmap |
-| `tools/` | the offline extractor + bake (later phases) |
+| `tools/car/` | the offline car extractor + bake |
+| `tools/ped/` | the JMPPED pedestrian toolkit |
+| `tools/common/` | shared helpers |
 
 ## Building
 

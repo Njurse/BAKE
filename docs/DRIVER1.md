@@ -85,7 +85,7 @@ records** inside are not.
 
 ### The texture page, the palette and the normal tables (measured)
 
-Three more pieces of the same file, all decoded now (`tools/pages1.py` and
+Three more pieces of the same file, all decoded now (`tools/car/pages1.py` and
 `lev1.py`), because a car that carries its own textures needs them.
 
 **A page entry**, as the engine's `LoadTPageAndCluts` reads one, is
@@ -192,7 +192,7 @@ is *offline bake → synthetic fifth city*.
 negative), i.e. Driver 1 and Driver 2 share the same winding convention. So the
 bake needs **no index reversal**: the engine's backface culling will treat a
 baked Driver 1 car exactly as it treats Driver 2's own cars. (This is also why
-`tools/preview.py` had to negate the normal before shading — see its comment.)
+`tools/car/preview.py` had to negate the normal before shading — see its comment.)
 
 ---
 
@@ -330,7 +330,7 @@ items belong.
 - **Textures — decoded, and carried by the bake.** A D1 poly carries a raw
   `page` byte; an engine poly carries `texture_set`, an *index* resolved through
   `texture_pages[128]` / `texture_cluts[128][32]` (`FORMATS.md` §2). A
-  geometry-only blockout sidestepped that; it no longer does. `tools/pages1.py`
+  geometry-only blockout sidestepped that; it no longer does. `tools/car/pages1.py`
   decodes the page entries and the palettes themselves (§3), `bake.py` emits
   them next to the models along with the page list, and `textured.py --baked`
   renders a baked blob from its own contents. What remains is the ENGINE side's
@@ -367,7 +367,7 @@ items belong.
 
 ## 8. Scale and cosmetics (Phase 3)
 
-**Measured** by `tools/scalemodels.py` on this install (both games keep a car's
+**Measured** by `tools/car/scalemodels.py` on this install (both games keep a car's
 `MODEL` at `car_lump_body + 164 + offset`):
 
 | | models | width (median) | height | length | `bounding_sphere` |
@@ -397,7 +397,7 @@ above behind it, and it travels in the pool record (`scale`) so an item can be
 re-tuned without touching code. The damaged/low variants land in the same band
 and use the same factor.
 
-**The per-item plan is reproducible:** `tools/scalemodels.py --plan` prints
+**The per-item plan is reproducible:** `tools/car/scalemodels.py --plan` prints
 `d1 level | idx | D1 bbox | scaled bbox | nearest D2 car | scale` for every
 item. A sample (the tool prints all 44):
 
@@ -412,7 +412,7 @@ Every scaled D1 model lands within a few percent of an existing D2 car, which is
 the practical check that 2048/3000 is right. (CREDITS model 0, 52x49x48 →
 35x33x33, is the non-car outlier; the pool excludes it.)
 
-**Cosmetics (`CAR_COSMETICS`) — built; `tools/cosmetics1.py`.** Driver 1 has no
+**Cosmetics (`CAR_COSMETICS`) — built; `tools/car/cosmetics1.py`.** Driver 1 has no
 equivalent table at all, so every field is **derived**, one 236-byte record per
 car.
 
@@ -472,7 +472,7 @@ native size (`cars.c:1264`); the radius only sets the axle height.
 symmetric about the car's bbox z centre this reduces to `z_centre + 7`, so it is a
 direct readout of how far off centre the body sits. Ours run −28..20 against
 Driver 2's ordinary cars' −34..+6, so the engine has very little to correct.
-`tools/cosmetics1.py --check` prints every field against Driver 2's own ranges side
+`tools/car/cosmetics1.py --check` prints every field against Driver 2's own ranges side
 by side.
 
 **Where the four wheel centres come from — measured, and per car.** Neither number
@@ -520,21 +520,21 @@ inside this submodule and touches no engine file.
 
 1. **Stand up the submodule + this doc.** — *done.* The module builds, registers
    its metadata and does nothing else.
-2. **D1 level reader + car-model extractor** (`tools/lev1.py`). — *done.* Walks
+2. **D1 level reader + car-model extractor** (`tools/car/lev1.py`). — *done.* Walks
    `LEVELS/*.LEV`, decodes every car-model variant into a neutral model, and its
    `--verify` reports 0 problems over all eight levels. The plan's "assert the
    CIVCAR* list" was retired: this D1 build names only level models, so a pool
    item's identity is (level, model index, variant).
-3. **Scale & cosmetics** (`tools/scalemodels.py`). — *done, §8.* The bake scale
+3. **Scale & cosmetics** (`tools/car/scalemodels.py`). — *done, §8.* The bake scale
    is 2048/3000 (D1 cell 3000, D2 cell 2048), verified against the measured
    model sizes.
-4. **Build the pool** (`tools/d1pool.py`). — *done.* 43 unique clean shapes from
+4. **Build the pool** (`tools/car/d1pool.py`). — *done.* 43 unique clean shapes from
    43 sources across the seven car-bearing levels (the levels share no shapes),
    emitted as `.obj` + `geom.json` + `pool.json`, with a preview sheet
    (`--render`) and a non-car outlier (CREDITS model 0) dropped. Each item now
    also carries, per poly, its texture naming (set, id, uv) and its normal
    indices and, per model, both normal tables with their provenance.
-5. **Bake to a synthetic fifth city** — *offline half done* (`tools/bake.py`).
+5. **Bake to a synthetic fifth city** — *offline half done* (`tools/car/bake.py`).
    It emits a blob in the exact shape the cross-city import reads (`models.c`
    `LoadCarImport`): the car models, `LUMP_PALLET` (translated into the engine's
    record shape, not copied), `LUMP_TEXTUREINFO` (the renumbered page list) and
@@ -597,7 +597,7 @@ stat -c '%s %n' DT*.BIN              # 6484 each
 ```
 
 ```bash
-T=JERICHO/MODS/bake/tools
+T=JERICHO/MODS/bake/tools/car
 L=src_rebuild/bin/Release_dev/DRIVER/LEVELS
 
 python $T/pages1.py --selftest                    # the RLE, no game data needed
@@ -654,7 +654,7 @@ that translation every car drew the page's last CLUT row and looked flat.
 Bake and register it exactly like a retail city:
 
 ```bash
-T=JERICHO/MODS/bake/tools
+T=JERICHO/MODS/bake/tools/car
 D=src_rebuild/bin/Release_dev
 O=$D/JERICHO/MODS/carhacks/D1CARS
 python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $O
