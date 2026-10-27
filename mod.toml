@@ -1,10 +1,10 @@
 id = "bake"
 name = "BAKE Toolkit"
-version = "0.3.0"
+version = "0.4.0"
 # the JERICHO interface (SDK) this mod is built against
 interface = 3
 author = "Jaret Ludvik"
-description = "Driver 1 (1999) traffic car shapes as a synthetic car-data source: bakes the seven retail Driver 1 cities plus the Euro-43 beta into carhacks, from your own Driver 1 data. See docs/DRIVER1.md."
+description = "BAKE Toolkit 0.4.0: Driver 1 (1999) traffic car shapes for carhacks plus the JMPPED pedestrian archive suite for pedhacks, built from your own Driver 1 / Driver 2 data. See docs/DRIVER1.md and tools/ped/."
 # core suite: mandatory after carhacks and before mp
 dependencies = ["carhacks"]
 default-enabled = false

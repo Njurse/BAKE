@@ -1,13 +1,22 @@
-# BAKE Toolkit — Driver 1 (1999) traffic car shapes as a fifth car-data source
+# BAKE Toolkit — car and pedestrian asset suites
+
+BAKE is the offline authoring toolkit for the two core asset modules:
+
+- **car suite** (`tools/car`) — lifts the civilian traffic car shapes out of the
+  original Driver 1 PSX level files and bakes them into the car-data banks used
+  by carhacks.
+- **ped suite** (`tools/ped`) — the JMPPED pedestrian authoring toolkit (archive
+  bake, character import, preview and tests) used by pedhacks.
 
 A JERICHO module that lifts the civilian traffic car **shapes** out of the
 original Driver 1 PSX level files and offers them as a car-data source that sits
 **alongside** the four Driver 2 cities (Chicago / Havana / Rio / Vegas), not in
 place of one.
 
-> **Status: SCAFFOLD (Phase 1).** The module builds and registers, but has no
-> behaviour yet — no config keys, no hooks, no loader. The design, the measured
-> format comparison and the phase roadmap are in **[`docs/DRIVER1.md`](docs/DRIVER1.md)**.
+> **Status: car suite in use; ped suite moved here in 0.4.0.** The car runtime
+> consumer is carhacks; the ped runtime consumer is pedhacks. The format work
+> and the car roadmap are in **[`docs/DRIVER1.md`](docs/DRIVER1.md)**; the ped
+> quick-start is **[`tools/ped/README.md`](tools/ped/README.md)**.
 
 ## Why this can exist
 
