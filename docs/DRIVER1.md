@@ -597,7 +597,7 @@ stat -c '%s %n' DT*.BIN              # 6484 each
 ```
 
 ```bash
-T=JERICHO/MODS/d1cars/tools
+T=JERICHO/MODS/bake/tools
 L=src_rebuild/bin/Release_dev/DRIVER/LEVELS
 
 python $T/pages1.py --selftest                    # the RLE, no game data needed
@@ -654,7 +654,7 @@ that translation every car drew the page's last CLUT row and looked flat.
 Bake and register it exactly like a retail city:
 
 ```bash
-T=JERICHO/MODS/d1cars/tools
+T=JERICHO/MODS/bake/tools
 D=src_rebuild/bin/Release_dev
 O=$D/JERICHO/MODS/carhacks/D1CARS
 python $T/bake.py --levels $D/DRIVER/LEVELS --city BETAMIAMI --out $O

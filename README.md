@@ -1,4 +1,4 @@
-# BAKE Car Toolkit (d1cars) — Driver 1 (1999) traffic car shapes as a fifth car-data source
+# BAKE Toolkit — Driver 1 (1999) traffic car shapes as a fifth car-data source
 
 A JERICHO module that lifts the civilian traffic car **shapes** out of the
 original Driver 1 PSX level files and offers them as a car-data source that sits
@@ -28,8 +28,8 @@ enumerates every one.
 
 | path | what |
 |---|---|
-| `d1cars.c` / `d1cars.h` | the unit — one entry, `d1cars_register(ctx)` |
-| `d1cars_module.c` | the module wrapper — `jer_module_d1cars_entry` |
+| `bake.c` / `bake.h` | the unit — one entry, `bake_register(ctx)` |
+| `bake_module.c` | the module wrapper — `jer_module_bake_entry` |
 | `mod.toml` | module metadata (compiled-in / deep mod, off by default) |
 | `docs/DRIVER1.md` | the format work and the roadmap |
 | `tools/` | the offline extractor + bake (later phases) |
@@ -38,6 +38,6 @@ enumerates every one.
 
 Auto-discovered: any `JERICHO/MODS/<id>/` with a `mod.toml` is a module, the
 folder name is the id and the C entry symbol. No list file governs the build.
-Enable it at runtime in `JERICHO/CONFIG/modlist.ini` (`d1cars = 1`); it ships
+Enable it at runtime in `JERICHO/CONFIG/modlist.ini` (`bake = 1`); it ships
 `0`/off and is deliberately **not** fetched by CI (it is a private submodule —
 see `.github/workflows/build.yml`, same treatment as `gaildrv2`).
