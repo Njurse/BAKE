@@ -11,3 +11,16 @@ lib/
 # with tools/ (see docs/DRIVER1.md); the pool index is committed, the shapes are
 # not.
 tools/out/
+
+# The module's own MSVC by-products: obj/ and lib/ are covered above, these are
+# the export/link files that sit beside them in the repo root.
+*.exp
+*.lib
+*.pdb
+
+# Pipeline output directories (tools/car and tools/ped write previews, rebuilt
+# pages and per-character scratch here).
+tools/car/out/
+tools/ped/out/
+tools/ped/characters/
+tools/ped/project.json
