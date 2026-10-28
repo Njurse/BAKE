@@ -12,6 +12,7 @@ against the game data and runs from the repo root. `tools/car/out/` is gitignore
 | `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`, carrying each poly's texture naming and both normal tables; `--render` a wireframe sheet |
 | `bake.py` | bakes pool items into an engine-shaped blob (`out/bake/D1POOL.LEV`): car models, `LUMP_CAR_WHEELS` (clean/damaged/fast wheel models), `LUMP_PALLET`, `LUMP_TEXTUREINFO` and the texture pages. Self-checks by re-reading what it wrote |
 | `exportd2.py` | the **Driver 2** car suite: exports every clean/damaged/low model as OBJ + geom JSON, the car-only texture pages/CLUTs/palettes and TEXINF details, the `.LCF` cosmetics, exact raw blocks, and a carhacks-loadable `<CITY>.LEV` + `.LCF` whose slot order comes from an editable `bank_order` |
+| `basebank.py` | scaffolds a **one-car** Driver 2 base bank: a loadable `NAME.LEV` + `NAME.LCF`, that car's raw clean/damaged/low blocks, page entries/PNGs, palette rows and cosmetics, a `cities.ini` snippet, a README and a manifest that `exportd2 --rebuild-bank` accepts |
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
@@ -106,6 +107,45 @@ ordered list of car IDs fills the D2-usable slots (0-4 then 8-12) in order. Slot
 with no car stay `-1`, and the `.LCF` is rebuilt in the same slot order.
 `--no-bank` stops after the source package. Generated output lives under the
 gitignored `tools/car/out/`.
+
+## One-car base banks: `basebank.py`
+
+`basebank.py` is the smaller scaffold for a mod that only wants one car in a
+bank, rather than a whole city's roster:
+
+```sh
+T=JERICHO/MODS/bake/tools/car
+python $T/basebank.py --city CHICAGO --model 1 --name FIREBIRD \
+    --slot 1 --out JERICHO/MODS/betacars/banks/firebird
+```
+
+It copies one donor car's three variants and only the texture sets that car
+names, then writes:
+
+```
+firebird/
+  FIREBIRD.LEV / FIREBIRD.LCF   the loadable one-car bank
+  FIREBIRD.json                 manifest + bank report
+  cities.ini                    the [cities] line to paste into CONFIG
+  README.txt                    install/import instructions
+  raw/models/                   model1_clean/damaged/low.bin
+  raw/pages/                    PAGE_<set>.bin and .png for the car's sets
+  raw/pallet.bin                source palette lump
+  raw/palette.png / .json       resolved colours for those sets
+  raw/source.LCF                source cosmetics
+  raw/cosmetics/model1.cos      donor 236-byte record
+```
+
+Only the destination slot is populated; every other model slot is `-1`. The
+default slot is **1** because carhacks treats model 0 as "no car". The
+`cities.ini` snippet uses `city_0` by default, which the engine exposes as city
+index **11**; use `--city-index N` for another bank row.
+
+Rebuild after editing the raw blocks with the normal exportd2 path:
+
+```sh
+python $T/exportd2.py --rebuild-bank firebird/FIREBIRD.json -o firebird
+```
 
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.
