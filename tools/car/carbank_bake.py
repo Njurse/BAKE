@@ -235,8 +235,7 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
 
     rebuilt = exportd2.build_textureinfo(head, perms, specs)
 
-    ti_out = os.path.join(out_dir, ".bake", "textureinfo.bin")
-    os.makedirs(os.path.dirname(ti_out), exist_ok=True)
+    ti_out = os.path.join(bank_dir, "textureinfo.bin")
 
     with open(ti_out, "wb") as f:
         f.write(rebuilt)
@@ -260,24 +259,30 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None):
               % bank_path)
 
     os.makedirs(out_dir, exist_ok=True)
-    blocks_dir = os.path.join(out_dir, ".bake")
+    # the blocks belong in the workspace's models/, so the manifest this writes
+    # back still describes the bank after the bake
+    blocks_dir = os.path.join(os.path.dirname(os.path.abspath(bank.path)),
+                              "models")
 
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
-    manifest_path = os.path.join(bank_dir, ".bake-manifest.json")
+    # build_bank resolves raw/pages/PAGE_<set>.bin relative to the manifest, so it
+    # must sit beside the bank; writing it under the CITY name keeps the workspace
+    # self-describing (a later --rebuild-bank reproduces what is installed)
+    manifest_path = os.path.join(
+        bank_dir,
+        os.path.splitext(bank.raw.get("lev") or "bank.LEV")[0] + ".json")
 
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
 
-    try:
-        exportd2.build_bank(manifest, manifest_path, out_dir, None)
-    finally:
-        shutil.rmtree(blocks_dir, ignore_errors=True)
-        if os.path.isfile(manifest_path):
-            os.remove(manifest_path)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1)
+
+    exportd2.build_bank(manifest, manifest_path, out_dir, None)
 
     return True, warnings
 
