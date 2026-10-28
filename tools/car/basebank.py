@@ -13,13 +13,17 @@ The output folder is self-contained:
     NAME.json                manifest; also accepted by exportd2 --rebuild-bank
     cities.ini               the [cities] line to paste into CONFIG/cities.ini
     README.txt               what this is and how to install it
-    raw/models/*.bin         the donor car's clean/damaged/low blocks
-    raw/pages/PAGE_*.bin     page entries for the sets this car uses
-    raw/pages/PAGE_*.png     the same pages through CLUT row 0
-    raw/pallet.bin           the donor city's palette lump (bank filters it)
-    raw/palette.png/.json    resolved car colours for those sets
-    raw/source.LCF           the donor city's cosmetics source
-    raw/cosmetics/*.cos      the donor car's 236-byte record
+    models/*.bin             the donor car's clean/damaged/low blocks
+    pages/PAGE_*.bin         page entries for the sets this car uses
+    pages/PAGE_*.png         the same pages through CLUT row 0
+    pallet.bin               the donor city's palette lump (bank filters it)
+    palette.png/.json        resolved car colours for those sets
+    source.LCF               the donor city's cosmetics source
+    cosmetics/*.cos          the donor car's 236-byte record
+    cosmetics.json           every record in that source, for re-baking
+
+The bank folder IS the workspace: those files sit beside NAME.LEV, not
+under a raw/ subdirectory.
 
 Usage:
     python basebank.py --city CHICAGO --model 1 --name FIREBIRD \
@@ -167,10 +171,13 @@ def build_base(args):
         raise SystemExit("%s has no cosmetics record for model %d"
                          % (os.path.basename(source_lcf), args.model))
 
-    raw = os.path.join(out, "raw")
-    raw_models = os.path.join(raw, "models")
-    raw_pages = os.path.join(raw, "pages")
-    raw_cos = os.path.join(raw, "cosmetics")
+    # The bank folder is the workspace: generated blocks live in models/ and
+    # pages/ beside it, not under a raw/ indirection (the author's own source/,
+    # textures/ and sounds/ sit there too).
+    raw = out
+    raw_models = os.path.join(out, "models")
+    raw_pages = os.path.join(out, "pages")
+    raw_cos = os.path.join(out, "cosmetics")
     for d in (raw_models, raw_pages, raw_cos):
         os.makedirs(d, exist_ok=True)
 
@@ -203,10 +210,10 @@ def build_base(args):
 
     # --- raw lumps --------------------------------------------------------
     raw_paths = {
-        "textureinfo": "raw/textureinfo.bin",
-        "pallet": "raw/pallet.bin",
-        "texturenames": "raw/texturenames.bin",
-        "modelnames": "raw/modelnames.bin",
+        "textureinfo": "textureinfo.bin",
+        "pallet": "pallet.bin",
+        "texturenames": "texturenames.bin",
+        "modelnames": "modelnames.bin",
     }
     with open(os.path.join(out, raw_paths["textureinfo"]), "wb") as f:
         f.write(ti_bytes)
@@ -222,16 +229,16 @@ def build_base(args):
     if mnames:
         with open(os.path.join(out, raw_paths["modelnames"]), "wb") as f:
             f.write(mnames)
-    _write_palette_json(os.path.join(raw, "palette.json"), pal, sets)
-    exportd2.palette_png(os.path.join(raw, "palette.png"), pal["records"], sets)
+    _write_palette_json(os.path.join(out, "palette.json"), pal, sets)
+    exportd2.palette_png(os.path.join(out, "palette.png"), pal["records"], sets)
 
     # --- cosmetics --------------------------------------------------------
-    source_lcf_rel = "raw/source.LCF"
+    source_lcf_rel = "source.LCF"
     shutil.copyfile(source_lcf, os.path.join(out, source_lcf_rel))
     donor_cos = os.path.join(raw_cos, "model%d.cos" % args.model)
     with open(donor_cos, "wb") as f:
         f.write(cos_records[args.model])
-    with open(os.path.join(raw, "cosmetics.json"), "w") as f:
+    with open(os.path.join(out, "cosmetics.json"), "w") as f:
         json.dump({
             "source": os.path.abspath(source_lcf),
             "donor_model": args.model,
@@ -275,7 +282,7 @@ def build_base(args):
                                 if r["tpageindex"] in sets}),
         "raw": raw_paths,
         "lcf": source_lcf_rel,
-        "cosmetics": "raw/cosmetics.json",
+        "cosmetics": "cosmetics.json",
         "bank_order": [{"slot": args.slot, "car": car_id}],
         "warnings": [],
     }
