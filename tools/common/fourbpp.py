@@ -287,3 +287,91 @@ def encode_literal(data: bytes) -> bytes:
         out += chunk
 
     return bytes(out)
+
+# ---------------------------------------------------------------------------
+# Editing one rectangle of one page
+#
+# This is the car pipeline's round-trip: an artist edits an RGB image in an
+# image editor, and the page must come back with the edited rectangle
+# re-quantised and EVERYTHING ELSE untouched. The CLUT rows are never written
+# here -- an edited crop is matched against an existing row, so the colours of
+# the page it is pasted onto cannot move. A page the caller does not edit is not
+# passed to this function at all: the bake copies it byte for byte.
+# ---------------------------------------------------------------------------
+
+def edit_page_rect(src_page: bytes,
+                   cluts: Sequence[bytes],
+                   palette_row: int,
+                   pixels: Sequence[Sequence[int]],
+                   rect: Sequence[int],
+                   width: int = PAGE_W,
+                   height: int = PAGE_H) -> bytes:
+    """Return a packed 4bpp page with one rectangle re-quantised.
+
+    src_page  the page as it stands (packed 4bpp, as it sits in the bank)
+    cluts     the page's CLUT rows, unchanged and returned unchanged
+    palette_row  which row the edited colours are matched against
+    pixels    RGB for the rectangle, row-major, w*h of them
+    rect      (x, y, w, h) inside the page
+
+    The caller keeps the CLUT: this function never returns new colours, so an
+    edit cannot renumber a palette the rest of the car depends on.
+    """
+    x, y, w, h = (int(v) for v in rect)
+
+    if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > width or y + h > height:
+        raise ValueError("edit rect %r is outside the %dx%d page"
+                         % (tuple(rect), width, height))
+
+    if len(pixels) != w * h:
+        raise ValueError("edit has %d pixels, expected %d (rect %r)"
+                         % (len(pixels), w * h, tuple(rect)))
+
+    if palette_row < 0 or palette_row >= len(cluts):
+        raise ValueError("palette row %d does not exist (the page has %d row(s))"
+                         % (palette_row, len(cluts)))
+
+    clut = clut_rgb(cluts[palette_row])
+    indices = bytearray(decode_indices(src_page, width, height))
+
+    for row in range(h):
+        for col in range(w):
+            indices[(y + row) * width + (x + col)] = nearest_clut_index(
+                tuple(pixels[row * w + col]), clut)
+
+    return encode_indices(bytes(indices), width, height)
+
+def apply_page_edits(pages, edits):
+    """Return `pages` with only the named rectangles rebuilt.
+
+    pages  {set: (packed_image, [clut rows])}
+    edits  [{set, rect, palette_row, pixels}, ...]
+
+    A page no edit names is returned as THE SAME object, not a copy: untouched
+    pages are the source bytes by construction, so a round-trip that edits one
+    page cannot silently re-quantise the other twenty. That is the whole reason
+    this function exists rather than a loop calling edit_page_rect over every
+    page.
+    """
+    out = dict(pages)
+
+    for edit in edits:
+        setid = edit["set"]
+
+        if setid not in pages:
+            raise ValueError("edit names page set %r, which this bank does not "
+                             "carry (it has: %s)"
+                             % (setid, ", ".join(str(s) for s in sorted(pages))))
+
+        image, cluts = pages[setid]
+
+        if cluts is None:
+            raise ValueError("page set %d has no CLUT rows to match against"
+                             % setid)
+
+        out[setid] = (edit_page_rect(image, cluts,
+                                     edit.get("palette_row", 0),
+                                     edit["pixels"], edit["rect"]),
+                      cluts)
+
+    return out
