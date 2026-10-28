@@ -30,10 +30,21 @@ import obj2geom
 
 
 def import_car(obj_path, scale=0.68267, grey=False,
-               set_map=None, id_map=None):
-    """An OBJ (as carbank_export wrote it) -> a geom record bake.py can use."""
+               set_map=None, id_map=None, default_page=None):
+    """An OBJ (as carbank_export wrote it) -> a geom record bake.py can use.
+
+    `default_page` is (set, id) for an OBJ whose materials are not named
+    set<S>_id<T> - an author export from Blender, say. Without it those names are
+    refused, because a guessed page draws a panel with the wrong texture.
+    """
     verts, uvs, faces, names = obj2geom.parse_obj(obj_path, with_materials=True)
-    mats = obj2geom.materials_to_pages(names, obj_path)
+    unmapped = []
+    mats = obj2geom.materials_to_pages(names, obj_path, default_page, unmapped)
+
+    if unmapped:
+        print("carbank_import: %s: %d author material(s) mapped to set%d_id%d: %s"
+              % (obj_path, len(unmapped), default_page[0], default_page[1],
+                 ", ".join(sorted(set(unmapped)))), file=sys.stderr)
 
     if set_map or id_map:
         mats = [_remap_page(page, set_map, id_map) for page in mats]
