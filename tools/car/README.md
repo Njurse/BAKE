@@ -11,6 +11,7 @@ against the game data and runs from the repo root. `tools/car/out/` is gitignore
 | `scalemodels.py` | measures D1 vs D2 car-model sizes; `--plan` prints the per-item plan (D1 bbox -> scaled bbox -> nearest D2 car) |
 | `d1pool.py` | extracts and dedupes the traffic shapes into `out/pool/*.obj` + `*_geom.json` + `out/pool.json`, carrying each poly's texture naming and both normal tables; `--render` a wireframe sheet |
 | `bake.py` | bakes pool items into an engine-shaped blob (`out/bake/D1POOL.LEV`): car models, `LUMP_CAR_WHEELS` (clean/damaged/fast wheel models), `LUMP_PALLET`, `LUMP_TEXTUREINFO` and the texture pages. Self-checks by re-reading what it wrote |
+| `exportd2.py` | the **Driver 2** car suite: exports every clean/damaged/low model as OBJ + geom JSON, the car-only texture pages/CLUTs/palettes and TEXINF details, the `.LCF` cosmetics, exact raw blocks, and a carhacks-loadable `<CITY>.LEV` + `.LCF` whose slot order comes from an editable `bank_order` |
 | `preview.py` | shaded 3/4 renders of the pool and of a baked blob -> `out/preview_*.png` |
 | `textured.py` | textured 3/4 renders, lit, no wireframe by default. `--baked FILE` renders a baked blob **from its own embedded pages** (`--pages-root` + tool TGAs is the older pool path) |
 | `spin.py` | rotating textured+lit GIFs of a baked blob -> `out/spin_baked.gif` (all shapes in one grid) and `out/spin/<n>_model<n>.gif` |
@@ -54,6 +55,57 @@ python $T/cosmetics1.py --selftest
 python $T/cosmetics1.py --check
 python $T/cosmetics1.py --write $T/out/lcf     # writes and then re-reads each file
 ```
+
+## Driver 2 cars: `exportd2.py`
+
+`exportd2.py` is the D2-only counterpart to the D1 bake. It reads one
+`DRIVER2/LEVELS/<CITY>.LEV` (and the sibling `<CITY>.LCF`) and writes an
+editable, self-contained package plus a carhacks-loadable bank. Driver 1 stays
+with `bake.py` / `d1pool.py`.
+
+```sh
+D2=src_rebuild/bin/Release_dev/DRIVER2/LEVELS
+T=JERICHO/MODS/bake/tools/car
+
+python $T/exportd2.py $D2/CHICAGO.LEV -o $T/out/exportd2
+python $T/exportd2.py $D2 --all -o $T/out/exportd2
+python $T/exportd2.py --selftest
+```
+
+Output per city:
+
+```
+out/exportd2/
+  index.json                     master list, with each city's manifest
+  CHICAGO/
+    CHICAGO.export.json          cars, variants, sets, raw paths, bank_order
+    CHICAGO.cosmetics.json       named CAR_COSMETICS fields + raw records
+    CHICAGO.LCF                  source cosmetics copy
+    CHICAGO.textures.json        pages, CLUT rows, details, LUMP_PALLET
+    CHICAGO_palettes.png         palette swatch sheet
+    models/                      <car>_<variant>.obj + .geom.json + .mtl
+    textures/                    PAGE_<set>.png for car/wheel sets
+    raw/                         exact model blocks, pages and lump bodies
+    bank/                        CHICAGO.LEV + CHICAGO.LCF + bank.json
+```
+
+Only the texture sets the exported cars name, plus the sets carrying
+`WHLCLEAN` / `WHLBOTH` / `WHEEL` details, are included. The raw blocks make
+the package independent of the source `.LEV`; the bank is assembled from them.
+
+To reorder the cars in the generated bank, edit `bank_order` in
+`CHICAGO.export.json` (or pass a separate file) and rebuild:
+
+```sh
+python $T/exportd2.py --rebuild-bank $T/out/exportd2/CHICAGO/CHICAGO.export.json \
+    --order my_order.json -o $T/out/exportd2/CHICAGO/bank
+```
+
+`bank_order` is a list of `{"slot": N, "car": "<CITY>_modelM"}` entries; a plain
+ordered list of car IDs fills the D2-usable slots (0-4 then 8-12) in order. Slots
+with no car stay `-1`, and the `.LCF` is rebuilt in the same slot order.
+`--no-bank` stops after the source package. Generated output lives under the
+gitignored `tools/car/out/`.
 
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.
