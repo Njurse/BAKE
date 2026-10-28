@@ -164,7 +164,7 @@ def _inward_normal(verts, v):
 
 
 def build_model_record(vertices, polys, face_normals, point_normals, scale,
-                       stats=None):
+                       stats=None, flip_normals=False):
     """One MODEL + vertices + BOTH normal tables + a GT3/GT4 poly stream.
 
     The table order is the models' own and is load-bearing: the offsets are
@@ -323,6 +323,16 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
 
         stream += rec
         npolys += 1
+
+    if flip_normals:
+        # Both tables are stored INWARD (see _inward_normal): a valid entry has
+        # dot(entry, inward) > 0, and the engine lights a GT vertex from it. A
+        # mesh exported with the opposite winding convention therefore shades
+        # inside-out on every panel. Negating each entry keeps the index space
+        # identical - the poly stream is already built and is untouched - and
+        # only changes which way the entries point.
+        fnorm = [(-n[0], -n[1], -n[2]) for n in fnorm]
+        pnorm = [(-n[0], -n[1], -n[2]) for n in pnorm]
 
     vofs = MODEL_HDR
     nofs = vofs + nv * 8
