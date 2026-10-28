@@ -95,7 +95,7 @@ def _geom_for(obj_path, scale, default_page=None, flip=False, colors=None):
     return geom
 
 
-def _block_for(variant, geom, clean_block, scale):
+def _block_for(variant, geom, clean_block, scale, flip_normals=False):
     """One raw model block from a geom record."""
     if variant == "damaged":
         if clean_block is None:
@@ -106,10 +106,11 @@ def _block_for(variant, geom, clean_block, scale):
 
     return bake.build_model_record(geom["vertices"], geom["polys"],
                                    geom["face_normals"], geom["point_normals"],
-                                   scale)
+                                   scale, flip_normals=flip_normals)
 
 
-def car_blocks(car, scale, default_page=None, flip=False, colors=None):
+def car_blocks(car, scale, default_page=None, flip=False, colors=None,
+               flip_normals=False):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -130,12 +131,13 @@ def car_blocks(car, scale, default_page=None, flip=False, colors=None):
 
     warnings = []
     blocks = {}
-    blocks["clean"] = _block_for("clean", geoms["clean"], None, scale)
+    blocks["clean"] = _block_for("clean", geoms["clean"], None, scale,
+                                 flip_normals)
 
     for variant in ("damaged", "low"):
         if variant in geoms:
             blocks[variant] = _block_for(variant, geoms[variant],
-                                         blocks["clean"], scale)
+                                         blocks["clean"], scale, flip_normals)
         else:
             warnings.append(
                 "%s declares no %s OBJ; using the clean model for it so that "
@@ -175,7 +177,8 @@ def source_lev_of(bank):
     return ""
 
 
-def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False, colors=None):
+def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False,
+                   colors=None, flip_normals=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -226,7 +229,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=Fal
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale, default_page, flip, colors)
+        blocks, car_warnings = car_blocks(car, scale, default_page, flip, colors,
+                                          flip_normals)
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -317,7 +321,7 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
           "on disk")
 
 def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
-              flip_y=False, flip_winding=False):
+              flip_y=False, flip_winding=False, flip_normals=False):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
@@ -340,7 +344,8 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     flip = bool(flip_y or flip_winding)
     colors = _source_colors(source_lev_of(bank))
-    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip, colors)
+    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip,
+                                       colors, flip_normals)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
@@ -371,6 +376,9 @@ def main(argv=None):
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")
+    ap.add_argument("--flip-normals", action="store_true",
+                    help="negate the stored inward normals; a mesh exported with the "
+                         "opposite winding convention otherwise shades inside-out")
     ap.add_argument("--flip-y", action="store_true",
                     help="negate Y: the engine's model space is Y-down, a Blender OBJ is Y-up")
     ap.add_argument("--flip-winding", action="store_true",
@@ -390,7 +398,8 @@ def main(argv=None):
 
     ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
                              default_page=default_page,
-                             flip_y=args.flip_y, flip_winding=args.flip_winding)
+                             flip_y=args.flip_y, flip_winding=args.flip_winding,
+                             flip_normals=args.flip_normals)
 
     print("baked %s -> %s" % (os.path.basename(args.bank), args.out))
 
