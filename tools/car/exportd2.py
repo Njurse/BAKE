@@ -1156,10 +1156,22 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     page_blobs = []
     page_report = []
     for s, z in perms + specs:
-        p = os.path.join(manifest_dir, "raw", "pages", "PAGE_%d.bin" % s)
+        # The bank folder is the workspace: pages live in pages/ beside the
+        # manifest. A bank made before that layout still has them under
+        # raw/pages/, so read those too - with a warning, because the old
+        # shape no longer matches what basebank writes.
+        p = os.path.join(manifest_dir, "pages", "PAGE_%d.bin" % s)
         if not os.path.isfile(p):
-            warnings.append("missing raw page for set %d; bank page omitted" % s)
-            continue
+            legacy = os.path.join(manifest_dir, "raw", "pages",
+                                  "PAGE_%d.bin" % s)
+            if os.path.isfile(legacy):
+                warnings.append("set %d was read from the old raw/pages layout"
+                                % s)
+                p = legacy
+            else:
+                warnings.append("missing raw page for set %d; bank page omitted"
+                                % s)
+                continue
         with open(p, "rb") as f:
             data = f.read()
         if len(data) != z:
