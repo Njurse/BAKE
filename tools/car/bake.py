@@ -38,6 +38,8 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import fourbpp                 # the one 4bpp/CLUT conversion (tools/common)
 
 LUMP_CAR_MODELS = 28
 LUMP_PALLET = 25
@@ -116,9 +118,11 @@ BETA_MIAMI_SRC = 4
 
 
 def _flat_555(rgb8):
-    """8-bit (r,g,b) -> a PSX RGB555 word (STP bit clear, so opaque)."""
-    r, g, b = rgb8
-    return ((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10)
+    """8-bit (r,g,b) -> a PSX RGB555 word (STP bit clear, so opaque).
+
+    The conversion itself lives in tools/common/fourbpp.py, shared with the
+    pedestrian tools; this name stays because callers here use it."""
+    return fourbpp.rgb555(rgb8)
 
 
 def _flat_clut_row(rgb8):
@@ -126,9 +130,8 @@ def _flat_clut_row(rgb8):
 
     A solid-colour page is filled with index 0, so only entry 0 matters, but
     filling all 16 guards against a UV accidentally sampling another index and
-    drawing transparent black instead.
-    """
-    return struct.pack("<16H", *([_flat_555(rgb8)] * 16))
+    drawing transparent black instead. tools/common/fourbpp.py builds it."""
+    return fourbpp.flat_clut_row(rgb8)
 
 # Where the source levels live; set from --levels. Driver 1's data is gitignored
 # / local-only, so nothing here may hard-code a machine path.

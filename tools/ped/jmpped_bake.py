@@ -25,6 +25,8 @@ import jmpped_core as jc
 import jmpped_archive as ja
 import jmpped_models as jm
 import jmpped_images as ji
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import fourbpp                 # the one 4bpp/CLUT conversion (tools/common)
 import jmpped_entries as je
 
 
@@ -159,7 +161,7 @@ def _load_page_rgb(path: str, cluts: list[bytes], palette_row: int) -> bytes:
         raise jc.JMPPEDError("%s is %dx%d, expected %dx%d"
                              % (path, w, h, jc.PAGE_W, jc.PAGE_H))
     clut = ji.clut_rgb(cluts[palette_row]) if cluts else [(0, 0, 0)] * 16
-    return bytes(ji.nearest_clut_index(c, clut) for c in pixels)
+    return fourbpp.reindex_to_clut(pixels, clut)
 
 
 def _load_indexed(path: str, width: int, height: int) -> bytes:
@@ -179,41 +181,16 @@ def _load_clut_strip(path: str, count: int) -> list[bytes]:
 
 
 def _paletteize_crop(pixels, width: int, height: int):
-    from PIL import Image
+    """RGB texels -> (16 colours, indices).
 
+    The quantiser itself is tools/common/fourbpp.py: the car tools need the
+    same 16-colour reduction when an edited atlas brings new colours, and a
+    second copy would drift.
+    """
     if len(pixels) != width * height:
         raise jc.JMPPEDError("crop has %d pixels, expected %d"
                              % (len(pixels), width * height))
-    exact = list(dict.fromkeys(pixels))
-    if len(exact) <= 16:
-        colors = exact + [(0, 0, 0)] * (16 - len(exact))
-        index = {c: i for i, c in enumerate(exact)}
-        return colors, bytes(index[p] for p in pixels)
-    data = bytes(c for p in pixels for c in p)
-    img = Image.frombytes("RGB", (width, height), data)
-    try:
-        q = img.quantize(colors=16, method=Image.Quantize.MEDIANCUT,
-                         dither=Image.Dither.NONE)
-    except AttributeError:
-        q = img.quantize(colors=16)
-    pal = q.getpalette()[:48]
-    colors = [(pal[i], pal[i + 1], pal[i + 2]) for i in range(0, 48, 3)]
-    colors += [(0, 0, 0)] * (16 - len(colors))
-    patch = bytes(q.getdata())
-
-    # Pillow may fold a near-black texel into the palette's pure-black entry.
-    # Black is the engine's transparent marker, so only a texel that really is
-    # pure black may keep it; every other colour takes the next shade.
-    if any(c == (0, 0, 0) for c in colors):
-        fixed = bytearray(patch)
-        for i, p in enumerate(pixels):
-            if p == (0, 0, 0):
-                continue
-            if colors[patch[i]] == (0, 0, 0):
-                fixed[i] = ji.nearest_clut_index(p, colors)
-        patch = bytes(fixed)
-
-    return colors, patch
+    return fourbpp.paletteize(pixels, width, height)
 
 
 def _apply_crop(state: dict, crop: dict, root: str, texture_ids=()) -> int:
