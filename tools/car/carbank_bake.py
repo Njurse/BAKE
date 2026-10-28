@@ -38,6 +38,8 @@ import bake
 import bankjson
 import carbank_import
 import exportd2
+import struct
+import exportd2
 
 VARIANTS = ("clean", "damaged", "low")
 
@@ -46,10 +48,51 @@ def _warn(msg):
     print("carbank_bake: warning: %s" % msg, file=sys.stderr)
 
 
-def _geom_for(obj_path, scale, default_page=None, flip=False):
+def _source_colors(lev_path):
+    """{variant: [(r, g, b), ...]} read from the bank being replaced.
+
+    An OBJ has nowhere to put a per-poly colour, so the round trip invents the
+    neutral grey a Driver 1 flat poly carries. For a Driver 2 car the poly
+    colour is a TINT that multiplies the texture, and the donor's is a real
+    dark tint - re-baking with grey made the whole car brighter than the bank
+    it replaced. The colours therefore come from the bank's own current polygon
+    stream, matched by index (the export is 1:1).
+    """
+    if not lev_path or not os.path.isfile(lev_path):
+        return {}
+
+    try:
+        with open(lev_path, "rb") as f:
+            blob = f.read()
+        table = exportd2.d2_model_table(blob)
+        out = {}
+        for variant in VARIANTS:
+            try:
+                model = exportd2.decode_variants(blob, table, 1)[variant]
+            except (KeyError, IndexError, ValueError):
+                continue
+            out[variant] = [tuple(p.color) for p in model.polys]
+        return out
+    except (OSError, ValueError, struct.error) as exc:
+        _warn("could not read poly colours from %s (%s); the bake will use "
+              "neutral grey" % (lev_path, exc))
+        return {}
+
+
+def _geom_for(obj_path, scale, default_page=None, flip=False, colors=None):
     """The geom record for one OBJ, with its materials and normals."""
-    return carbank_import.import_car(obj_path, scale=scale, default_page=default_page,
-                                    flip_y=flip, flip_winding=flip)
+    geom = carbank_import.import_car(obj_path, scale=scale, default_page=default_page,
+                                     flip_y=flip, flip_winding=flip)
+
+    if colors and len(colors) == len(geom["polys"]):
+        for poly, color in zip(geom["polys"], colors):
+            poly["color"] = list(color)
+    elif colors:
+        _warn("%s has %d polys but the bank has %d; keeping the source "
+              "colours would put them on the wrong panels, so the neutral "
+              "tint is used" % (obj_path, len(geom["polys"]), len(colors)))
+
+    return geom
 
 
 def _block_for(variant, geom, clean_block, scale):
@@ -66,7 +109,7 @@ def _block_for(variant, geom, clean_block, scale):
                                    scale)
 
 
-def car_blocks(car, scale, default_page=None, flip=False):
+def car_blocks(car, scale, default_page=None, flip=False, colors=None):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -79,7 +122,8 @@ def car_blocks(car, scale, default_page=None, flip=False):
         path = getattr(car, variant, None) if variant != "clean" else car.clean
 
         if path:
-            geoms[variant] = _geom_for(path, scale, default_page, flip)
+            geoms[variant] = _geom_for(path, scale, default_page, flip,
+                                       (colors or {}).get(variant))
 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
@@ -104,7 +148,34 @@ def car_blocks(car, scale, default_page=None, flip=False):
     return blocks, warnings
 
 
-def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False):
+def source_lev_of(bank):
+    """The LEV whose poly colours this bake should keep.
+
+    Prefer the untouched donor: a bank that has already been baked through the
+    OBJ round trip carries the neutral grey an OBJ forces, so reading its own
+    polygons would bake grey forever. The donor (or an explicitly declared
+    donor.lev) is the only place the original tints survive.
+    """
+    bank_dir = os.path.dirname(os.path.abspath(bank.path))
+    lev = bank.raw.get("lev") or ""
+    stem = os.path.splitext(os.path.basename(lev))[0] if lev else ""
+
+    declared = getattr(bank, "declared", None)
+    donor_lev = getattr(declared, "donor_lev", None) if declared else None
+    candidates = []
+    if donor_lev:
+        candidates.append(os.path.join(bank_dir, donor_lev))
+    if stem:
+        candidates.append(os.path.join(bank_dir, stem + ".donor.LEV"))
+    candidates.append(os.path.join(bank_dir, lev))
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False, colors=None):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -155,7 +226,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=Fal
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale, default_page, flip)
+        blocks, car_warnings = car_blocks(car, scale, default_page, flip, colors)
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -268,7 +339,8 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
 
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     flip = bool(flip_y or flip_winding)
-    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip)
+    colors = _source_colors(source_lev_of(bank))
+    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip, colors)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)

@@ -271,7 +271,32 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
         setid = p.get("set", 0) & 0xFF
         texid = p.get("id", 0) & 0xFF
         col = tuple(p.get("color", FLAT_COLOR))
-        if len(v) == 3:
+
+        # Emit the poly's OWN kind, not GT3/GT4 for everything. The record
+        # layouts are lev1's (draw.c PolySizes), measured off the donor bank:
+        #   F3  code 0,  8 bytes: [0] code, [1..3] verts, [5..7] colour
+        #   FT3 code 20, 20 bytes: [4..6] verts, [8..13] uv, [16..18] colour
+        #   GT3 code 22, 24 bytes: [8..10] normals, [12..17] uv, [20..22] colour
+        #   GT4 code 23, same with four of each
+        # A non-GT record carries NO normal indices, which is why an F3 read as
+        # GT3 sampled garbage UVs and an FT3 read as GT3 got smoothed normals.
+        kind = p.get("kind")
+        if kind == "F3" and len(v) == 3:
+            rec = bytearray(8)
+            rec[0] = 0
+            rec[1:4] = bytes(x & 0xFF for x in v)
+            rec[5:8] = bytes(col)
+        elif kind == "FT3" and len(v) == 3:
+            rec = bytearray(20)
+            rec[0] = 20
+            rec[1], rec[2] = setid, texid
+            rec[4:7] = bytes(x & 0xFF for x in v)
+            for i in range(3):
+                u = uv[i] if i < len(uv) else (0, 0)
+                rec[8 + i * 2] = u[0] & 0xFF
+                rec[9 + i * 2] = u[1] & 0xFF
+            rec[16:19] = bytes(col)
+        elif len(v) == 3:
             rec = bytearray(24)
             rec[0] = 22                                  # GT3
             rec[1], rec[2] = setid, texid
@@ -282,8 +307,6 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
                 rec[12 + i * 2] = u[0] & 0xFF
                 rec[13 + i * 2] = u[1] & 0xFF
             rec[20:23] = bytes(col)
-            stream += rec
-            npolys += 1
         elif len(v) == 4:
             rec = bytearray(24)
             rec[0] = 23                                  # GT4
@@ -295,8 +318,11 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
                 rec[12 + i * 2] = u[0] & 0xFF
                 rec[13 + i * 2] = u[1] & 0xFF
             rec[20:23] = bytes(col)
-            stream += rec
-            npolys += 1
+        else:
+            continue
+
+        stream += rec
+        npolys += 1
 
     vofs = MODEL_HDR
     nofs = vofs + nv * 8
