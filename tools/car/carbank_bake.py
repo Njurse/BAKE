@@ -140,6 +140,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
                             page["png"] if os.path.isabs(str(page["png"]))
                             else os.path.join(bank_dir, str(page["png"]))))
             for page in manifest["pages"]]
+    _sync_page_sizes(manifest, bank_dir, out_dir)
+
     # the DECLARATION owns the slot order: the source manifest still names the
     # donor ids, which no longer exist once the cars are rebuilt
     manifest["bank_order"] = [{"slot": slot, "car": carname}
@@ -179,6 +181,69 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
 
     return manifest, warnings
 
+
+def _sync_page_sizes(manifest, bank_dir, out_dir):
+    """Rebuild LUMP_TEXTUREINFO when a page on disk is not the size it claims.
+
+    A page's size lives in the textureinfo lump, and the bank carves pages from
+    it. Replacing PAGE_<set>.bin with an atlas that packs to a different size
+    therefore has to restate it - otherwise the bake truncates the new page to
+    the old length (measured: a 33060-byte atlas cut to 30960, and only a
+    warning to show for it) and the car draws garbage from a half page.
+    """
+    raw = manifest.get("raw") or {}
+    ti_path = raw.get("textureinfo")
+
+    if not ti_path or not os.path.isfile(ti_path):
+        return
+
+    with open(ti_path, "rb") as f:
+        ti_bytes = f.read()
+
+    head, perms, specs = exportd2.split_textureinfo(ti_bytes)
+    changed = False
+    sizes = {}
+
+    def fix(entries):
+        nonlocal changed
+        out = []
+
+        for setid, size in entries:
+            path = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+
+            if os.path.isfile(path):
+                actual = os.path.getsize(path)
+                sizes[setid] = actual
+
+                if actual != size:
+                    changed = True
+                    size = actual
+
+            out.append((setid, size))
+
+        return out
+
+    perms = fix(perms)
+    specs = fix(specs)
+
+    for page in manifest.get("pages") or []:
+        if page.get("set") in sizes:
+            page["size"] = sizes[page["set"]]
+
+    if not changed:
+        return
+
+    rebuilt = exportd2.build_textureinfo(head, perms, specs)
+
+    ti_out = os.path.join(out_dir, ".bake", "textureinfo.bin")
+    os.makedirs(os.path.dirname(ti_out), exist_ok=True)
+
+    with open(ti_out, "wb") as f:
+        f.write(rebuilt)
+
+    manifest["raw"] = dict(raw, textureinfo=ti_out)
+    _warn("page size(s) changed; rebuilt LUMP_TEXTUREINFO to match the files "
+          "on disk")
 
 def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
