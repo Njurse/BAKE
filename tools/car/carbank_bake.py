@@ -46,9 +46,10 @@ def _warn(msg):
     print("carbank_bake: warning: %s" % msg, file=sys.stderr)
 
 
-def _geom_for(obj_path, scale, default_page=None):
+def _geom_for(obj_path, scale, default_page=None, flip=False):
     """The geom record for one OBJ, with its materials and normals."""
-    return carbank_import.import_car(obj_path, scale=scale, default_page=default_page)
+    return carbank_import.import_car(obj_path, scale=scale, default_page=default_page,
+                                    flip_y=flip, flip_winding=flip)
 
 
 def _block_for(variant, geom, clean_block, scale):
@@ -65,7 +66,7 @@ def _block_for(variant, geom, clean_block, scale):
                                    scale)
 
 
-def car_blocks(car, scale, default_page=None):
+def car_blocks(car, scale, default_page=None, flip=False):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -78,7 +79,7 @@ def car_blocks(car, scale, default_page=None):
         path = getattr(car, variant, None) if variant != "clean" else car.clean
 
         if path:
-            geoms[variant] = _geom_for(path, scale, default_page)
+            geoms[variant] = _geom_for(path, scale, default_page, flip)
 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
@@ -103,7 +104,7 @@ def car_blocks(car, scale, default_page=None):
     return blocks, warnings
 
 
-def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
+def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -154,7 +155,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale, default_page)
+        blocks, car_warnings = car_blocks(car, scale, default_page, flip)
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -175,7 +176,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
     # may use any page the source bank carries
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
-        geom = _geom_for(car.clean, scale, default_page)
+        geom = _geom_for(car.clean, scale, default_page, flip)
         model["sets"] = sorted({p["set"] for p in geom["polys"]
                                 if p["set"] not in (0, 255)})
 
@@ -244,7 +245,8 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
     _warn("page size(s) changed; rebuilt LUMP_TEXTUREINFO to match the files "
           "on disk")
 
-def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None):
+def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
+              flip_y=False, flip_winding=False):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
@@ -265,7 +267,8 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None):
                               "models")
 
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
-    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page)
+    flip = bool(flip_y or flip_winding)
+    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
@@ -296,6 +299,10 @@ def main(argv=None):
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")
+    ap.add_argument("--flip-y", action="store_true",
+                    help="negate Y: the engine's model space is Y-down, a Blender OBJ is Y-up")
+    ap.add_argument("--flip-winding", action="store_true",
+                    help="reverse every face: required with --flip-y, or the car is inside-out")
     ap.add_argument("--d1", metavar="LEV",
                     help="bake a DRIVER 1 LEV instead (pool shape, bake.build_file)")
     args = ap.parse_args(argv)
@@ -310,7 +317,8 @@ def main(argv=None):
         default_page = (int(s_), int(i_))
 
     ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
-                             default_page=default_page)
+                             default_page=default_page,
+                             flip_y=args.flip_y, flip_winding=args.flip_winding)
 
     print("baked %s -> %s" % (os.path.basename(args.bank), args.out))
 

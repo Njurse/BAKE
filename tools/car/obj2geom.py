@@ -70,7 +70,24 @@ def face_normal(verts, idxs):
     return (nx / L, ny / L, nz / L)
 
 
-def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None):
+def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
+               flip_y=False, flip_winding=False):
+    """A geom record for bake.py.
+
+    flip_y negates every vertex's Y and flip_winding reverses each face's vertex
+    order. The engine's model space is Y-DOWN while an authoring tool exports
+    Y-up, so an imported car arrives upside down; negating Y mirrors the
+    handedness, which turns every triangle inside out, so the winding has to be
+    reversed with it. The pair is what makes a Blender OBJ sit the right way up
+    with outward normals; either alone gives a wrong car (upside down, or
+    inside-out).
+    """
+    if flip_y:
+        verts = [(v[0], -v[1], v[2]) for v in verts]
+
+    if flip_winding:
+        faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
+        mats = list(reversed(mats)) if mats else mats
     # point normals: average of face normals meeting at each vertex
     acc = [[0.0, 0.0, 0.0] for _ in verts]
     face_n = []
