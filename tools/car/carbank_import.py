@@ -40,6 +40,9 @@ def import_car(obj_path, scale=0.68267, grey=False,
     """
     verts, uvs, faces, names = obj2geom.parse_obj(obj_path, with_materials=True)
     unmapped = []
+    # The kind is encoded in the material NAME, so it has to be read before the
+    # names are turned into (set, id) page tuples.
+    kinds = [obj2geom.kind_of_material(n) for n in names] if names else None
     mats = obj2geom.materials_to_pages(names, obj_path, default_page, unmapped)
 
     if unmapped:
@@ -53,7 +56,7 @@ def import_car(obj_path, scale=0.68267, grey=False,
     name = os.path.splitext(os.path.basename(obj_path))[0]
 
     return obj2geom.build_geom(verts, uvs, faces, scale, grey, name, mats,
-                               flip_y, flip_winding)
+                               flip_y, flip_winding, kinds)
 
 
 def _remap_page(page, set_map, id_map):

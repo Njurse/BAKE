@@ -71,7 +71,7 @@ def face_normal(verts, idxs):
 
 
 def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
-               flip_y=False, flip_winding=False):
+               flip_y=False, flip_winding=False, kinds=None):
     """A geom record for bake.py.
 
     flip_y negates every vertex's Y and flip_winding reverses each face's vertex
@@ -88,6 +88,7 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
     if flip_winding:
         faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
         mats = list(reversed(mats)) if mats else mats
+        kinds = list(reversed(kinds)) if kinds else kinds
     # point normals: average of face normals meeting at each vertex
     acc = [[0.0, 0.0, 0.0] for _ in verts]
     face_n = []
@@ -108,8 +109,15 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
     polys = []
     for fi, (vi, ti) in enumerate(faces):
         page = mats[fi] if mats else None
-        has_uv = (not force_grey) and any(t >= 0 for t in ti) and uvs
-        kind = "GT3" if len(vi) == 3 else "GT4"
+        want = kinds[fi] if kinds else None
+        if want == "F3":
+            # A flat untextured poly has no UVs at all; giving it some is exactly
+            # what made the car's texture look mangled.
+            has_uv, kind = False, "F3"
+        else:
+            has_uv = (not force_grey) and any(t >= 0 for t in ti) and uvs
+            kind = want if want in ("FT3", "GT3", "GT4") else (
+                "GT3" if len(vi) == 3 else "GT4")
         uv_list = []
         if has_uv:
             for t in ti:
@@ -159,6 +167,22 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
 MATERIAL_PREFIX = "set"
 
 
+def kind_of_material(name):
+    """The poly kind an exported OBJ's material name encodes.
+
+    exportd2 writes "flat" for an untextured flat poly and appends "_ft" to a
+    textured flat one; a bare "set<S>_id<T>" is gouraud. Defaulting every face
+    to GT3 is what silently mangled the UVs and the shading of the other two.
+    """
+    if not name:
+        return None
+    if name == "flat":
+        return "F3"
+    if name.endswith("_ft"):
+        return "FT3"
+    return "GT3"
+
+
 def material_to_page(name, where, default=None, unmapped=None):
     """'set65_id12' -> (65, 12); 'flat' or '' -> None (solid grey).
 
@@ -166,6 +190,9 @@ def material_to_page(name, where, default=None, unmapped=None):
     page: a typo in a material would otherwise quietly put a wing on the wrong
     texture.
     """
+    if name.endswith("_ft"):
+        name = name[:-3]
+
     if name in ("", "flat"):
         return None
 

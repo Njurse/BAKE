@@ -503,8 +503,18 @@ def write_obj(path, model, name, mtl_name):
             continue
         textured = (p.kind in TEXTURED_KINDS
                     and p.texture_set not in (0, 255))
-        mat = ("set%d_id%d" % (p.texture_set, p.texture_id)
-               if textured else "flat")
+        # OBJ has no notion of Driver's poly kinds, so the material name has to
+        # carry it or the kind is lost on the way back in: an F3 (flat, no UVs)
+        # read as GT3 comes back textured, sampling garbage where it had no UVs,
+        # and an FT3 read as GT3 gets gouraud shading where the donor had one
+        # flat normal. "flat" stays bare for an untextured flat poly so old OBJs
+        # still read; everything else is suffixed with its kind.
+        base = ("set%d_id%d" % (p.texture_set, p.texture_id)
+                if textured else "flat")
+        if p.kind in ("F3", "FT3", "FT4"):
+            mat = base if (p.kind == "F3" and base == "flat") else base + "_ft"
+        else:
+            mat = base
         uvs = p.uv if p.uv and len(p.uv) == len(p.v) else None
         ns = model.poly_normals(p)
         if len(ns) != len(p.v):
