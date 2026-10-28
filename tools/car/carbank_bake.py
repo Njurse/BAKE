@@ -79,10 +79,11 @@ def _source_colors(lev_path):
         return {}
 
 
-def _geom_for(obj_path, scale, default_page=None, flip=False, colors=None):
+def _geom_for(obj_path, scale, default_page=None, flip_y=False, flip_winding=False,
+               colors=None):
     """The geom record for one OBJ, with its materials and normals."""
     geom = carbank_import.import_car(obj_path, scale=scale, default_page=default_page,
-                                     flip_y=flip, flip_winding=flip)
+                                     flip_y=flip_y, flip_winding=flip_winding)
 
     if colors and len(colors) == len(geom["polys"]):
         for poly, color in zip(geom["polys"], colors):
@@ -109,7 +110,7 @@ def _block_for(variant, geom, clean_block, scale, flip_normals=False):
                                    scale, flip_normals=flip_normals)
 
 
-def car_blocks(car, scale, default_page=None, flip=False, colors=None,
+def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, colors=None,
                flip_normals=False):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
@@ -123,7 +124,7 @@ def car_blocks(car, scale, default_page=None, flip=False, colors=None,
         path = getattr(car, variant, None) if variant != "clean" else car.clean
 
         if path:
-            geoms[variant] = _geom_for(path, scale, default_page, flip,
+            geoms[variant] = _geom_for(path, scale, default_page, flip_y, flip_winding,
                                        (colors or {}).get(variant))
 
     if "clean" not in geoms:
@@ -177,8 +178,8 @@ def source_lev_of(bank):
     return ""
 
 
-def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=False,
-                   colors=None, flip_normals=False):
+def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=False,
+                   flip_winding=False, colors=None, flip_normals=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -229,7 +230,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=Fal
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale, default_page, flip, colors,
+        blocks, car_warnings = car_blocks(car, scale, default_page, flip_y, flip_winding, colors,
                                           flip_normals)
         warnings.extend(car_warnings)
 
@@ -251,7 +252,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip=Fal
     # may use any page the source bank carries
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
-        geom = _geom_for(car.clean, scale, default_page, flip)
+        geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding)
         model["sets"] = sorted({p["set"] for p in geom["polys"]
                                 if p["set"] not in (0, 255)})
 
@@ -342,9 +343,11 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
                               "models")
 
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
-    flip = bool(flip_y or flip_winding)
+    # Y mirror and winding are SEPARATE: reversing the winding is how an
+    # inside-out car is fixed when the mesh is already the right way up.
     colors = _source_colors(source_lev_of(bank))
-    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip,
+    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip_y,
+                                       flip_winding,
                                        colors, flip_normals)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
