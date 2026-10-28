@@ -18,10 +18,19 @@ import os
 import sys
 
 
-def parse_obj(path):
+def parse_obj(path, with_materials=False):
+    """(verts, uvs, faces) - plus a per-face material name when asked.
+
+    The material name is what carries a poly's texture page: carbank_export
+    writes "set<S>_id<T>" per (set, id) group and "flat" for untextured panels,
+    so reading it back is what keeps an edited OBJ's materials intact instead of
+    collapsing every poly onto one grey page.
+    """
     verts = []
     uvs = []
     faces = []          # list of (v_indices, uv_indices)  (0-based)
+    mats = []           # per-face material name ("" when the OBJ names none)
+    current = ""
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -32,6 +41,8 @@ def parse_obj(path):
                 verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
             elif parts[0] == "vt" and len(parts) >= 3:
                 uvs.append((float(parts[1]), float(parts[2])))
+            elif parts[0] == "usemtl":
+                current = parts[1] if len(parts) > 1 else ""
             elif parts[0] == "f":
                 vi, ti = [], []
                 for tok in parts[1:]:
@@ -40,6 +51,11 @@ def parse_obj(path):
                     ti.append(int(bits[1]) - 1 if len(bits) > 1 and bits[1] else -1)
                 if len(vi) >= 3:
                     faces.append((vi, ti))
+                    mats.append(current)
+
+    if with_materials:
+        return verts, uvs, faces, mats
+
     return verts, uvs, faces
 
 
@@ -54,7 +70,7 @@ def face_normal(verts, idxs):
     return (nx / L, ny / L, nz / L)
 
 
-def build_geom(verts, uvs, faces, scale, force_grey, name):
+def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None):
     # point normals: average of face normals meeting at each vertex
     acc = [[0.0, 0.0, 0.0] for _ in verts]
     face_n = []
@@ -73,7 +89,8 @@ def build_geom(verts, uvs, faces, scale, force_grey, name):
                         int(round(a[2] / L * 4096))])
 
     polys = []
-    for vi, ti in faces:
+    for fi, (vi, ti) in enumerate(faces):
+        page = mats[fi] if mats else None
         has_uv = (not force_grey) and any(t >= 0 for t in ti) and uvs
         kind = "GT3" if len(vi) == 3 else "GT4"
         uv_list = []
@@ -86,10 +103,10 @@ def build_geom(verts, uvs, faces, scale, force_grey, name):
                                     int(round((1.0 - v) * 255)) & 0xFF])
                 else:
                     uv_list.append([0, 0])
-            setid, texid = 1, 0
+            setid, texid = (page if page else (1, 0))
         else:
             uv_list = [[0, 0]] * len(vi)
-            setid, texid = 1, 0          # solid grey page (non-zero)
+            setid, texid = (page if page else (1, 0))   # solid grey page
 
         polys.append({
             "kind": kind,
@@ -122,6 +139,46 @@ def build_geom(verts, uvs, faces, scale, force_grey, name):
     }
 
 
+MATERIAL_PREFIX = "set"
+
+
+def material_to_page(name, where):
+    """'set65_id12' -> (65, 12); 'flat' or '' -> None (solid grey).
+
+    A name this tool does not recognise is an error rather than a silent grey
+    page: a typo in a material would otherwise quietly put a wing on the wrong
+    texture.
+    """
+    if name in ("", "flat"):
+        return None
+
+    if not name.startswith(MATERIAL_PREFIX):
+        raise ValueError("%s: material %r is neither \"flat\" nor "
+                         "set<number>_id<number>" % (where, name))
+
+    try:
+        body = name[len(MATERIAL_PREFIX):]
+        set_txt, id_txt = body.split("_id")
+        return (int(set_txt), int(id_txt))
+    except ValueError:
+        raise ValueError("%s: material %r is not of the form set<S>_id<T>"
+                         % (where, name))
+
+
+def materials_to_pages(names, where):
+    """Per-face (set, id) or None, from the OBJ's usemtl groups."""
+    cache = {}
+    out = []
+
+    for name in names:
+        if name not in cache:
+            cache[name] = material_to_page(name, where)
+
+        out.append(cache[name])
+
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -131,14 +188,22 @@ def main():
                     help="bake scale (D2_CELL/D1_CELL, default 0.68267)")
     ap.add_argument("--grey", action="store_true",
                     help="force every poly onto a solid grey page")
+    ap.add_argument("--materials", action="store_true",
+                    help="take each poly's set/id from its usemtl group "
+                         "(set<S>_id<T>; anything else is refused)")
     args = ap.parse_args()
 
-    verts, uvs, faces = parse_obj(args.obj)
+    if args.materials:
+        verts, uvs, faces, names = parse_obj(args.obj, with_materials=True)
+        mats = materials_to_pages(names, args.obj)
+    else:
+        verts, uvs, faces = parse_obj(args.obj)
+        mats = None
     if not verts or not faces:
         sys.exit("no vertices or faces in %s" % args.obj)
 
     name = os.path.splitext(os.path.basename(args.obj))[0]
-    rec = build_geom(verts, uvs, faces, args.scale, args.grey, name)
+    rec = build_geom(verts, uvs, faces, args.scale, args.grey, name, mats)
 
     out = args.out or (os.path.splitext(args.obj)[0] + "_geom.json")
     with open(out, "w") as f:
