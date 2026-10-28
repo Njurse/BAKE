@@ -321,9 +321,10 @@ def _sign(x, y, z):
 
 class Poly(object):
     """One decoded polygon, format-neutral."""
-    __slots__ = ("kind", "texture_set", "texture_id", "v", "n", "uv", "color")
+    __slots__ = ("kind", "texture_set", "texture_id", "v", "n", "uv", "color",
+                 "code")
 
-    def __init__(self, kind, texture_set, texture_id, v, n, uv, color):
+    def __init__(self, kind, texture_set, texture_id, v, n, uv, color, code=0):
         self.kind = kind              # "F3"/"F4"/"FT3"/"FT4"/"GT3"/"GT4"
         self.texture_set = texture_set
         self.texture_id = texture_id
@@ -331,6 +332,7 @@ class Poly(object):
         self.n = n                    # tuple of normal indices (GT only), else ()
         self.uv = uv                  # tuple of (u, v) shorts
         self.color = color            # (r, g, b)
+        self.code = code              # the raw poly type, e.g. 22 for GT3
 
 
 class Model(object):
@@ -448,7 +450,7 @@ def decode_polys(blob, base, n_polys, num_vertices, wide_id=False):
             errors.append((i, "vertex index out of range %s (nv=%d)"
                            % (bad, num_vertices)))
         else:
-            polys.append(Poly(kind, setid, texid, v, n, uv, color))
+            polys.append(Poly(kind, setid, texid, v, n, uv, color, pt))
         p += size
     return polys, errors
 

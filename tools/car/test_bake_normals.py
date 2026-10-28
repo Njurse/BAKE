@@ -42,18 +42,35 @@ def faces_outward(model, p):
 
 
 class BakeNormals(unittest.TestCase):
-    def test_flat_poly_gets_its_own_normal(self):
-        """An FT/F poly with n == [] must bake a resolvable, outward normal."""
+    def test_flat_poly_keeps_its_kind_and_has_no_normals(self):
+        """An FT/F poly must come back as FT/F, with no normal indices at all.
+
+        The old bake re-encoded every poly as GT so it could carry a normal;
+        that is what made an untextured F3 sample garbage UVs and an FT3 get
+        smoothed shading. The kind is now preserved and the record simply has
+        no normal field, so there is nothing to resolve.
+        """
         polys = [{"kind": "FT3", "set": 1, "id": 0, "v": [0, 1, 2], "n": [],
                   "uv": [(0, 0), (10, 0), (0, 10)], "color": [127, 127, 127]}]
-        stats = {}
-        rec = bake.build_model_record(VERTS, polys, None, [], 1.0, stats=stats)
+        rec = bake.build_model_record(VERTS, polys, None, [], 1.0)
         model = decode(rec)
-        self.assertEqual(stats["fallback_normals"], 1)
         p = model.polys[0]
-        self.assertEqual(len(p.n), len(p.v))
-        self.assertTrue(all(i < len(model.normals) for i in p.n))
+        self.assertEqual(p.kind, "FT3")
+        self.assertEqual(tuple(p.n), ())
+        self.assertEqual(p.uv, ((0, 0), (10, 0), (0, 10)))
         self.assertTrue(faces_outward(model, p))
+
+    def test_untextured_flat_poly_stays_f3(self):
+        """An F3 has no UVs and no normals: it must not acquire either."""
+        polys = [{"kind": "F3", "set": 0, "id": 0, "v": [0, 1, 2], "n": [],
+                  "uv": [], "color": [40, 60, 90]}]
+        rec = bake.build_model_record(VERTS, polys, None, [], 1.0)
+        model = decode(rec)
+        p = model.polys[0]
+        self.assertEqual(p.kind, "F3")
+        self.assertEqual(tuple(p.n), ())
+        self.assertEqual(tuple(p.uv), ())
+        self.assertEqual(tuple(p.color), (40, 60, 90))
 
     def test_source_normal_pointing_inward_is_flipped(self):
         """A source entry in the wrong hemisphere must not light from inside."""
@@ -75,8 +92,8 @@ class BakeNormals(unittest.TestCase):
         self.assertTrue(faces_outward(model2, model2.polys[0]))
 
     def test_flipped_entry_is_detected(self):
-        """A baked entry that faces into the panel is visible to the check."""
-        polys = [{"kind": "FT3", "set": 1, "id": 0, "v": [0, 1, 2], "n": [],
+        """A baked GT entry that faces into the panel is visible to the check."""
+        polys = [{"kind": "GT3", "set": 1, "id": 0, "v": [0, 1, 2], "n": [],
                   "uv": [(0, 0), (10, 0), (0, 10)], "color": [127, 127, 127]}]
         rec = bake.build_model_record(VERTS, polys, None, [], 1.0)
         model = decode(rec)
