@@ -46,9 +46,9 @@ def _warn(msg):
     print("carbank_bake: warning: %s" % msg, file=sys.stderr)
 
 
-def _geom_for(obj_path, scale):
+def _geom_for(obj_path, scale, default_page=None):
     """The geom record for one OBJ, with its materials and normals."""
-    return carbank_import.import_car(obj_path, scale=scale)
+    return carbank_import.import_car(obj_path, scale=scale, default_page=default_page)
 
 
 def _block_for(variant, geom, clean_block, scale):
@@ -65,7 +65,7 @@ def _block_for(variant, geom, clean_block, scale):
                                    scale)
 
 
-def car_blocks(car, scale):
+def car_blocks(car, scale, default_page=None):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -78,7 +78,7 @@ def car_blocks(car, scale):
         path = getattr(car, variant, None) if variant != "clean" else car.clean
 
         if path:
-            geoms[variant] = _geom_for(path, scale)
+            geoms[variant] = _geom_for(path, scale, default_page)
 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
@@ -103,7 +103,7 @@ def car_blocks(car, scale):
     return blocks, warnings
 
 
-def build_manifest(bank, out_dir, scale, blocks_dir):
+def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -152,7 +152,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir):
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale)
+        blocks, car_warnings = car_blocks(car, scale, default_page)
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -173,14 +173,14 @@ def build_manifest(bank, out_dir, scale, blocks_dir):
     # may use any page the source bank carries
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
-        geom = _geom_for(car.clean, scale)
+        geom = _geom_for(car.clean, scale, default_page)
         model["sets"] = sorted({p["set"] for p in geom["polys"]
                                 if p["set"] not in (0, 255)})
 
     return manifest, warnings
 
 
-def bake_bank(bank_path, out_dir, scale=0.68267, d1=None):
+def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
@@ -198,7 +198,7 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None):
     blocks_dir = os.path.join(out_dir, ".bake")
 
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
-    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir)
+    manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
@@ -223,6 +223,9 @@ def main(argv=None):
     ap.add_argument("-o", "--out", required=True, help="output folder")
     ap.add_argument("--scale", type=float, default=0.68267,
                     help="OBJ scale (default 0.68267, the D2/D1 cell ratio)")
+    ap.add_argument("--default-page", metavar="SET:ID", default=None,
+                    help="page for an OBJ whose materials are not set<S>_id<T> "
+                         "(an author export); without it they are refused")
     ap.add_argument("--d1", metavar="LEV",
                     help="bake a DRIVER 1 LEV instead (pool shape, bake.build_file)")
     args = ap.parse_args(argv)
@@ -231,7 +234,13 @@ def main(argv=None):
         raise SystemExit("carbank_bake: --d1 is not implemented in this tool; "
                          "the Driver 1 pool bake is tools/car/bake.py")
 
-    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale)
+    default_page = None
+    if args.default_page:
+        s_, i_ = args.default_page.split(":")
+        default_page = (int(s_), int(i_))
+
+    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
+                             default_page=default_page)
 
     print("baked %s -> %s" % (os.path.basename(args.bank), args.out))
 

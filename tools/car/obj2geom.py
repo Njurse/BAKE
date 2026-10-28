@@ -142,7 +142,7 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None):
 MATERIAL_PREFIX = "set"
 
 
-def material_to_page(name, where):
+def material_to_page(name, where, default=None, unmapped=None):
     """'set65_id12' -> (65, 12); 'flat' or '' -> None (solid grey).
 
     A name this tool does not recognise is an error rather than a silent grey
@@ -153,8 +153,19 @@ def material_to_page(name, where):
         return None
 
     if not name.startswith(MATERIAL_PREFIX):
+        # An author's OBJ (Blender and friends) names its materials its own way.
+        # Without an explicit --default-page that is a refusal, because guessing
+        # a page puts a body panel on the wrong texture; with one it is taken and
+        # the name is reported.
+        if default is not None:
+            if unmapped is not None:
+                unmapped.append(name)
+
+            return default
+
         raise ValueError("%s: material %r is neither \"flat\" nor "
-                         "set<number>_id<number>" % (where, name))
+                         "set<number>_id<number> (pass --default-page "
+                         "set:id to map author material names)" % (where, name))
 
     try:
         body = name[len(MATERIAL_PREFIX):]
@@ -165,14 +176,14 @@ def material_to_page(name, where):
                          % (where, name))
 
 
-def materials_to_pages(names, where):
+def materials_to_pages(names, where, default=None, unmapped=None):
     """Per-face (set, id) or None, from the OBJ's usemtl groups."""
     cache = {}
     out = []
 
     for name in names:
         if name not in cache:
-            cache[name] = material_to_page(name, where)
+            cache[name] = material_to_page(name, where, default, unmapped)
 
         out.append(cache[name])
 
