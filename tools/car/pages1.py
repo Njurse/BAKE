@@ -31,6 +31,8 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import fourbpp                 # the one 4bpp/CLUT conversion (tools/common)
 import lev1                                    # the D1 level/lump walker
 import euro43                                  # the headerless EURO-43 reader
 
@@ -218,14 +220,11 @@ def show_pages(blob, path):
 
 def clut_rgb(row):
     """32 bytes -> 16 (r, g, b) 8-bit tuples. PSX RGB555: R in bits 0-4,
-    G in 5-9, B in 10-14, bit 15 = STP."""
-    out = []
-    for i in range(16):
-        v = struct.unpack_from("<H", row, i * 2)[0]
-        out.append((((v >> 0) & 0x1F) << 3,
-                    ((v >> 5) & 0x1F) << 3,
-                    ((v >> 10) & 0x1F) << 3))
-    return out
+    G in 5-9, B in 10-14, bit 15 = STP.
+
+    tools/common/fourbpp.py owns the conversion; ped's tools read the same
+    pages with it."""
+    return fourbpp.clut_rgb(row)
 
 
 def parse_pallet(body, size=None):

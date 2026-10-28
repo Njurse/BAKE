@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
 import zlib
 from typing import Iterable, Sequence
 
 from jmpped_core import *
 from jmpped_archive import Page
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import fourbpp                 # the one 4bpp/CLUT conversion (tools/common)
 
 
 # --------------------------------------------------------------------------
@@ -42,62 +46,25 @@ def cluts_to_bytes(rows: Sequence[bytes]) -> bytes:
 
 
 def clut_rgb(row: bytes) -> list[tuple[int, int, int]]:
+    """32 bytes -> 16 (r, g, b) 8-bit tuples (tools/common/fourbpp.py)."""
     if len(row) < CLUT_ROW_BYTES:
         raise JMPPEDError("short CLUT row")
-    out = []
-    for i in range(CLUT_ROW_ENTRIES):
-        v = struct.unpack_from("<H", row, i * 2)[0]
-        out.append((((v >> 0) & 0x1F) << 3,
-                    ((v >> 5) & 0x1F) << 3,
-                    ((v >> 10) & 0x1F) << 3))
-    return out
+    return fourbpp.clut_rgb(row)
 
 
 def rgb_to_clut(colors: Sequence[tuple[int, int, int]]) -> bytes:
-    out = bytearray(CLUT_ROW_BYTES)
-    for i, (r, g, b) in enumerate(colors[:CLUT_ROW_ENTRIES]):
-        v = ((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10)
-        struct.pack_into("<H", out, i * 2, v)
-    return bytes(out)
+    """Up to 16 colours -> one 32-byte CLUT row (tools/common/fourbpp.py)."""
+    return fourbpp.rgb_to_clut(colors)
 
 
 def decomp_asm(src: bytes, out_bytes: int = PAGE_INDEX_BYTES) -> bytes:
     """Mirror of the engine's decomp_asm (first decoded byte at the end)."""
-    dest = bytearray(out_bytes)
-    ptr = out_bytes - 1
-    i = 0
-    n = len(src)
-    while ptr >= 0 and i < n:
-        pix = src[i]
-        i += 1
-        if pix & 0x80:
-            if i >= n:
-                break
-            p = src[i]
-            i += 1
-            for _ in range(258 - pix):
-                if ptr < 0:
-                    break
-                dest[ptr] = p
-                ptr -= 1
-        else:
-            for _ in range(pix + 1):
-                if ptr < 0 or i >= n:
-                    break
-                dest[ptr] = src[i]
-                i += 1
-                ptr -= 1
-    return bytes(dest)
+    return fourbpp.decomp_asm(src, out_bytes)[0]
 
 
 def encode_literal(data: bytes) -> bytes:
     """Literal-only RLE stream; always valid input for decomp_asm."""
-    out = bytearray()
-    for o in range(0, len(data), 128):
-        chunk = data[o:o + 128]
-        out.append(len(chunk) - 1)
-        out += chunk
-    return bytes(out)
+    return fourbpp.encode_literal(data)
 
 
 def page_indices(page: Page) -> bytes:
@@ -115,26 +82,15 @@ def page_indices(page: Page) -> bytes:
     if len(raw) < PAGE_INDEX_BYTES:
         raise JMPPEDError("page image is %d bytes, expected %d"
                           % (len(raw), PAGE_INDEX_BYTES))
-    idx = bytearray(PAGE_BYTES)
-    for y in range(PAGE_H):
-        row = raw[y * (PAGE_W // 2):(y + 1) * (PAGE_W // 2)]
-        for xb, b in enumerate(row):
-            idx[y * PAGE_W + xb * 2] = b & 0x0F
-            idx[y * PAGE_W + xb * 2 + 1] = (b >> 4) & 0x0F
-    return bytes(idx)
+    return fourbpp.decode_indices(raw, PAGE_W, PAGE_H)
 
 
 def encode_page_indices(indices: bytes) -> bytes:
+    """One index byte per texel -> the packed 4bpp page image (fourbpp)."""
     if len(indices) != PAGE_BYTES:
         raise JMPPEDError("index map is %d bytes, expected %d"
                           % (len(indices), PAGE_BYTES))
-    raw = bytearray(PAGE_INDEX_BYTES)
-    for y in range(PAGE_H):
-        for xb in range(PAGE_W // 2):
-            lo = indices[y * PAGE_W + xb * 2] & 0x0F
-            hi = indices[y * PAGE_W + xb * 2 + 1] & 0x0F
-            raw[y * (PAGE_W // 2) + xb] = lo | (hi << 4)
-    return bytes(raw)
+    return fourbpp.encode_indices(indices, PAGE_W, PAGE_H)
 
 
 def page_cluts(page: Page) -> list[bytes]:
@@ -160,36 +116,12 @@ def nearest_clut_index(rgb: tuple[int, int, int],
                        clut: Sequence[tuple[int, int, int]]) -> int:
     """Nearest 4-bit CLUT entry, exact matches first.
 
-    A page is 4bpp: every edited RGB pixel must become one index 0..15. Using a
-    nearest-colour match keeps a painted PNG usable without requiring the editor
-    to preserve an indexed palette.
-
     Pure black is the engine's transparent entry when the page is drawn with it,
-    so a texel that is NOT pure black must not collapse onto that entry. When the
-    nearest match is black, use the nearest other shade instead (the next black
-    shade when the crop has one) - otherwise an anti-aliased dark edge becomes a
-    transparent hole.
+    so a texel that is NOT pure black must not collapse onto that entry: a
+    near-black anti-aliased edge would become a transparent hole. The rule
+    itself lives in tools/common/fourbpp.py, where the car tools use it too.
     """
-    best = 0
-    bestd = None
-    r, g, b = rgb
-    for i, (cr, cg, cb) in enumerate(clut[:CLUT_ROW_ENTRIES]):
-        d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-        if bestd is None or d < bestd:
-            best, bestd = i, d
-            if d == 0:
-                break
-    if rgb == (0, 0, 0) or clut[best] != (0, 0, 0):
-        return best
-    alt = None
-    altd = None
-    for i, (cr, cg, cb) in enumerate(clut[:CLUT_ROW_ENTRIES]):
-        if (cr, cg, cb) == (0, 0, 0):
-            continue
-        d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-        if altd is None or d < altd:
-            alt, altd = i, d
-    return best if alt is None else alt
+    return fourbpp.nearest_clut_index(rgb, clut)
 
 
 def save_rgb_png(path: str, width: int, height: int,
