@@ -80,10 +80,11 @@ def _source_colors(lev_path):
 
 
 def _geom_for(obj_path, scale, default_page=None, flip_y=False, flip_winding=False,
-               colors=None):
+               colors=None, flip_z=False):
     """The geom record for one OBJ, with its materials and normals."""
     geom = carbank_import.import_car(obj_path, scale=scale, default_page=default_page,
-                                     flip_y=flip_y, flip_winding=flip_winding)
+                                     flip_y=flip_y, flip_winding=flip_winding,
+                                     flip_z=flip_z)
 
     if colors and len(colors) == len(geom["polys"]):
         for poly, color in zip(geom["polys"], colors):
@@ -111,7 +112,7 @@ def _block_for(variant, geom, clean_block, scale, flip_normals=False):
 
 
 def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, colors=None,
-               flip_normals=False):
+               flip_normals=False, flip_z=False):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -125,7 +126,7 @@ def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, 
 
         if path:
             geoms[variant] = _geom_for(path, scale, default_page, flip_y, flip_winding,
-                                       (colors or {}).get(variant))
+                                       (colors or {}).get(variant), flip_z)
 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
@@ -179,7 +180,7 @@ def source_lev_of(bank):
 
 
 def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=False,
-                   flip_winding=False, colors=None, flip_normals=False):
+                   flip_winding=False, colors=None, flip_normals=False, flip_z=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -231,7 +232,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     for slot, carname in bank.order:
         car = bank.cars[carname]
         blocks, car_warnings = car_blocks(car, scale, default_page, flip_y, flip_winding, colors,
-                                          flip_normals)
+                                          flip_normals, flip_z)
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -252,7 +253,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # may use any page the source bank carries
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
-        geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding)
+        geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding, None, flip_z)
         model["sets"] = sorted({p["set"] for p in geom["polys"]
                                 if p["set"] not in (0, 255)})
 
@@ -322,7 +323,7 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
           "on disk")
 
 def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
-              flip_y=False, flip_winding=False, flip_normals=False):
+              flip_y=False, flip_winding=False, flip_normals=False, flip_z=False):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
@@ -348,7 +349,7 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
     colors = _source_colors(source_lev_of(bank))
     manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip_y,
                                        flip_winding,
-                                       colors, flip_normals)
+                                       colors, flip_normals, flip_z)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
@@ -379,6 +380,9 @@ def main(argv=None):
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")
+    ap.add_argument("--flip-z", action="store_true",
+                    help="negate Z as well as Y: the pair is a 180-degree rotation about X, "
+                         "which is what a Z-up mesh needs - a mirror alone is inside out")
     ap.add_argument("--flip-normals", action="store_true",
                     help="negate the stored inward normals; a mesh exported with the "
                          "opposite winding convention otherwise shades inside-out")
@@ -402,7 +406,7 @@ def main(argv=None):
     ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
                              default_page=default_page,
                              flip_y=args.flip_y, flip_winding=args.flip_winding,
-                             flip_normals=args.flip_normals)
+                             flip_normals=args.flip_normals, flip_z=args.flip_z)
 
     print("baked %s -> %s" % (os.path.basename(args.bank), args.out))
 

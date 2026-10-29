@@ -71,7 +71,7 @@ def face_normal(verts, idxs):
 
 
 def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
-               flip_y=False, flip_winding=False, kinds=None):
+               flip_y=False, flip_winding=False, kinds=None, flip_z=False):
     """A geom record for bake.py.
 
     flip_y negates every vertex's Y and flip_winding reverses each face's vertex
@@ -82,8 +82,14 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
     with outward normals; either alone gives a wrong car (upside down, or
     inside-out).
     """
-    if flip_y:
-        verts = [(v[0], -v[1], v[2]) for v in verts]
+    if flip_y or flip_z:
+        # flip_y and flip_z are the two halves of a 180-degree rotation about X.
+        # Both together are a ROTATION: handedness is preserved, so the faces
+        # stay outward. Either one alone is a mirror, and a mirror turns every
+        # face inside out no matter which side the engine culls.
+        sy = -1.0 if flip_y else 1.0
+        sz = -1.0 if flip_z else 1.0
+        verts = [(v[0], v[1] * sy, v[2] * sz) for v in verts]
 
     if flip_winding:
         faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
