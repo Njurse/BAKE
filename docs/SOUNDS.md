@@ -51,6 +51,32 @@ useful dump, several seconds after the sound loaded. The encoder writes `0x03` o
 the last block of a looping sample and `0x01` on a one-shot for exactly this
 reason. If a sample plays as silence or kills the game, look here first.
 
+## Level: measured against the game's own banks
+
+`JERICHO_SOUND_DIAG=1` makes `sound.c` log the level of every bank as it loads -
+the level's own car banks and an imported one both come through
+`LoadSoundBank`/`LoadSoundBankDynamic`, so the comparison is in the units the
+mixer sees:
+
+    sound level: bank 3 samples 3 payload 29008 rate 16000 loop 1 peak 32749 (100%) rms 9557
+
+Measured on CHICAGO's own car banks: **peak 32749-32767 (100%), rms 9557-12629
+(29-39%), crest factor 2.6-3.4**. The bake normalises to `SOUND_PEAK = 0.999`
+(peak), which is what retail does; the old 90% was quieter than retail, not
+safer. The Firebird's samples now measure:
+
+| sample | peak | rms | crest |
+| --- | --- | --- | --- |
+| idle | 100% | 33% | 3.0 (retail 2.6-3.4) |
+| horn | 100% | 36% | 2.8 |
+| engine | 99% | **49%** | **2.0** |
+
+The engine loop is the outlier, and it is the source: `sounds/engine.wav` is
+already limited (crest 2.0 means its peaks are flat-topped), so 4-bit ADPCM has
+the least headroom exactly where the ear is most sensitive. The bake cannot
+un-limit a limited recording - re-export that loop with more dynamic range (or
+run it through the bake with less compression) if it still sounds crushed.
+
 ## Budgets
 
 - **Rate**: capped at 11025 Hz (the SPU takes 4000..44100; car banks sound right

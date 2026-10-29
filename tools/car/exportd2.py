@@ -94,6 +94,11 @@ SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # engine plays each sample at its own, exactly as retail's 16000/1486 pair does.
 SOUND_SAMPLE_BYTES = 16384
 SOUND_MAX_RATE = 16000
+# The level to normalise a sample to, measured from the game's OWN car banks
+# (sound.c sound_level_diag, CHICAGO): they sit at peak 32749-32767, i.e. 100%
+# - so 90% was quieter than retail, not safer. Peak is what a mixer clips on,
+# and retail runs it to full scale.
+SOUND_PEAK = 0.999
 
 WHEEL_DETAIL_NAMES = ("WHLCLEAN", "WHLBOTH", "WHEEL")
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -1101,11 +1106,14 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
 
     # A bank sample has no gain of its own: the engine's channel volume is the
     # same for every car, so an un-normalised WAV plays quietly next to retail's.
-    samples, had_peak, gain = vag.normalise(samples)
+    samples, had_peak, gain = vag.normalise(samples, SOUND_PEAK)
 
     if gain != 1.0:
-        warnings.append("sound %s: normalised peak %d -> %d (x%.2f)"
-                        % (label, had_peak, int(0.9 * 32767), gain))
+        rms = (sum(float(v) * v for v in samples) / len(samples)) ** 0.5
+        warnings.append("sound %s: normalised peak %d -> %d (x%.2f); rms %.0f "
+                        "(%.0f%% of full scale, retail is 29-39%%)"
+                        % (label, had_peak, int(SOUND_PEAK * 32767), gain, rms,
+                           100.0 * rms / 32767.0))
 
     # 16 bytes per 28 samples: how many samples fit the byte budget
     limit = (budget // vag.BLOCK_BYTES) * vag.SAMPLES_PER_BLOCK
