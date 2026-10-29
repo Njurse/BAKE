@@ -115,6 +115,18 @@ variants, not three per model slot — so the first car in slot order that decla
 wheels owns it, and another car's wheels are reported rather than silently
 merged.
 
+The art's backdrop has to be **transparent**, and there is no per-texel alpha
+here: the engine's marker is a CLUT entry of `0x0000`, and it keys the backdrop
+off the sprite's corner index. A sprite baked on a pink sky therefore draws as an
+opaque square — bake the page with the colour key:
+
+    python carbank_page.py work/pages/page2.png --set 2 --bank . --transparent auto
+
+`--transparent` takes a hex colour (`ff00ff`), `auto` (the image's top-left
+pixel) or `alpha` (the PNG's own alpha channel); `--transparent-tolerance` widens
+the match for a soft edge. `carbank_bake` warns, naming the page and colour, when
+a wheel's backdrop is still opaque.
+
 ### `sounds`
 
 Per car, in the same shape for every model slot the bank carries:
