@@ -43,6 +43,46 @@ MIN_RATE = 4000
 MAX_RATE = 44100
 DEFAULT_RATE = 11025
 
+# PsyCross plays EVERY decoded VAG buffer at this rate (PsyX_SPUAL.cpp:
+# `alBufferData(..., 11000)`) and then applies the SPU pitch, and the engine
+# derives that pitch as `samplerate * pitch / 44100`. So a bank's `samplerate`
+# field is not "the sample's rate in Hz": writing the rate there makes the sample
+# play FOUR TIMES TOO SLOW (11025*4096/44100 = 1024, i.e. a quarter of 4096).
+# The field that gives unity pitch for a VAG recorded at R is 44100*R/11000.
+PSX_PLAYBACK_RATE = 11000
+SPU_PITCH_UNITY = 44100
+
+
+def rate_field(rate):
+    """The bank's `samplerate` for a VAG recorded at `rate` Hz."""
+    return int(round(rate * (float(SPU_PITCH_UNITY) / PSX_PLAYBACK_RATE)))
+
+
+def rate_from_field(field):
+    """The recording rate a bank's `samplerate` field implies."""
+    return field * (float(PSX_PLAYBACK_RATE) / SPU_PITCH_UNITY)
+
+
+def normalise(samples, peak=0.9):
+    """Scale a sample so its loudest point sits at `peak` of full scale.
+
+    A bank's samples have no gain of their own: the engine's channel volume is
+    the same -10000..0 for every car, so a WAV that peaks at 20% plays at 20% of
+    the level next to a retail sample. Returns (samples, old_peak, applied_gain).
+    """
+    top = max((abs(s) for s in samples), default=0)
+
+    if top <= 0:
+        return list(samples), 0, 1.0
+
+    target = int(peak * 32767)
+    gain = target / float(top)
+
+    if 0.98 < gain < 1.02:
+        return list(samples), top, 1.0
+
+    return [max(-32768, min(32767, int(round(s * gain)))) for s in samples], top, gain
+
 
 def _clamp16(v):
     if v > 32767:
@@ -160,7 +200,7 @@ def _encode_block(samples, prev1, prev2):
     return bytes(block), nibbles
 
 
-def encode(samples, loop=False):
+def encode(samples, loop=False, loop_from=0):
     """16-bit samples -> VAG blocks (padded to a whole number of blocks).
 
     Returns (payload, sample_count, rms_error). The payload is the raw block
@@ -168,6 +208,19 @@ def encode(samples, loop=False):
     """
     flags_loop = bool(loop)
     padded = list(samples)
+    # where the loop begins: after the attack, if the author says so. PsyX reads
+    # this marker as the loop start, so it is what stops the whole sample
+    # retriggering on every cycle.
+    # The marker cannot sit on block 0: PsyX derives the loop start as
+    # `k + 26` AFTER decoding the block, then drops the points unless
+    # `loopStart - 54 > 0`, so a marker on the first block is thrown away and
+    # the whole buffer loops instead (attack included). Block 1 is 28 samples
+    # in - inaudible - and makes the derived loop region real.
+    loop_block = 1 if len(padded) >= 2 * SAMPLES_PER_BLOCK else 0
+
+    if loop_from and loop:
+        loop_block = min(max(int(loop_from) // SAMPLES_PER_BLOCK, 1),
+                         max(len(padded) // SAMPLES_PER_BLOCK - 1, 0))
 
     while len(padded) % SAMPLES_PER_BLOCK:
         padded.append(0)
@@ -187,7 +240,7 @@ def encode(samples, loop=False):
         # sample is one block stream, so the loop runs the whole thing; the SPU
         # (and PsyCross) look for these markers, and 0 everywhere reads as "this
         # stream never ends".
-        if index == 0:
+        if index == loop_block:
             block[1] = 0x04 if flags_loop else 0
         if index == total_blocks - 1:
             block[1] |= 0x03 if flags_loop else 0x01

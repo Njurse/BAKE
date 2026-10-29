@@ -21,7 +21,8 @@ CAR_KEYS = {
     "clean", "damaged", "low", "atlas", "pages", "wheels",
     "sounds", "palette", "remap",
 }
-SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct"}
+SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct",
+              "loop_from"}
 WHEEL_KEYS = {"clean", "damaged", "fast"}
 WHEEL_ENTRY_KEYS = {"png", "set", "island"}
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -29,7 +30,7 @@ WHEEL_VARIANTS = ("clean", "damaged", "fast")
 # a declared page describes its own BAKE, not just an image: the refresh path has
 # to reproduce the page from the declaration alone
 PAGE_KEYS = {"set", "png", "source", "transparent", "transparent_tolerance",
-             "palette", "protect", "size"}
+             "transparent_chroma", "palette", "protect", "size"}
 
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
 # crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
@@ -172,6 +173,7 @@ class Page(object):
         self.source = file_of(where, field + ".source", data.get("source"))
         self.transparent = data.get("transparent")
         self.transparent_tolerance = data.get("transparent_tolerance", 0)
+        self.transparent_chroma = data.get("transparent_chroma")
         self.palette = data.get("palette")
         self.protect = data.get("protect") or []
         self.size = data.get("size")
@@ -315,6 +317,9 @@ class Sounds(object):
         self.siren = file_of(where, "sounds.siren", data.get("siren"))
         self.engine_pct = data.get("engine_pct")
         self.idle_pct = data.get("idle_pct")
+        # seconds into the sample where the loop starts; a car engine
+        # loop with an attack otherwise repeats the attack every cycle
+        self.loop_from = data.get("loop_from")
 
         for name in ("engine_pct", "idle_pct"):
             pct = getattr(self, name)

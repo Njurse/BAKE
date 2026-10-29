@@ -71,8 +71,24 @@ def _load_rgb(path):
         return pixels, alpha
 
 
-def key_mask(pixels, key, tolerance=0):
-    """Which texels are the backdrop: within `tolerance` of `key`, per channel."""
+def key_mask(pixels, key, tolerance=0, chroma=None):
+    """Which texels are the backdrop.
+
+    `tolerance` is a per-channel distance from `key`. `chroma` instead compares
+    the COLOUR CAST - (r - g, b - g) - which is what separates a flat magenta
+    backdrop from the grey art on top of it, anti-aliased edge included. That
+    matters because the two are close in one channel and nothing alike in the
+    others: a grey tyre is 160 away from magenta in green, so a per-channel
+    tolerance wide enough to swallow the blend ring also starts eating the tyre,
+    which is why 96 keys the ring only partly and leaves stray magenta texels
+    behind.
+    """
+    if chroma is not None:
+        kr, kb = key[0] - key[1], key[2] - key[1]
+
+        return [abs((p[0] - p[1]) - kr) <= chroma and abs((p[2] - p[1]) - kb) <= chroma
+                for p in pixels]
+
     return [max(abs(p[0] - key[0]), abs(p[1] - key[1]), abs(p[2] - key[2]))
             <= tolerance for p in pixels]
 
@@ -172,7 +188,7 @@ def crush_report(pixels, indices, colours, background=None):
 
 
 def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
-              palette=None, protect=None, protect_tolerance=0):
+              palette=None, protect=None, protect_tolerance=0, chroma=None):
     """RGB texels -> (page blob, colours, indices, error, background).
 
     `key` (an (r, g, b)) - or an explicit per-texel `mask` - marks the art's
@@ -211,9 +227,10 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
             indices = bytearray(fourbpp.reindex_to_clut(pixels, colours))
 
     if mask is None and key is not None:
-        mask = key_mask(pixels, key, tolerance)
+        mask = key_mask(pixels, key, tolerance, chroma)
 
     background = None
+    folded = []
 
     if mask is not None and any(mask):
         # the index the backdrop occupies: whichever one most of its texels took.
@@ -228,18 +245,56 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
         at = max(votes, key=lambda k: (votes[k], -k))
         cleared = tuple(colours[at])
 
-        if key is not None and max(abs(cleared[c] - key[c]) for c in range(3)) > tolerance:
+        if chroma is not None:
+            matched = (abs((cleared[0] - cleared[1]) - (key[0] - key[1])) <= chroma
+                       and abs((cleared[2] - cleared[1]) - (key[2] - key[1]))
+                       <= chroma)
+        else:
+            matched = key is None or max(
+                abs(cleared[c] - key[c]) for c in range(3)) <= tolerance
+
+        if not matched and key is not None:
             raise SystemExit(
                 "the backdrop #%02x%02x%02x is not in this page's 16 colours "
                 "(its nearest is index %d, #%02x%02x%02x). Widen "
                 "--transparent-tolerance, or give the sprite a page of its own."
                 % (key[0], key[1], key[2], at, cleared[0], cleared[1], cleared[2]))
 
+        # Fold every OTHER palette entry that is still the backdrop's colour
+        # onto the transparent one. An anti-aliased blend can quantise to its own
+        # near-magenta entry, and those few texels are exactly the pink speckle
+        # that survives keying the flat backdrop: if the entry is the backdrop's
+        # cast it can never be drawn, so nothing is left to sample.
+        reference = key if key is not None else cleared
+
+        if chroma is not None:
+            ref_r, ref_b = reference[0] - reference[1], reference[2] - reference[1]
+
+            def same_cast(colour):
+                return (abs((colour[0] - colour[1]) - ref_r) <= chroma
+                        and abs((colour[2] - colour[1]) - ref_b) <= chroma)
+        else:
+            def same_cast(colour):
+                return max(abs(colour[c] - reference[c])
+                           for c in range(3)) <= max(tolerance, 1)
+
+        for i in range(len(colours)):
+            if i == at or not same_cast(tuple(colours[i])):
+                continue
+
+            colours[i] = cleared
+            folded.append(i)
+
+            for k, index in enumerate(indices):
+                if index == i:
+                    indices[k] = at
+
         for i, keyed_texel in enumerate(mask):
             if keyed_texel:
                 indices[i] = at
 
         background = {"index": at,
+                      "folded": folded,
                       "keyed": sum(1 for m in mask if m),
                       "stray": sum(1 for i, v in enumerate(indices)
                                    if v == at and not mask[i]),
@@ -374,6 +429,10 @@ def main(argv=None):
     ap.add_argument("--transparent-tolerance", type=int, default=0, metavar="N",
                     help="per-channel slack when matching the colour, 0..255 "
                          "(default 0 = exact; a soft/anti-aliased edge needs more)")
+    ap.add_argument("--transparent-chroma", type=int, default=None, metavar="N",
+                    help="key by COLOUR CAST instead of per-channel distance: a "
+                         "texel whose (r-g, b-g) is within N of the backdrop's. "
+                         "Catches a soft blended edge without eating grey art")
     ap.add_argument("--protect", metavar="RRGGBB[,RRGGBB...]", default=None,
                     help="colours the page's 16 MUST keep (headlight greys), "
                          "evicting the least-used colour instead")
@@ -400,7 +459,8 @@ def main(argv=None):
     blob, colours, indices, error, background = bake_page(
         pixels, key=key, tolerance=args.transparent_tolerance, mask=mask,
         palette=palette, protect=protect,
-        protect_tolerance=args.protect_tolerance)
+        protect_tolerance=args.protect_tolerance,
+        chroma=args.transparent_chroma)
 
     path = write_page(os.path.abspath(args.bank), args.set, blob, indices,
                       colours, preview=not args.no_preview)

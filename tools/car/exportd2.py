@@ -1094,6 +1094,14 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
         warnings.append("sound %s: %d Hz is outside the SPU range; resampled to "
                         "%d" % (label, clamped, rate))
 
+    # A bank sample has no gain of its own: the engine's channel volume is the
+    # same for every car, so an un-normalised WAV plays quietly next to retail's.
+    samples, had_peak, gain = vag.normalise(samples)
+
+    if gain != 1.0:
+        warnings.append("sound %s: normalised peak %d -> %d (x%.2f)"
+                        % (label, had_peak, int(0.9 * 32767), gain))
+
     # 16 bytes per 28 samples: how many samples fit the byte budget
     limit = (budget // vag.BLOCK_BYTES) * vag.SAMPLES_PER_BLOCK
 
@@ -1104,8 +1112,10 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
                            limit / float(rate or 1), budget))
         samples = samples[:limit]
 
-    data, count, rms = vag.encode(samples,
-                                  loop=bool(spec.get("loop")))
+    loop_from = int(float(spec.get("loop_from") or 0) * rate)
+
+    data, count, rms = vag.encode(samples, loop=bool(spec.get("loop")),
+                                  loop_from=loop_from)
 
     if rms > 4000:
         warnings.append("sound %s: encode error is high (rms %.0f) - the sample "
@@ -1113,7 +1123,7 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
                         % (label, rms))
 
     return {"data": data, "rate": rate, "loop": 1 if spec.get("loop") else 0,
-            "samples": count}
+            "samples": count, "rate_field": vag.rate_field(rate)}
 
 
 def build_sounds_body(specs, warnings):
@@ -1168,7 +1178,7 @@ def build_sounds_body(specs, warnings):
 
         for sample in (engine, idle, third):
             rows.append((len(payload), len(sample["data"]), sample["loop"],
-                         sample["rate"]))
+                         sample["rate_field"]))
             payload.extend(sample["data"])
 
         # pad the payload to a 4-byte boundary so the next entry starts aligned
@@ -1183,7 +1193,7 @@ def build_sounds_body(specs, warnings):
         body += payload
 
         warnings.append("sound model %d: %d bytes (engine %d, idle %d, third "
-                        "%d) at %d/%d/%d Hz"
+                        "%d), rate fields %d/%d/%d"
                         % (model, len(rows) and sum(r[1] for r in rows),
                            rows[0][1], rows[1][1], rows[2][1],
                            rows[0][3], rows[1][3], rows[2][3]))
@@ -1754,9 +1764,9 @@ def verify_sounds(blob, specs):
                 problems.append("model %d sample %d runs past the segment"
                                 % (model, i))
 
-            if not vag.MIN_RATE <= rate <= vag.MAX_RATE:
-                problems.append("model %d sample %d has rate %d"
-                                % (model, i, rate))
+            if not 1 <= rate <= 4 * vag.MAX_RATE:
+                problems.append("model %d sample %d has rate field %d, which no "
+                                "pitch scale can use" % (model, i, rate))
 
     got = d2_lump(blob, LUMP_CAR_SIRENS)
     wanted = sorted(int(m) for m in (specs.get("sirens") or []))
