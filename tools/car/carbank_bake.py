@@ -374,6 +374,9 @@ def _resolved_sample(sounds, key, role, defaults):
 
     level = spec.get("level")
     out["level"] = float(level) if level is not None else defaults["peak"]
+    rms = spec.get("rms")
+    out["rms"] = (float(rms) if rms is not None
+                  else float(defaults.get("rms") or 0.0))
 
     # a per-sample rate wins over a per-sample percentage, which wins over the
     # sounds-level percentage (engine_pct / idle_pct); each is already validated
@@ -423,7 +426,7 @@ def sound_specs(bank, warnings):
 
         defaults = dict(bankjson.SOUND_DEFAULTS)
 
-        for key in ("peak", "max_rate", "sample_bytes"):
+        for key in ("peak", "rms", "max_rate", "sample_bytes"):
             if getattr(sounds, key) is not None:
                 defaults[key] = getattr(sounds, key)
 
@@ -438,6 +441,7 @@ def sound_specs(bank, warnings):
         # the bank-wide knobs travel too: verify_sounds and --complete compare
         # against what the bake actually used
         entry["peak"] = defaults["peak"]
+        entry["rms"] = defaults["rms"]
         entry["max_rate"] = defaults["max_rate"]
         entry["sample_bytes"] = defaults["sample_bytes"]
 
@@ -1145,6 +1149,11 @@ def _completed_sample(role, entry, sounds):
                         if block.get("peak") is not None
                         else bankjson.SOUND_DEFAULTS["peak"])
 
+    if out.get("rms") is None:
+        out["rms"] = (block.get("rms")
+                      if block.get("rms") is not None
+                      else bankjson.SOUND_DEFAULTS["rms"])
+
     if out.get("loop_from") is None:
         out["loop_from"] = (block.get("loop_from")
                             if block.get("loop_from") is not None
@@ -1233,8 +1242,9 @@ def complete_declaration(js, out=None, dry_run=False):
             # keep the key order stable: wav first, then the knobs
             ordered = {"wav": after["wav"]}
 
-            for key in ("level", "force", "normalise", "gain_db", "rate",
-                        "rate_pct", "loop", "loop_from", "trim", "fade_out"):
+            for key in ("level", "rms", "force", "normalise", "gain_db",
+                        "rate", "rate_pct", "loop", "loop_from", "trim",
+                        "fade_out"):
                 if key in after:
                     ordered[key] = after[key]
 

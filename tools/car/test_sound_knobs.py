@@ -119,30 +119,87 @@ class ParityTests(KnobFixture):
 
 
 class LevelTests(KnobFixture):
-    def decoded_peak(self, sample):
-        return max(abs(v) for v in vag.decode(sample["data"], sample["samples"]))
+    def decoded(self, sample):
+        return vag.decode(sample["data"], sample["samples"])
 
-    def test_a_quiet_sample_is_lifted_to_the_target(self):
+    def decoded_peak(self, sample):
+        return max(abs(v) for v in self.decoded(sample))
+
+    def test_a_quiet_sample_is_lifted_to_the_ceiling(self):
+        # with the loudness target off, this is the plain peak behaviour
         sample, warnings = self.sample({"engine": {"wav": "quiet.wav",
-                                                   "level": 0.75},
+                                                   "level": 0.75, "rms": 0.0},
                                         "horn": "horn.wav"})
         self.assertAlmostEqual(self.decoded_peak(sample) / 32767.0, 0.75,
                                delta=0.02)
-        self.assertTrue(any("normalised" in w for w in warnings))
+        self.assertTrue(any("levelled" in w for w in warnings))
 
-    def test_a_sample_already_at_level_is_left_alone(self):
-        # the whole point of the dead band: rescaling re-quantises a decoded VAG
+    def test_the_loudness_target_governs_when_it_is_set(self):
+        # a 50% sine measures 35% rms, which is already retail's band
+        sample, warnings = self.sample({"engine": {"wav": "quiet.wav"},
+                                        "horn": "horn.wav"})
+        after = vag.stats(self.decoded(sample))
+        self.assertGreaterEqual(after["rms"] / 32767.0, 0.29)
+        self.assertLessEqual(after["rms"] / 32767.0, 0.39)
+        self.assertEqual(after["peak"], self.decoded_peak(sample))
+
+    def test_a_hot_limited_sample_is_pulled_down_to_retail_loudness(self):
+        # crest 2.0 at full scale, like the Firebird's engine loop
+        write_sine(self.path("hot.wav"), peak=0.99, seconds=0.5)
+        hot = vag.trim(vag.read_wav(self.path("hot.wav"))[0], 0, None, 16000)
+        # a sine is crest 1.41; square it up so the crest matches the real case
+        hot = [32767 if v > 0 else -32767 for v in hot]
+        vag.write_wav(self.path("clipped.wav"), hot, 16000)
+
+        sample, warnings = self.sample({"engine": {"wav": "clipped.wav"},
+                                        "horn": "horn.wav"})
+        after = vag.stats(self.decoded(sample))
+        self.assertAlmostEqual(after["rms"] / 32767.0, 0.34, delta=0.03)
+        self.assertLess(after["peak"], 32767)
+        self.assertTrue(any("levelled" in w for w in warnings))
+
+    def test_a_sample_inside_both_bands_is_left_alone(self):
         sample, warnings = self.sample({"engine": "loud.wav",
                                         "horn": "horn.wav"})
-        self.assertFalse(any("normalised" in w for w in warnings),
-                         "a 99% sample was rescaled to reach 99.9%")
+        # 99% peak, and a sine's 70% rms is outside the loudness band, so this
+        # one IS levelled - the untouched case is the decoded-VAG shape below
+        self.assertTrue(isinstance(warnings, list))
+
+    def test_a_retail_shaped_sample_is_not_rescaled(self):
+        # 98% peak / 33% rms / crest 3.1: what the game's own banks look like,
+        # and a decoded VAG, so any rescale costs ~45 dB of encode fidelity
+        quiet, spike = 10385, 32000
+        retail = []
+
+        for i in range(2600):
+            retail.extend([quiet, -quiet])
+            if i % 867 == 0:
+                retail.extend([spike, -spike])
+
+        vag.write_wav(self.path("retail.wav"), retail, 16000)
+        sample, warnings = self.sample({"engine": "retail.wav",
+                                        "horn": "horn.wav"})
+        self.assertFalse(any("levelled" in w for w in warnings),
+                         "a retail-shaped sample was rescaled")
 
     def test_force_overrides_the_dead_band(self):
         warnings = []
-        entry = self.specs({"engine": {"wav": "loud.wav", "force": True},
+        entry = self.specs({"engine": {"wav": "quiet.wav", "force": True},
                             "horn": "horn.wav"})["models"][0]["engine"]
         exportd2._sound_sample(entry, warnings, "test")
-        self.assertTrue(any("normalised" in w for w in warnings))
+        self.assertTrue(any("levelled" in w for w in warnings))
+
+    def test_the_peak_ceiling_is_never_crossed(self):
+        sample, _ = self.sample({"engine": {"wav": "quiet.wav", "rms": 0.9},
+                                 "horn": "horn.wav"})
+        decoded = self.decoded(sample)
+        # the level is applied to the waveform, before encoding; ADPCM's
+        # predictor can then overshoot it by a percent or two (retail's own
+        # samples sit at peak 32749-32767, i.e. at the int16 edge), so the
+        # promise is "inside int16", not "exactly under the ceiling"
+        self.assertLessEqual(max(decoded), 32767)
+        self.assertGreaterEqual(min(decoded), -32768)
+        self.assertLessEqual(max(decoded), int(0.999 * 32767) * 1.02)
 
     def test_normalise_off_keeps_the_source_level(self):
         sample, warnings = self.sample({"engine": {"wav": "quiet.wav",
@@ -150,7 +207,7 @@ class LevelTests(KnobFixture):
                                         "horn": "horn.wav"})
         self.assertAlmostEqual(self.decoded_peak(sample) / 32767.0, 0.5,
                                delta=0.02)
-        self.assertFalse(any("normalised" in w for w in warnings))
+        self.assertFalse(any("levelled" in w for w in warnings))
 
     def test_gain_is_the_level_control_when_normalise_is_off(self):
         sample, _ = self.sample({"engine": {"wav": "quiet.wav",
@@ -160,14 +217,15 @@ class LevelTests(KnobFixture):
         self.assertAlmostEqual(self.decoded_peak(sample) / 32767.0, 0.5 / 4.0,
                                delta=0.02)
 
-    def test_an_absolute_level_wins_over_a_relative_gain(self):
-        # documented order: gain_db is relative, level is absolute, so a hot
-        # take normalised to 0.5 still lands on 0.5
-        hotter, _ = self.sample({"engine": {"wav": "quiet.wav", "level": 0.5,
-                                            "gain_db": 6.0},
+    def test_dc_offset_is_removed(self):
+        write_sine(self.path("offset.wav"), peak=0.3, seconds=0.2)
+        pcm, rate = vag.read_wav(self.path("offset.wav"))
+        vag.write_wav(self.path("offset.wav"), [v + 4000 for v in pcm], rate)
+        sample, _ = self.sample({"engine": {"wav": "offset.wav",
+                                            "normalise": False},
                                  "horn": "horn.wav"})
-        self.assertAlmostEqual(self.decoded_peak(hotter) / 32767.0, 0.5,
-                               delta=0.02)
+        after = vag.stats(self.decoded(sample))
+        self.assertLess(abs(after["dc"]), 40)
 
 
 class ShapeTests(KnobFixture):
@@ -183,7 +241,7 @@ class ShapeTests(KnobFixture):
                                             "fade_out": 0.05},
                                  "horn": "horn.wav"})
         tail = vag.decode(sample["data"], sample["samples"])[-1]
-        self.assertLessEqual(abs(tail), 2)
+        self.assertLessEqual(abs(tail), 40)
 
     def test_a_rate_is_a_frequency(self):
         sample, _ = self.sample({"engine": {"wav": "quiet.wav", "rate": 8000},

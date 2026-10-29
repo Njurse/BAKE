@@ -102,6 +102,9 @@ def main(argv=None):
     ap.add_argument("--level", type=float, default=None, metavar="0..1",
                     help="target peak (default %.3f, retail's own level)"
                     % vag.DEFAULT_PEAK)
+    ap.add_argument("--rms", type=float, default=None, metavar="0..1",
+                    help="loudness target (default %.2f; retail measures "
+                         "0.29-0.39)" % vag.DEFAULT_RMS)
     ap.add_argument("--force", action="store_true",
                     help="rescale even when the sample is already at level")
     ap.add_argument("--gain-db", type=float, default=0.0, metavar="N",
@@ -149,14 +152,27 @@ def main(argv=None):
         samples = vag.gain_db(samples, args.gain_db)
         print("  %+.1f dB" % args.gain_db)
 
+    samples = vag.remove_dc(samples)
+    before = vag.stats(samples)
+    print("  source: peak %d (%.0f%%), rms %.0f%% crest %.1f%s"
+          % (before["peak"], 100.0 * before["peak"] / 32767.0,
+             100.0 * before["rms"] / 32767.0, before["crest"],
+             ", CLIPPED" if before["clipped"] else ""))
+
     level = vag.DEFAULT_PEAK if args.level is None else args.level
-    samples, top, applied = vag.normalise(samples, level, force=args.force)
+    target = vag.DEFAULT_RMS if args.rms is None else args.rms
+    samples, before, applied = vag.level(samples, peak=level, rms=target,
+                                         force=args.force)
+    after = vag.stats(samples)
 
     if applied != 1.0:
-        print("  level: peak %d -> %d (x%.3f)" % (top, int(level * 32767), applied))
+        print("  level: x%.3f (%+.1f dB) - peak %d, rms %.0f%%"
+              % (applied, 20.0 * __import__("math").log10(applied),
+                 after["peak"], 100.0 * after["rms"] / 32767.0))
     else:
-        print("  level: left at %d (within the dead band; --force to rescale)"
-              % top)
+        print("  level: left alone (peak %.0f%%, rms %.0f%%; --force to rescale)"
+              % (100.0 * after["peak"] / 32767.0,
+                 100.0 * after["rms"] / 32767.0))
 
     loop_from = int(args.loop_from * rate)
     data, count, rms = vag.encode(samples, loop=args.loop, loop_from=loop_from)

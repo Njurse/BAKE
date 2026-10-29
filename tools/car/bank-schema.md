@@ -184,7 +184,8 @@ Per car, in the same shape for every model slot the bank carries:
 | `cop` | no (default false) | this car is a police vehicle |
 | `engine_pct` / `idle_pct` | no (100) | the source rate as a percentage, the Driver 1 beta knob |
 | `loop_from` | no (0) | seconds into the looping samples where the loop starts |
-| `peak` | no (0.999) | block-wide target level for every sample |
+| `peak` | no (0.999) | block-wide peak **ceiling** for every sample |
+| `rms` | no (0.34) | block-wide **loudness** target (retail measures 29-39%); `0` means peak only |
 | `max_rate` | no (16000) | block-wide rate ceiling |
 | `sample_bytes` | no (16384) | per-sample SPU byte budget |
 
@@ -192,12 +193,14 @@ Each of `engine` / `idle` / `horn` / `siren` is either a path or an object with
 that path as `wav` plus its own settings:
 
 ```json
-"engine": { "wav": "sounds/engine.wav", "level": 0.999, "normalise": true,
-            "force": false, "gain_db": 0.0, "rate": null, "rate_pct": 100,
-            "loop": true, "loop_from": 0.0, "trim": null, "fade_out": 0.0 }
+"engine": { "wav": "sounds/engine.wav", "level": 0.999, "rms": 0.34,
+            "normalise": true, "force": false, "gain_db": 0.0,
+            "rate": null, "rate_pct": 100, "loop": true,
+            "loop_from": 0.0, "trim": null, "fade_out": 0.0 }
 ```
 
-`level` (target peak), `normalise` (false = keep the source level),
+`level` (peak ceiling), `rms` (loudness target; `0` = peak only),
+`normalise` (false = keep the source level),
 `force` (rescale even when already at level), `gain_db`, `rate` (an exact
 frequency, which wins over `rate_pct`), `rate_pct`, `loop`, `loop_from`,
 `trim` (`[start, end]` seconds) and `fade_out` (seconds). The defaults are the

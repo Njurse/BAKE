@@ -31,8 +31,8 @@ CAR_KEYS = {
 # out loud what it is getting, and filling them in by hand reproduces the bake
 # exactly (SOUND_DEFAULTS / SOUND_SAMPLE_DEFAULTS are the one source for both).
 SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct",
-              "loop_from", "peak", "max_rate", "sample_bytes"}
-SOUND_SAMPLE_KEYS = {"wav", "level", "force", "normalise", "gain_db",
+              "loop_from", "peak", "rms", "max_rate", "sample_bytes"}
+SOUND_SAMPLE_KEYS = {"wav", "level", "rms", "force", "normalise", "gain_db",
                      "rate", "rate_pct", "loop", "loop_from", "trim",
                      "fade_out"}
 
@@ -41,7 +41,8 @@ SOUND_DEFAULTS = {
     "engine_pct": 100,
     "idle_pct": 100,
     "loop_from": 0.0,
-    "peak": 0.999,      # retail's own car banks sit at 100% (sound_level_diag)
+    "peak": 0.999,      # the ceiling: retail's own banks peak at 100%
+    "rms": 0.34,        # the loudness: retail measures 29-39% rms, mid 34%
     "max_rate": 16000,  # retail's rate, and the SPU budget is sized for it
     "sample_bytes": 16384,
 }
@@ -49,7 +50,8 @@ SOUND_DEFAULTS = {
 # per-sample defaults; `loop` is decided by the sample's ROLE (the third sample
 # is a one-shot horn, the other two are loops), so it is not listed here.
 SOUND_SAMPLE_DEFAULTS = {
-    "level": None,      # None = the bank's `peak`
+    "level": None,      # None = the bank's `peak` ceiling
+    "rms": None,        # None = the bank's `rms` loudness target
     "force": False,     # scale even inside the level dead band
     "normalise": True,  # False = keep the source level; gain_db only
     "gain_db": 0.0,
@@ -384,6 +386,7 @@ class Sounds(object):
         # loop with an attack otherwise repeats the attack every cycle
         self.loop_from = data.get("loop_from")
         self.peak = data.get("peak")
+        self.rms = data.get("rms")
         self.max_rate = data.get("max_rate")
         self.sample_bytes = data.get("sample_bytes")
 
@@ -401,6 +404,14 @@ class Sounds(object):
                   "%r is not a target level between 0.05 and 1.0 - a bank "
                   "sample has no gain of its own, so this IS its volume"
                   % (self.peak,))
+
+        if self.rms is not None and (not isinstance(self.rms, (int, float))
+                                     or not 0 <= self.rms <= 1.0
+                                     or 0 < self.rms < 0.05):
+            _fail(where, "sounds.rms",
+                  "%r is not a loudness target: 0 (peak only) or 0.05-1.0 of "
+                  "full scale, where retail's own car samples measure 0.29-0.39"
+                  % (self.rms,))
 
         if self.max_rate is not None and (not isinstance(self.max_rate, int)
                                           or not 4000 <= self.max_rate <= 44100):
@@ -461,6 +472,7 @@ class Sounds(object):
         field = "sounds." + name
         path = file_of(where, field + ".wav", entry["wav"], required=True)
         level = entry.get("level")
+        rms = entry.get("rms")
         rate = entry.get("rate")
         trim = entry.get("trim")
         fade = entry.get("fade_out")
@@ -471,6 +483,13 @@ class Sounds(object):
                                   or not 0.05 <= level <= 1.0):
             _fail(where, field + ".level",
                   "%r is not a target level between 0.05 and 1.0" % (level,))
+
+        if rms is not None and (not isinstance(rms, (int, float))
+                                or not 0 <= rms <= 1.0
+                                or 0 < rms < 0.05):
+            _fail(where, field + ".rms",
+                  "%r is not a loudness target: 0 (peak only) or 0.05-1.0"
+                  % (rms,))
 
         if rate is not None and (not isinstance(rate, int)
                                  or not 4000 <= rate <= 44100):
