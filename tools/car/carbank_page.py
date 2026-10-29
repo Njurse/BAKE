@@ -71,6 +71,40 @@ def _load_rgb(path):
         return pixels, alpha
 
 
+def stray_key_entries(rows, key, tolerance=0, chroma=None, transparent=None):
+    """Palette entries that still PAINT the key colour, on a page that keys it.
+
+    The check the bake makes after the fact: whatever the fold did, a row that
+    can still draw the backdrop is a bug waiting for a texel to land on it. The
+    transparent index itself is exempt - it is 0x0000, which paints nothing.
+    """
+    if rows is None or not rows or key is None:
+        return []
+
+    exempt = set(transparent or ())
+    rgb = fourbpp.clut_rgb(rows[0])
+    found = []
+
+    for index in range(len(rgb)):
+        if index in exempt:
+            continue
+
+        colour = rgb[index]
+
+        if chroma is not None:
+            match = (abs((colour[0] - colour[1]) - (key[0] - key[1])) <= chroma
+                     and abs((colour[2] - colour[1]) - (key[2] - key[1]))
+                     <= chroma)
+        else:
+            match = max(abs(colour[c] - key[c])
+                        for c in range(3)) <= max(tolerance, 1)
+
+        if match:
+            found.append(index)
+
+    return found
+
+
 def key_mask(pixels, key, tolerance=0, chroma=None):
     """Which texels are the backdrop.
 
@@ -344,17 +378,33 @@ def write_page(bank_dir, setid, blob, indices, colours, preview=True):
         f.write(blob)
 
     if preview:
-        import exportd2
+        import math
+
+        from PIL import Image
 
         png = os.path.join(pages_dir, "PAGE_%d.png" % setid)
         pal = fourbpp.clut_rgb(fourbpp.rgb_to_clut(colours[:16]))
+        rows, _raw = pages1.read_page(blob, 0, len(blob))
+        transparent = set()
+
+        # The transparent index is whichever entry the page writes as 0x0000.
+        # Its preview pixel must be FULLY TRANSPARENT rather than the colour
+        # 0x0000 happens to paint - painting it black is what made a preview
+        # look like art, and re-baking one re-introduced the backdrop colour.
+        for index in range(16):
+            word = struct.unpack_from("<H", rows[0], index * 2)[0] if rows else 1
+
+            if word == 0:
+                transparent.add(index)
+
         pix = bytearray()
 
         for i in indices:
             r, g, b = pal[i]
-            pix.extend((r, g, b))
+            pix.extend((r, g, b, 0 if i in transparent else 255))
 
-        exportd2.write_png_rgb(png, fourbpp.PAGE_W, fourbpp.PAGE_H, pix)
+        img = Image.frombytes("RGBA", (fourbpp.PAGE_W, fourbpp.PAGE_H), bytes(pix))
+        img.save(png)
 
     return path
 
@@ -382,6 +432,83 @@ def hex_colour(text):
         return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))
     except ValueError:
         raise SystemExit("%r is not a hex colour (rrggbb)" % (text,))
+
+
+def load_pixels(path):
+    """(width, height, RGB texels, alpha or None) for an image of ANY size.
+
+    `_load_rgb` insists on a full 256x256 page because scaling one silently
+    chooses a filter. A sprite is a different thing: a 60x60 wheel is meant to be
+    60x60, and it gets composited into a page rather than being one.
+    """
+    from PIL import Image
+
+    with Image.open(path) as img:
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+        alpha = None
+
+        if has_alpha:
+            rgba = img.convert("RGBA")
+            src = list(rgba.getdata())
+            pixels = [(p[0], p[1], p[2]) for p in src]
+            alpha = [p[3] for p in src]
+        else:
+            pixels = list(img.convert("RGB").getdata())
+
+        return img.size[0], img.size[1], pixels, alpha
+
+
+def sprite_mask(texels, alpha):
+    """Which sprite texels are see-through: alpha, else the top-left colour.
+
+    A wheel sprite is authored one of two ways and both have to work: an image
+    with a real alpha channel, or a flat backdrop colour in the corner. The
+    corner is the same convention `--transparent auto` uses for a page, so a
+    sprite behaves like a little page.
+    """
+    if alpha is not None and any(a < 128 for a in alpha):
+        return [a < 128 for a in alpha]
+
+    if not texels:
+        return []
+
+    key = texels[0]
+    return [max(abs(t[c] - key[c]) for c in range(3)) <= 8 for t in texels]
+
+
+def composite(pixels, width, height, sprite, sprite_w, sprite_h, island,
+              sprite_transparent, backdrop):
+    """Write a sprite into a page island; return the texels that are backdrop.
+
+    The island's rect is filled completely: sprite inside it, and `backdrop`
+    everywhere else. That is the point - a page that already carried *anything*
+    at the islands rect (a stale sprite, the donor's pink square) is replaced
+    rather than drawn over, so the declared sprite is the only thing that can
+    end up in the wheel.
+
+    Returns the set of page texel indices that must be masked transparent (the
+    sprite's own see-through texels, plus the fill outside the sprite).
+    """
+    x0, y0, x1, y1 = [int(round(v)) for v in island]
+    masked = set()
+
+    for y in range(max(0, y0), min(height, y1)):
+        for x in range(max(0, x0), min(width, x1)):
+            index = y * width + x
+            sx = x - x0
+            sy = y - y0
+
+            if sx < sprite_w and sy < sprite_h:
+                src = sy * sprite_w + sx
+
+                if not sprite_transparent[src]:
+                    pixels[index] = sprite[src]
+                    continue
+
+            pixels[index] = backdrop
+            masked.add(index)
+
+    return masked
 
 
 def _parse_key(text, pixels, alpha):

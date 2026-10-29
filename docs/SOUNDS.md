@@ -60,8 +60,9 @@ Both are legal; the long form is what `carbank_bake --complete` writes:
 "sounds": {
   "engine": { "wav": "sounds/engine.wav", "level": 0.999, "rms": 0.34,
               "normalise": true, "force": false, "gain_db": 0.0,
-              "rate": null, "rate_pct": 100, "loop": true,
-              "loop_from": 0.0, "trim": null, "fade_out": 0.0 },
+              "rate": null, "rate_pct": 100, "pitch": 2.0,
+              "loop": "auto", "loop_from": 0.0, "loop_to": null,
+              "trim": null, "fade_out": 0.0 },
   "idle":   { "wav": "sounds/idle.wav" },
   "horn":   { "wav": "sounds/horn.wav", "loop": false },
   "cop": false,
@@ -79,13 +80,56 @@ Both are legal; the long form is what `carbank_bake --complete` writes:
 | `gain_db` | `0.0` | relative gain, applied before the level |
 | `rate` | `null` (= the source rate) | exact output frequency, 4000..44100; wins over `rate_pct` |
 | `rate_pct` | `100` | the source rate as a percentage, the Driver 1 beta knob |
-| `loop` | by role (engine/idle `true`, third `false`) | mark the VAG as looping |
-| `loop_from` | the block's `loop_from` (0) | seconds into the sample where the loop starts |
+| `loop` | by role (engine/idle `true`, third `false`) | mark the VAG as looping; `"auto"` also searches for the loop points whose join is quietest |
+| `loop_from` | the block's `loop_from` (0) | seconds into the sample where the loop starts - the attack before it plays once |
+| `loop_to` | `null` (the end) | seconds; cut the sample there and end the loop on it |
+| `pitch` | `1.0` | scales ONLY the declared rate, so the pitch the game asks for lands on the recording - see below |
 | `trim` | `null` | `[start, end]` seconds to keep - drops silence, and buys byte budget back |
 | `fade_out` | `0.0` | linear fade over the last N seconds, so a one-shot does not click |
 
 Block-wide: `peak`, `rms`, `max_rate` (byte-budget ceiling, default 16000)
 and `sample_bytes` (per-sample cap, default 16384).
+
+### Pitch: the game asks for less than the recording
+
+`gamesnd.c` drives a car's two loops by a pitch that depends on revs:
+
+    pitch = revs / 4 + 4096   (idle)     -> ~1.0x  .. 1.25x of the declared rate
+    pitch = revs / 4 + 1500   (revving)  -> ~0.37x .. 0.62x
+
+so a rev loop declared at the rate it was recorded at plays two octaves down
+when the car is moving, and what is left in the audible band is the encoder's
+noise - the "driving on gravel" sound. `pitch` multiplies the rate FIELD only
+(the bytes are untouched, so nothing is re-encoded): the Firebird's engine
+loop declares `pitch: 2.0`, which puts it at 0.73x-1.23x - 108-183 Hz instead
+of 55-92 Hz. The idle sample is asked for at ~1.0x and needs no pitch.
+
+### Loops have to meet
+
+The SPU cannot crossfade: the loop wraps from the end of the block stream
+back to the marker, so the waveform must join itself. `loop: "auto"` searches
+block-aligned pairs and keeps the one whose join is quietest (value AND
+slope), trimming the tail to it. On the Firebird that took the engine's join
+from a jump of 10479 counts to 26 (played back: 228 after quantisation) and
+the idle's from 2480 to 441. A join of a few hundred out of 32767 is
+inaudible; the old one was 22% of full scale, once per cycle.
+
+### Encoder noise
+
+The block encoder feeds its own quantisation error forward (`NOISE_SHAPING`),
+which is decoder-compatible - only the choice of nibble changes. Measured on
+the Firebird's engine loop, SNR by band:
+
+| shaping | 0-1 kHz | 1-3 kHz | 3-8 kHz |
+| --- | --- | --- | --- |
+| 0.0 | 40.8 dB | 24.6 dB | 15.2 dB |
+| 0.5 | 42.7 dB | 26.4 dB | 13.0 dB |
+| 0.7 | 43.6 dB | 26.9 dB | 11.8 dB |
+
+0.5 is the default: about +2 dB where an engine lives, about -2 dB above
+3 kHz where the sample has almost no content. A sample already on the ADPCM
+lattice (a decoded VAG) is unaffected either way. Lowering the encode rate
+was measured and is worse (34.7 dB at 16 kHz against 26.3 dB at 8 kHz).
 
 They are applied in a fixed order, and the order is audible:
 

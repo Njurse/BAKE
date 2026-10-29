@@ -327,6 +327,13 @@ def _quantise(residual, step_bits):
     return q
 
 
+# How much of the previous quantisation error is fed back into the next
+# residual. 0 is plain rounding. A first-order loop pushes the error towards the
+# high end of the band and leaves the low end cleaner; measured on the Firebird's
+# engine loop it is worth a few dB in 0-1 kHz, which is where a car engine lives.
+NOISE_SHAPING = 0.5
+
+
 def _encode_block(samples, prev1, prev2):
     """One 16-byte block: the best (filter, shift) over 28 samples."""
     best = None
@@ -335,16 +342,21 @@ def _encode_block(samples, prev1, prev2):
         for shift in range(13):
             step_bits = 12 - shift
             err = 0
+            shaped = 0.0
             s1, s2 = prev1, prev2
             nibbles = []
 
             for s in samples:
                 predicted = (s1 * c1 + s2 * c2 + 32) >> 6
                 residual = s - predicted
-                q = _quantise(residual, step_bits)
+                # error feedback: aim at what the last step got wrong, so the
+                # loop's own error cancels instead of accumulating
+                q = _quantise(int(round(residual + shaped)), step_bits)
                 decoded = _clamp16(predicted + q * (1 << step_bits)
                                    if step_bits > 0 else predicted + q)
-                err += (s - decoded) * (s - decoded)
+                step_error = s - decoded
+                shaped = NOISE_SHAPING * step_error
+                err += step_error * step_error
                 nibbles.append(q)
                 s2 = s1
                 s1 = decoded
@@ -372,7 +384,75 @@ def _encode_block(samples, prev1, prev2):
     return bytes(block), nibbles
 
 
-def encode(samples, loop=False, loop_from=0):
+def seam_error(samples, start, end):
+    """How badly the waveform jumps from `end` back to `start`.
+
+    Value first, then slope: a join that matches in level but not in direction
+    still clicks, just less. Both are in sample units, so the number is directly
+    comparable across candidates.
+    """
+    n = len(samples)
+
+    if not (0 <= start < n) or not (0 <= end < n):
+        return 1 << 30
+
+    a = samples[start]
+    b = samples[end]
+    delta = abs(a - b)
+
+    if start + 1 < n and end + 1 < n:
+        delta += abs((samples[start + 1] - a) - (samples[end + 1] - b))
+
+    return delta
+
+
+def find_loop(samples, search_from=0.0, rate=DEFAULT_RATE, align=SAMPLES_PER_BLOCK,
+              tail=0.02):
+    """The block-aligned (start, end) whose join is quietest, or None.
+
+    `search_from` is the earliest loop start (seconds) - the attack before it is
+    played once and never repeated, which is what `loop_from` is for. `tail`
+    keeps the loop end off the very last sample so the marker block can carry it.
+    The engine can only loop at the block stream's end (the marker is on the last
+    block), so the END of the loop is the end of the sample; the pair found here
+    therefore also decides how much to trim off the tail.
+    """
+    n = len(samples)
+
+    if n < 4 * align:
+        return None
+
+    first = max(align, int(float(search_from or 0.0) * (rate or DEFAULT_RATE)))
+    first = ((first + align - 1) // align) * align
+    keep_tail = max(align, int(float(tail or 0.0) * (rate or DEFAULT_RATE)))
+    last_end = n - keep_tail
+
+    if last_end <= first:
+        return None
+
+    best = None
+
+    # The loop END is the end of the last block in the stream, because that is
+    # where the marker rides - so only block-aligned ends are candidates. Scoring
+    # an arbitrary end measures a join that will never be played: the encoder
+    # pads to the block boundary and the loop then runs over the padding.
+    for loop_end in range(((last_end + align - 1) // align) * align, n + 1, align):
+        end = loop_end - 1
+
+        for start in range(first, min(n - align, first + 40 * align), align):
+            score = seam_error(samples, start, end)
+
+            if best is None or score < best[0]:
+                best = (score, start, end)
+
+    if best is None:
+        return None
+
+    return {"start": best[1], "end": best[2], "seam": best[0],
+            "seconds": (best[2] - best[1]) / float(rate or DEFAULT_RATE)}
+
+
+def encode(samples, loop=False, loop_from=0, loop_end=None):
     """16-bit samples -> VAG blocks (padded to a whole number of blocks).
 
     Returns (payload, sample_count, rms_error). The payload is the raw block
@@ -380,6 +460,12 @@ def encode(samples, loop=False, loop_from=0):
     """
     flags_loop = bool(loop)
     padded = list(samples)
+
+    # The loop END is the end of the block stream (the marker rides the last
+    # block), so a chosen loop end is applied by cutting the tail off here. See
+    # find_loop: a join that does not meet itself clicks once per cycle.
+    if loop_end is not None and 0 < loop_end < len(padded):
+        padded = padded[:loop_end]
     # where the loop begins: after the attack, if the author says so. PsyX reads
     # this marker as the loop start, so it is what stops the whole sample
     # retriggering on every cycle.

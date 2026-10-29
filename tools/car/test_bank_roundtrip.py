@@ -129,11 +129,31 @@ class WheelSegmentTests(unittest.TestCase):
                             "wheel %d offset %d is outside the segment" %
                             (i, offset))
 
-        # the Firebird has no damaged wheel, and that absence is carried as -1
-        # rather than faked with the clean one
-        self.assertEqual(offsets[exportd2.WHEEL_VARIANTS.index("damaged")], -1,
-                         "the bank fakes a damaged wheel it does not have")
-        self.assertNotEqual(offsets[exportd2.WHEEL_VARIANTS.index("clean")], -1)
+        # every variant the declaration names is really in the segment: the
+        # Firebird declares all three (a missing damaged wheel used to fall back
+        # to the host city's pink-backed one)
+        for variant in exportd2.WHEEL_VARIANTS:
+            self.assertNotEqual(offsets[exportd2.WHEEL_VARIANTS.index(variant)],
+                                -1, "the bank is missing the %s wheel" % variant)
+
+    def test_an_undeclared_variant_is_written_as_minus_one(self):
+        """Absence is a -1, never a copy of the clean wheel.
+
+        Tested on the writer rather than on this bank, because this bank now
+        declares all three variants on purpose.
+        """
+        specs = [{"variant": "clean", "set": 2, "island": [0, 0, 60, 60]},
+                 None,
+                 {"variant": "fast", "set": 3, "island": [0, 0, 60, 60]}]
+        body = exportd2.build_wheel_body(specs)
+
+        self.assertIsNotNone(body, "no wheel writer to test")
+        offsets = struct.unpack_from("<3i", body, 4)
+
+        self.assertEqual(offsets[1], -1,
+                         "an undeclared variant is not written as -1")
+        self.assertGreater(offsets[0], 0)
+        self.assertGreater(offsets[2], 0)
 
     def test_a_wheel_names_its_own_page(self):
         body, _size = exportd2.d2_lump(self.blob, exportd2.LUMP_CAR_WHEELS)
@@ -185,8 +205,10 @@ class WheelSegmentTests(unittest.TestCase):
                          {"set": 2, "island": [0, 0, 60, 60]})
         self.assertEqual(records.get("fast"),
                          {"set": 3, "island": [0, 0, 60, 60]})
-        self.assertNotIn("damaged", records,
-                         "the bank has no damaged wheel to declare")
+        # the damaged wheel is declared as the clean one, so a damaged car does
+        # not fall back to the host city's wheel texture
+        self.assertEqual(records.get("damaged"),
+                         {"set": 2, "island": [0, 0, 60, 60]})
 
 
 class WheelSegmentIsAdditiveTests(unittest.TestCase):

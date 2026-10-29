@@ -281,6 +281,60 @@ class ShapeTests(KnobFixture):
         self.assertEqual([f for f in flags if f], [0x01])
 
 
+class LoopAndPitchTests(KnobFixture):
+    def decoded(self, sample):
+        return vag.decode(sample["data"], sample["samples"])
+
+    def marks(self, sample):
+        return [(i, sample["data"][i * vag.BLOCK_BYTES + 1])
+                for i in range(len(sample["data"]) // vag.BLOCK_BYTES)
+                if sample["data"][i * vag.BLOCK_BYTES + 1]]
+
+    def test_auto_loop_picks_a_quiet_join(self):
+        # a 148 Hz sine cut at an arbitrary point joins badly by default
+        write_sine(self.path("loopable.wav"), seconds=0.9, peak=0.6, hz=148.0)
+        plain, _ = self.sample({"engine": {"wav": "loopable.wav"}, "horn": "horn.wav"})
+        auto, warnings = self.sample({"engine": {"wav": "loopable.wav",
+                                                "loop": "auto"},
+                                      "horn": "horn.wav"})
+
+        def seam(sample):
+            starts = [i for i, f in self.marks(sample) if f & 4]
+            start = starts[0] * vag.SAMPLES_PER_BLOCK if starts else 0
+            return vag.seam_error(self.decoded(sample), start,
+                                  len(self.decoded(sample)) - 1)
+
+        self.assertLess(seam(auto), seam(plain),
+                        "the searched loop is not better than the default")
+        self.assertTrue(any("the join drops" in w for w in warnings))
+
+    def test_auto_keeps_the_loop_markers_consistent(self):
+        write_sine(self.path("loopable.wav"), seconds=0.9, peak=0.6, hz=148.0)
+        auto, _ = self.sample({"engine": {"wav": "loopable.wav", "loop": "auto"},
+                               "horn": "horn.wav"})
+        flags = [f for _i, f in self.marks(auto)]
+        self.assertIn(0x04, flags, "no loop start")
+        self.assertIn(0x03, flags, "no loop end")
+
+    def test_loop_to_cuts_the_tail(self):
+        write_sine(self.path("loopable.wav"), seconds=0.9, peak=0.6, hz=148.0)
+        cut, _ = self.sample({"engine": {"wav": "loopable.wav", "loop": True,
+                                         "loop_to": 0.5},
+                              "horn": "horn.wav"})
+        self.assertLessEqual(len(self.decoded(cut)), int(0.5 * 16000) + 28)
+
+    def test_pitch_scales_only_the_rate_field(self):
+        flat, _ = self.sample({"engine": {"wav": "quiet.wav"}, "horn": "horn.wav"})
+        high, warnings = self.sample({"engine": {"wav": "quiet.wav",
+                                                "pitch": 2.0},
+                                      "horn": "horn.wav"})
+
+        self.assertEqual(high["rate_field"], flat["rate_field"] * 2)
+        self.assertEqual(high["data"], flat["data"],
+                         "pitch must not re-encode the sample")
+        self.assertTrue(any("pitch x2.00" in w for w in warnings))
+
+
 class CompleteTests(KnobFixture):
     def complete(self, sounds, dry_run=False):
         js = self.path("bank.json")

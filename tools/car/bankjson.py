@@ -33,8 +33,8 @@ CAR_KEYS = {
 SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct",
               "loop_from", "peak", "rms", "max_rate", "sample_bytes"}
 SOUND_SAMPLE_KEYS = {"wav", "level", "rms", "force", "normalise", "gain_db",
-                     "rate", "rate_pct", "loop", "loop_from", "trim",
-                     "fade_out"}
+                     "rate", "rate_pct", "pitch", "loop", "loop_from",
+                     "loop_to", "trim", "fade_out"}
 
 # bank-wide defaults (a car may override the per-sample ones per sample)
 SOUND_DEFAULTS = {
@@ -56,8 +56,12 @@ SOUND_SAMPLE_DEFAULTS = {
     "normalise": True,  # False = keep the source level; gain_db only
     "gain_db": 0.0,
     "rate": None,       # None = the source rate, capped at max_rate
+    "pitch": 1.0,       # the rate field only: how the GAME's pitch request
+                        # lands. gamesnd.c asks 0.37x..0.62x of it for the
+                        # rev sample and ~1.0x for the idle.
     "rate_pct": 100,
     "loop_from": None,  # None = the sounds-level loop_from
+    "loop_to": None,    # None = the loop runs to the end of the sample
     "trim": None,       # [start, end] seconds
     "fade_out": 0.0,
 }
@@ -78,6 +82,34 @@ MAX_SLOT = 12
 
 
 class BankError(Exception):
+    """A bank.json that cannot be used, with the file and field named."""
+
+# Folders the BAKE writes into. A declaration that points at one of these is
+# pointing at an artefact of a previous bake, not at art.
+OUTPUT_DIRS = ("work", "pages")
+
+# The default `transparent_tolerance` for a page that declares a key. Rendered
+# art never uses one exact backdrop colour, and the antialiased ring around a
+# sprite is where the "leftover pink" lives - see carbank_page.key_mask.
+DEFAULT_KEY_TOLERANCE = 96
+
+
+def _check_not_output(where, field, rel, base):
+    """Refuse a source under a folder the bake writes (see OUTPUT_DIRS)."""
+    if not rel:
+        return
+
+    parts = [p.lower() for p in
+             os.path.normpath(rel).replace("\\", "/").split("/")]
+
+    for folder in OUTPUT_DIRS:
+        if folder in parts[:-1]:
+            _fail(where, field,
+                  "%r is inside %s/, which the bake writes - a source there is a "
+                  "previous bake's output, so an edit to it would be overwritten "
+                  "and the hash would still look current. Point the declaration "
+                  "at the art instead" % (rel, folder))
+
     """A bank.json that cannot be used, with the file and field named."""
 
 
@@ -234,11 +266,22 @@ class Texture(object):
 
         _check_keys(where, field, data, TEXTURE_KEYS, "texture")
 
+        _check_not_output(where, field + ".png", data.get("png"), None)
         self.image = file_of(where, field + ".png", data.get("png"),
                              required=True)
         self.transparent = data.get("transparent")
-        self.transparent_tolerance = data.get("transparent_tolerance", 0)
+        self.transparent_tolerance = data.get("transparent_tolerance")
         self.transparent_chroma = data.get("transparent_chroma")
+
+        if self.transparent_tolerance is None:
+            # A keyed page almost always wants a band, not an exact match: the
+            # blend ring round a sprite is a gradient, and leaving it painted is
+            # the "still a few pink pixels" report. 96 is what carbank_page's
+            # own help recommends for magenta; declared values still win, and an
+            # explicit 0 means "exactly this colour and nothing else".
+            self.transparent_tolerance = (
+                DEFAULT_KEY_TOLERANCE
+                if self.transparent is not None else 0)
         self.palette = data.get("palette")
         self.protect = data.get("protect") or []
 
@@ -318,6 +361,7 @@ def _wheel(where, field, data, file_of):
 
     if isinstance(data, str):
         # the plain form: art but no page, so no wheel model (see Wheel)
+        _check_not_output(where, field, data, None)
         return Wheel(file_of(where, field, data), None, None)
 
     if not isinstance(data, dict):
@@ -328,6 +372,7 @@ def _wheel(where, field, data, file_of):
     # island is stated - a declaration read back out of a bank names the rect and
     # has no image file to point at
     path = file_of(where, field + ".png", data.get("png"))
+    _check_not_output(where, field + ".png", data.get("png"), None)
 
     setid = data.get("set")
 
@@ -491,6 +536,15 @@ class Sounds(object):
                   "%r is not a loudness target: 0 (peak only) or 0.05-1.0"
                   % (rms,))
 
+        pitch = entry.get("pitch")
+
+        if pitch is not None and (not isinstance(pitch, (int, float))
+                                  or not 0.25 <= pitch <= 4.0):
+            _fail(where, field + ".pitch",
+                  "%r is not a pitch factor between 0.25 and 4.0 (it scales the "
+                  "declared rate, so the game's own pitch request lands where "
+                  "the sample was recorded)" % (pitch,))
+
         if rate is not None and (not isinstance(rate, int)
                                  or not 4000 <= rate <= 44100):
             _fail(where, field + ".rate",
@@ -531,9 +585,17 @@ class Sounds(object):
                 _fail(where, field + ".loop_from",
                       "%r is not a non-negative number of seconds" % (lf,))
 
-        if entry.get("loop") is not None and not isinstance(entry["loop"], bool):
+        if entry.get("loop") not in (None, True, False, "auto"):
             _fail(where, field + ".loop",
-                  "%r is not true or false" % (entry["loop"],))
+                  "%r is not true, false or \"auto\" (auto picks the loop points "
+                  "whose join is quietest)" % (entry["loop"],))
+
+        if entry.get("loop_to") is not None:
+            lt = entry["loop_to"]
+
+            if not isinstance(lt, (int, float)) or lt <= 0:
+                _fail(where, field + ".loop_to",
+                      "%r is not a positive number of seconds" % (lt,))
 
         spec = dict(SOUND_SAMPLE_DEFAULTS)
         spec["wav"] = path
