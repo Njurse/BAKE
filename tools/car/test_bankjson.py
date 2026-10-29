@@ -127,7 +127,7 @@ class SoundTests(BankFixture):
         sounds = bank.cars["car1"].sounds
 
         self.assertFalse(sounds.cop)
-        self.assertTrue(sounds.horn.endswith("horn.wav"))
+        self.assertTrue(sounds.horn["wav"].endswith("horn.wav"))
         self.assertIsNone(sounds.siren)
 
     def test_a_cop_car_takes_the_siren_and_no_horn(self):
@@ -138,7 +138,7 @@ class SoundTests(BankFixture):
         sounds = bank.cars["car1"].sounds
 
         self.assertTrue(sounds.cop)
-        self.assertTrue(sounds.siren.endswith("siren.wav"))
+        self.assertTrue(sounds.siren["wav"].endswith("siren.wav"))
         self.assertIsNone(sounds.horn)
 
     def test_a_cop_car_with_a_horn_is_refused(self):

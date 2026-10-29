@@ -42,6 +42,11 @@ NIBBLES_PER_BLOCK = SAMPLES_PER_BLOCK
 MIN_RATE = 4000
 MAX_RATE = 44100
 DEFAULT_RATE = 11025
+# The level a baked sample is lifted to when nothing says otherwise. Measured
+# from the game's own car banks (sound.c sound_level_diag, CHICAGO): they sit at
+# peak 32749-32767, i.e. full scale. Retailed here so wav2vag and a bank bake
+# cannot disagree about what "level" means.
+DEFAULT_PEAK = 0.999
 
 # A bank's `samplerate` IS the sample's rate in Hz, and it is worth writing down
 # why, because the arithmetic is easy to read the wrong way round:
@@ -70,7 +75,7 @@ def rate_from_field(field):
     return int(field)
 
 
-def normalise(samples, peak=0.9, tolerance=0.25):
+def normalise(samples, peak=0.9, tolerance=0.06, force=False):
     """Scale a sample so its loudest point sits at `peak` of full scale.
 
     A bank's samples have no gain of their own: the engine's channel volume is
@@ -81,10 +86,15 @@ def normalise(samples, peak=0.9, tolerance=0.25):
     from a VAG in the first place - a decoded PSX sample sits exactly ON the
     ADPCM lattice - and scaling it by even 3% moves every sample off that
     lattice, so the encoder has to re-quantise and the result measures 30 dB
-    instead of ~76 dB. Measured on the Firebird's own three samples: leaving the
-    gain alone took the idle from 32.6 dB to 76.3 dB and the horn from 24.4 dB to
-    (resampling-limited) 40 dB. So a sample already within `tolerance` of the
-    target level is used as it is; only a quiet one is lifted.
+    instead of ~76 dB. On the Firebird's own three samples the gains the target
+    would have applied were 1.7% (engine), 3.3% (idle) and 5.2% (horn); leaving
+    them alone took the idle from 32.6 dB to 79.3 dB. Hence the 6% band: wide
+    enough for a source that is already at level, narrow enough that a
+    deliberate `level: 0.85` is still honoured (that is a 12% gain). `force`
+    scales anyway, for when the exact level is the point.
+
+    `force` scales even inside the dead band, for the case where the exact
+    level is the point (a sample that must sit 1 dB under another).
 
     Returns (samples, old_peak, applied_gain) - gain 1.0 means untouched.
     """
@@ -96,10 +106,72 @@ def normalise(samples, peak=0.9, tolerance=0.25):
     target = int(peak * 32767)
     gain = target / float(top)
 
-    if abs(gain - 1.0) <= tolerance:
+    if not force and abs(gain - 1.0) <= tolerance:
         return list(samples), top, 1.0
 
-    return [max(-32768, min(32767, int(round(s * gain)))) for s in samples], top, gain
+    return scale(samples, gain), top, gain
+
+
+def scale(samples, gain):
+    """Multiply every sample by `gain`, saturating at int16 bounds."""
+    if gain == 1.0:
+        return list(samples)
+
+    return [max(-32768, min(32767, int(round(s * gain)))) for s in samples]
+
+
+def gain_db(samples, db):
+    """A relative gain in decibels, applied before any level normalisation.
+
+    Kept separate from `level` on purpose: `level` answers "how loud should this
+    sit next to retail", `gain_db` answers "make this take 2 dB hotter than the
+    one it replaced" without changing where the ceiling lands.
+    """
+    if not db:
+        return list(samples)
+
+    return scale(samples, 10.0 ** (float(db) / 20.0))
+
+
+def trim(samples, start=0.0, end=None, rate=DEFAULT_RATE):
+    """Cut a sample to (start, end) seconds - drop the silence or the tail.
+
+    Trimming is the one knob that also buys byte budget back: the SPU write is
+    unchecked (see exportd2._sound_sample), so a loop whose first 300 ms is
+    silence costs 4800 bytes for nothing.
+    """
+    if not start and end is None:
+        return list(samples)
+
+    rate = rate or DEFAULT_RATE
+    a = max(0, int(round(float(start or 0.0) * rate)))
+    b = len(samples) if end is None else int(round(float(end) * rate))
+    b = max(a, min(len(samples), b))
+
+    return list(samples[a:b])
+
+
+def fade_out(samples, seconds, rate=DEFAULT_RATE):
+    """A linear fade over the last `seconds`: a one-shot without a click.
+
+    The engine starts and stops these on demand, and a cut waveform snapped to
+    zero is an audible tick on every horn press.
+    """
+    if not seconds or seconds <= 0:
+        return list(samples)
+
+    n = min(len(samples), int(round(float(seconds) * (rate or DEFAULT_RATE))))
+
+    if n < 2:
+        return list(samples)
+
+    out = list(samples)
+    last = len(out) - 1
+
+    for i in range(n):
+        out[last - i] = int(round(out[last - i] * (i / float(n - 1))))
+
+    return out
 
 
 def _clamp16(v):
