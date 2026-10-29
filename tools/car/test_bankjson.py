@@ -22,11 +22,11 @@ class BankFixture(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="bankjson-")
         self.addCleanup(shutil.rmtree, self.dir)
 
-        for name in ("clean.obj", "low.obj", "atlas.png", "wheel.png",
-                     "engine.wav", "idle.wav", "horn.wav", "siren.wav"):
+        for name in ("clean.obj", "low.obj", "atlas.png", "body.png",
+                     "wheel.png", "engine.wav", "idle.wav", "horn.wav",
+                     "siren.wav"):
             with open(os.path.join(self.dir, name), "w") as f:
                 f.write("x")
-
     def write(self, declare, name="bank.json", computed=None):
         body = dict(computed or {"city": "TEST", "lev": "TEST.LEV",
                                  "lcf": "TEST.LCF", "size": 1})
@@ -217,14 +217,40 @@ class RefusalTests(BankFixture):
 
         self.assertIn("atlas", str(caught.exception))
 
-    def test_per_page_pngs_replace_the_atlas(self):
+    def test_a_textures_map_replaces_the_atlas(self):
+        car = self.car()
+        del car["atlas"]
+        car["textures"] = {"1": "body.png", "2": "wheel.png"}
+
+        bank = bankjson.load(self.write(self.declare(car=car)))
+
+        self.assertEqual([t.set for t in bank.cars["car1"].textures], [1, 2])
+        self.assertTrue(bank.cars["car1"].textures[0].image.endswith("body.png"))
+
+    def test_a_texture_entry_may_carry_its_bake_options(self):
+        car = self.car()
+        del car["atlas"]
+        car["textures"] = {"2": {"png": "wheel.png", "transparent": "auto",
+                                 "transparent_chroma": 128}}
+
+        texture = bankjson.load(self.write(self.declare(car=car)
+                                           )).cars["car1"].textures[0]
+
+        self.assertEqual(texture.set, 2)
+        self.assertEqual(texture.bake_options()["chroma"], 128)
+
+    def test_declaring_pages_is_refused_with_the_replacement_named(self):
+        # a page's png is a bake OUTPUT: declaring it would make the output an
+        # input, and re-baking from a preview is generation loss
         car = self.car()
         del car["atlas"]
         car["pages"] = [{"set": 1, "png": "atlas.png"}]
 
-        bank = bankjson.load(self.write(self.declare(car=car)))
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(car=car)))
 
-        self.assertEqual(bank.cars["car1"].pages[0].set, 1)
+        self.assertIn("TEXTURES", str(caught.exception))
+        self.assertIn("preview", str(caught.exception).lower() + "preview")
 
     def test_a_wheel_crop_must_be_a_rect(self):
         for island in ([0, 0, 0, 60], [0, 0, 60, 60, 60], [0, 0, 60],

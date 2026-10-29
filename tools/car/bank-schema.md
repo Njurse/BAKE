@@ -38,8 +38,7 @@ donor-derived bank (what `basebank.py` builds) and is used as it stands.
         "damaged": null,
         "low":     "source/Firebird_low.obj",
 
-        "atlas":   "source/firebird.png",
-        "pages":   [ { "set": 1, "png": "source/page1.png" } ],
+        "textures": { "1": "source/firebird.png" },
 
         "wheels": {
           "clean":   { "png": "source/wheelclean.png", "set": 2,
@@ -81,7 +80,7 @@ bake writes `-1` for them.
 | `damaged` | no | the crumpled body; absent means the donor's |
 | `low` | no | the low-detail body (LOD); absent means the donor's |
 | `atlas` | one of | a single atlas PNG covering every page, in page order |
-| `pages[]` | one of | `{set, png}` per texture page â€” use this instead of `atlas` when the pages are separate images |
+| `textures` | one of | `{set id: image}` per texture page. Use this instead of `atlas` when the pages are separate images |
 | `wheels.clean` | no | the road wheel: `{png, set, island}` â€” see below |
 | `wheels.damaged` | no | the buckled wheel â€” **omit it cleanly** when the car has none; the bank writes `-1` and the engine keeps the host wheel texture for that variant (`models.c:2743`) |
 | `wheels.fast` | no | the high-speed blur wheel |
@@ -89,35 +88,36 @@ bake writes `-1` for them.
 | `palette` | no | a CLUT source for a car whose colours are not the donor's |
 | `remap` | no | `set` / `id` maps applied to every poly as it is read |
 
-### `pages`
+### `textures`
 
-A page entry names its image **and** how that image is baked. The second half is
-what makes a refresh possible: the bank bake re-bakes a page whose source, or
-whose bake options, no longer match what it recorded last time, and an unchanged
-declaration still produces identical bytes.
+A car names the image for each texture page it uses, keyed by **set id**:
+
+```json
+"textures": {
+  "1": "textures/firebird.png",
+  "2": { "png": "work/pages/page2.png", "transparent": "auto",
+         "transparent_chroma": 128 }
+}
+```
+
+The image is the source of truth. There is **no `pages` key** in a declaration:
+a page's PNG preview is something the bake writes back, so declaring it would
+make an output an input - and re-baking a page from its own preview is generation
+loss. `pages[]` exists only in the computed half (the manifest), where it records
+what the images produced: size, palette row, the image's sha256, the preview path.
 
 | key | required | meaning |
 | --- | --- | --- |
-| `set` | yes | the texture page id |
-| `png` | yes | the image. On its own this is a **preview** — the bake never re-derives a page from it, because a preview round trip is generation loss |
-| `source` | no | the image the page is BAKED from. Declaring it opts the page into the refresh: when this file or any option below changes, the bake re-bakes it and records the image's sha256 |
-| `transparent` | no | the backdrop colour to make transparent: a hex colour (`ff00ff`), `auto` (the image's top-left pixel) or `alpha` (the PNG's alpha channel). There is no per-texel alpha in this format — the engine's marker is a CLUT entry of `0x0000` — so a sprite on a flat backdrop is an opaque square without this |
-| `transparent_tolerance` | no | per-channel slack for that match (0..255). A soft, anti-aliased edge needs some |
-| `protect` | no | colours the page's 16 MUST keep (`["b8b8c0", ...]`). The quantiser evicts the least-used colour instead, which is how a headlight grey survives |
+| (set id) | yes | the key IS the page set. `"1"`, `"2"`, ... — the same ids the models' `setN_idM` materials name |
+| `png` | yes | the image that page is baked from |
+| `transparent` | no | backdrop colour to make transparent: a hex colour (`ff00ff`), `auto` (the image's top-left pixel) or `alpha` (the PNG's alpha channel). There is no per-texel alpha here - the engine's marker is a CLUT entry of `0x0000` - so a sprite on a flat backdrop is an opaque square without this |
+| `transparent_tolerance` | no | per-channel slack for that match (0..255) |
+| `transparent_chroma` | no | match by COLOUR CAST instead: a texel whose `(r-g, b-g)` is within N of the backdrop's. Catches a soft blended edge without eating grey art |
+| `protect` | no | colours the page's 16 MUST keep (`["b8b8c0", ...]`); the quantiser evicts the least-used colour instead |
 | `palette` | no | exactly 16 hex colours: the page is re-indexed to them and nothing is quantised |
 
-```json
-"pages": [
-  { "set": 1, "png": "work/pages/page1.png", "source": "textures/firebird.png" },
-  { "set": 2, "png": "work/pages/page2.png", "source": "work/pages/page2.png",
-    "transparent": "auto", "transparent_tolerance": 96 }
-]
-```
-
-`carbank_bake.py <bank.json> --check` says which pages are stale, and
-`--audit RRGGBB` says where a colour still lives (page, texel count, palette
-index, CLUT word, transparent or not) — the two questions "my new art did not
-take" and "there is still magenta somewhere" actually ask.
+`atlas` is still there as the one-image shorthand for the single-page case: it
+covers the sets the models name.
 
 ### The palette must match the pages
 
