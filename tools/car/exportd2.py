@@ -87,8 +87,13 @@ LUMP_CAR_SIRENS = 202
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
-SOUND_SAMPLE_BYTES = 8192
-SOUND_MAX_RATE = 11025
+# Retail Driver 2 car banks are the reference: their engine loop is 13392 bytes
+# at 16000 Hz (measured from the log's sound diag). The cap is above that so a
+# sample is never trimmed for no reason, and the rate ceiling is the same 16000
+# so nothing is needlessly downsampled - the field is the recording rate, and the
+# engine plays each sample at its own, exactly as retail's 16000/1486 pair does.
+SOUND_SAMPLE_BYTES = 16384
+SOUND_MAX_RATE = 16000
 
 WHEEL_DETAIL_NAMES = ("WHLCLEAN", "WHLBOTH", "WHEEL")
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -1764,9 +1769,9 @@ def verify_sounds(blob, specs):
                 problems.append("model %d sample %d runs past the segment"
                                 % (model, i))
 
-            if not 1 <= rate <= 4 * vag.MAX_RATE:
-                problems.append("model %d sample %d has rate field %d, which no "
-                                "pitch scale can use" % (model, i, rate))
+            if not vag.MIN_RATE // 2 <= rate <= 2 * vag.MAX_RATE:
+                problems.append("model %d sample %d has rate %d Hz, outside what "
+                                "the SPU can play" % (model, i, rate))
 
     got = d2_lump(blob, LUMP_CAR_SIRENS)
     wanted = sorted(int(m) for m in (specs.get("sirens") or []))
