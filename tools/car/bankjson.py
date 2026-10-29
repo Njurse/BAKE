@@ -369,8 +369,12 @@ class Bank(object):
             _fail(where, "declare", "must be an object")
 
         _check_keys(where, "declare", decl,
-                    {"schema", "name", "donor", "order", "cars"}, "declare")
+                    {"schema", "name", "donor", "order", "cars",
+                     "palette_from_pages"}, "declare")
 
+        # the bank's palette rows come from the pages themselves, so a page
+        # re-bake cannot leave them disagreeing
+        self.palette_from_pages = bool(decl.get("palette_from_pages"))
         schema = decl.get("schema", SCHEMA)
 
         if schema != SCHEMA:

@@ -247,6 +247,13 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # ...and the declaration owns each page's BAKE, not just its image
     _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=out_dir)
 
+    # With palette_from_pages the pages ARE the palette, so the rows are rebuilt
+    # from them after the page step. Without it a re-baked page silently keeps a
+    # palette row chosen for the old colour set, and every texel on that index
+    # paints the wrong colour - the stray-magenta / wrong-grey failure.
+    if bank.palette_from_pages:
+        _sync_palette_from_pages(manifest, bank, bank_dir, warnings)
+
     _sync_page_sizes(manifest, bank_dir, out_dir)
 
 
@@ -800,6 +807,41 @@ def check_sources(bank, manifest, bank_dir, stale_only=True):
                                ",".join(str(s) for s in sorted(sets))))
 
     return problems
+
+
+def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
+    """pallet.bin (and palette.json) from the pages' own row 0."""
+    import carbank_palette
+
+    # the DECLARED pages, not every entry the manifest has accumulated: a stale
+    # page for a set this bank no longer carries must not add a palette row
+    sets = {page.set for car in bank.cars.values() for page in car.pages}
+    rows = carbank_palette.rows_from_pages(bank_dir, sets)
+
+    if not rows:
+        warnings.append("palette_from_pages: no pages to take a palette from")
+        return
+
+    body = exportd2.build_palette_body(rows, len(rows))
+    path = os.path.join(bank_dir, "pallet.bin")
+    old = None
+
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            old = f.read()
+
+    with open(path, "wb") as f:
+        f.write(body)
+
+    if old != body:
+        warnings.append("palette: rebuilt %d row(s) from the pages"
+                        % len(rows))
+
+    doc_path = os.path.join(bank_dir, "palette.json")
+
+    if os.path.isfile(doc_path):
+        with open(doc_path, "w", encoding="utf-8") as f:
+            json.dump(carbank_palette.palette_doc(rows), f, indent=1)
 
 
 def _sync_page_sizes(manifest, bank_dir, out_dir):
