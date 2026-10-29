@@ -46,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import bake                # noqa: E402  (the LUMP_CAR_WHEELS record encoder)
+import vag                 # noqa: E402  (PSX ADPCM, tools/common)
 import carbank_wheels      # noqa: E402  (the 8-quad FT4 wheel carrier)
 import cosmetics1          # noqa: E402  (LCF read/write)
 import lev1                # noqa: E402  (the shared MODEL/poly decoder)
@@ -78,6 +79,16 @@ LUMP_LUMPDESC = 37
 # (models.c CAR_IMPORT_LUMP_WHEELS), and every other walk skips an unknown type
 # by its size, so it is additive.
 LUMP_CAR_WHEELS = 200
+# JERICHO: the two sound segments. SOUNDS is per model - a D2 dynamic bank
+# (int num_samples, SAMPLE_DATA[], then the VAG payload) that gamesnd hands
+# straight to LoadSoundBankDynamic; SIRENS is 13 cop flags.
+LUMP_CAR_SOUNDS = 201
+LUMP_CAR_SIRENS = 202
+SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
+# Per-sample byte budgets and a rate ceiling. See _sound_sample: the
+# engine's SPU write is unchecked, so these are a safety limit, not taste.
+SOUND_SAMPLE_BYTES = 8192
+SOUND_MAX_RATE = 11025
 
 WHEEL_DETAIL_NAMES = ("WHLCLEAN", "WHLBOTH", "WHEEL")
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -420,6 +431,33 @@ def d2_palette(blob):
             "records": records, "end": q}
 
 
+def build_palette_body(records, total_cluts=None):
+    """A LUMP_PALLET body from records, every row INLINE, then the -1 terminator.
+
+    This is the one D2 palette writer: `filter_palette` is this plus a selection,
+    and `carbank_palette` is this fed from `palette.json`, so an edited colour
+    reaches the bank by the same path the donor's rows did.
+
+    Inline-only is deliberate. Driver 2's records may REFERENCE an earlier row
+    (`clut_number`), which is how its files stay small, but a reference dangles
+    the moment a row is dropped or reordered - so a rebuilt body always states
+    its 16 colours. That also means the bytes are the same whether the source
+    used references or not, which is what keeps an unchanged bake identical.
+    """
+    kept = [r for r in records if r.get("clut") is not None]
+    total = total_cluts if total_cluts else len(kept)
+
+    out = bytearray(struct.pack("<i", total))
+
+    for r in kept:
+        out += struct.pack("<iiii", r["palette"], r["texnum"],
+                           r["tpageindex"], -1)
+        out += r["clut"]
+
+    out += struct.pack("<i", -1)
+    return bytes(out)
+
+
 def filter_palette(pal, included):
     """A palette body containing only rows for the included sets.
 
@@ -433,13 +471,7 @@ def filter_palette(pal, included):
     # total_cluts is a CLUT count for table sizing, not a record count.  Keep
     # the source's bound; filtering only removes records.
     total = pal["total_cluts"] if pal.get("total_cluts") else len(kept)
-    out = bytearray(struct.pack("<i", total))
-    for r in kept:
-        out += struct.pack("<iiii", r["palette"], r["texnum"],
-                           r["tpageindex"], -1)
-        out += r["clut"]
-    out += struct.pack("<i", -1)
-    return bytes(out), len(kept)
+    return build_palette_body(kept, total), len(kept)
 
 
 # ---------------------------------------------------------------------------
@@ -1025,6 +1057,165 @@ def build_wheel_body(specs):
     return bake.build_wheel_lump(geoms)
 
 
+def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
+    """One sample: the WAV encoded to VAG blocks, with its bank header fields.
+
+    `budget` is a BYTE cap, and it is not cosmetic. LoadSoundBankDynamic writes
+    the payload to the SPU at a running address and takes its size from the
+    bank itself - `lsbTabs.addr += length - slength` with no bounds check - so a
+    sample set bigger than the cars bank's free space writes past the end of SPU
+    RAM (on this build: a host access violation, not a polite warning). Retail
+    car banks are 2-4 KB per car for exactly this reason, so the bake caps each
+    sample and says what it did: a 16 kHz stereo-length loop is not worth a crash.
+    """
+    path = spec.get("wav")
+
+    if not path:
+        return None
+
+    if not os.path.isfile(path):
+        warnings.append("sound %s: %s does not exist" % (label, path))
+        return None
+
+    samples, rate = vag.read_wav(path)
+    pct = spec.get("rate_pct") or 100
+
+    if pct != 100:
+        rate = int(rate * pct / 100)
+
+    if rate > SOUND_MAX_RATE:
+        samples = vag.resample(samples, rate, SOUND_MAX_RATE)
+        rate = SOUND_MAX_RATE
+
+    rate, clamped = vag.fit_rate(rate)
+
+    if clamped:
+        samples = vag.resample(samples, clamped, rate)
+        warnings.append("sound %s: %d Hz is outside the SPU range; resampled to "
+                        "%d" % (label, clamped, rate))
+
+    # 16 bytes per 28 samples: how many samples fit the byte budget
+    limit = (budget // vag.BLOCK_BYTES) * vag.SAMPLES_PER_BLOCK
+
+    if limit > 0 and len(samples) > limit:
+        warnings.append("sound %s: trimmed from %.2fs to %.2fs to fit %d bytes "
+                        "(the SPU has no room for more)"
+                        % (label, len(samples) / float(rate or 1),
+                           limit / float(rate or 1), budget))
+        samples = samples[:limit]
+
+    data, count, rms = vag.encode(samples,
+                                  loop=bool(spec.get("loop")))
+
+    if rms > 4000:
+        warnings.append("sound %s: encode error is high (rms %.0f) - the sample "
+                        "is probably too loud or too noisy for 4-bit ADPCM"
+                        % (label, rms))
+
+    return {"data": data, "rate": rate, "loop": 1 if spec.get("loop") else 0,
+            "samples": count}
+
+
+def build_sounds_body(specs, warnings):
+    """LUMP_CAR_SOUNDS body + the sirens list, from the manifest's `sounds`.
+
+    One entry per model, three samples each, exactly as
+    models.c CarImportSoundEntry reads it back: `int 1, int 13, 13 offsets`,
+    then per model `int 3, three SAMPLE_DATA, the VAG payload`, with addresses
+    relative to the bank's own payload. The engine rejects a bank whose count is
+    not 3, so a half-declared car is filled the way retail does it - the engine
+    sample doubles as the idle.
+    """
+    models = {int(m["model"]): m for m in (specs.get("models") or [])
+              if m.get("model") is not None}
+    sirens = sorted(int(m) for m in (specs.get("sirens") or []))
+
+    if not models:
+        return None, sirens
+
+    offsets = [-1] * MAX_CAR_MODELS
+    body = bytearray(struct.pack("<ii", 1, MAX_CAR_MODELS))
+    body += struct.pack("<%di" % MAX_CAR_MODELS, *offsets)
+
+    for model in sorted(models):
+        if not 0 <= model < MAX_CAR_MODELS:
+            warnings.append("sound: model %d is outside 0..%d"
+                            % (model, MAX_CAR_MODELS - 1))
+            continue
+
+        entry = models[model]
+        engine = _sound_sample(entry.get("engine") or {}, warnings,
+                               "model %d engine" % model)
+
+        if engine is None:
+            warnings.append("sound: model %d declares no usable engine sample"
+                            % model)
+            continue
+
+        idle = _sound_sample(entry.get("idle") or {}, warnings,
+                             "model %d idle" % model) or engine
+        third = _sound_sample(entry.get("third") or {}, warnings,
+                              "model %d horn/siren" % model)
+
+        if third is None:
+            warnings.append("sound: model %d declares no horn/siren; its third "
+                            "sample repeats the engine" % model)
+            third = engine
+
+        offsets[model] = len(body)
+        payload = bytearray()
+        rows = []
+
+        for sample in (engine, idle, third):
+            rows.append((len(payload), len(sample["data"]), sample["loop"],
+                         sample["rate"]))
+            payload.extend(sample["data"])
+
+        # pad the payload to a 4-byte boundary so the next entry starts aligned
+        while len(payload) % 4:
+            payload.append(0)
+
+        body += struct.pack("<i", SOUND_SAMPLES)
+
+        for row in rows:
+            body += struct.pack("<IIII", *row)
+
+        body += payload
+
+        warnings.append("sound model %d: %d bytes (engine %d, idle %d, third "
+                        "%d) at %d/%d/%d Hz"
+                        % (model, len(rows) and sum(r[1] for r in rows),
+                           rows[0][1], rows[1][1], rows[2][1],
+                           rows[0][3], rows[1][3], rows[2][3]))
+
+    for i in range(MAX_CAR_MODELS):
+        struct.pack_into("<i", body, 8 + i * 4, offsets[i])
+
+    if all(o == -1 for o in offsets):
+        return None, sirens
+
+    return bytes(body), sirens
+
+
+def build_sirens_body(sirens):
+    """LUMP_CAR_SIRENS: 13 flags (bit N = model N is a cop car), padded to 16."""
+    if not sirens:
+        return None
+
+    flags = bytes(1 if m in sirens else 0 for m in range(MAX_CAR_MODELS))
+    return flags + bytes(3)
+
+
+def _load_sounds(manifest):
+    """The manifest's `sounds` block, or {} when the bank declares none."""
+    specs = manifest.get("sounds") or {}
+
+    if not isinstance(specs, dict):
+        raise SystemExit("bank: `sounds` must be an object with models/sirens")
+
+    return specs
+
+
 def _load_wheels(manifest):
     """The manifest's `wheels` list, normalised to one entry per variant.
 
@@ -1074,7 +1265,7 @@ def _load_wheels(manifest):
 
 def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
-                  wheels_body=None):
+                  wheels_body=None, sounds_body=None, sirens_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -1086,6 +1277,10 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
     add(LUMP_CAR_MODELS, models_body)
     if wheels_body:
         add(LUMP_CAR_WHEELS, wheels_body)
+    if sounds_body:
+        add(LUMP_CAR_SOUNDS, sounds_body)
+    if sirens_body:
+        add(LUMP_CAR_SIRENS, sirens_body)
     add(LUMP_TEXTUREINFO, texinfo_body)
     add(LUMP_PALLET, pallet_body)
     if texture_names_body:
@@ -1283,9 +1478,15 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
                                 % s)
                 p = legacy
             else:
-                warnings.append("missing raw page for set %d; bank page omitted"
-                                % s)
-                continue
+                # A page the texture info LISTS but the workspace has no bytes
+                # for used to be dropped with a warning, so the bank shipped
+                # without its textures - and a car then draws the host level's
+                # pages, which reads as contamination rather than as a mistake.
+                raise SystemExit(
+                    "bank: page set %d is listed in LUMP_TEXTUREINFO but there "
+                    "is no %s (looked in %s). Bake the page first:\n"
+                    "  python carbank_page.py <image> --set %d --bank %s"
+                    % (s, os.path.basename(p), manifest_dir, s, manifest_dir))
         with open(p, "rb") as f:
             data = f.read()
         if len(data) != z:
@@ -1298,9 +1499,13 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     if any(wheel_specs):
         wheels_body = build_wheel_body(wheel_specs)
 
+    sound_specs = _load_sounds(manifest)
+    sounds_body, sirens = build_sounds_body(sound_specs, warnings)
+    sirens_body = build_sirens_body(sirens)
+
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
-                              wheels_body)
+                              wheels_body, sounds_body, sirens_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -1321,12 +1526,17 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         "included_sets": sorted(included),
         "pages": page_report,
         "wheels": wheel_specs,
+        "sounds": {"models": sorted((spec.get("model")
+                                     for spec in (sound_specs.get("models") or [])),
+                                    key=lambda m: (m is None, m)),
+                   "sirens": sirens} if sounds_body else {},
         "palette_records": palette_records,
         "page_base": d2_page_base(bank_blob),
         "warnings": warnings,
     }
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
-                                   manifest_dir, included, wheel_specs)
+                                   manifest_dir, included, wheel_specs,
+                                   sound_specs)
     _write_json(os.path.join(out_dir, "bank.json"), report)
     for w in warnings:
         print("  warning: %s" % w)
@@ -1484,8 +1694,88 @@ def verify_wheels(blob, specs):
     return problems
 
 
+def verify_sounds(blob, specs):
+    """Re-read the sound segments the way CarImportSoundEntry will.
+
+    The reader rejects anything it cannot parse by returning 0, and the car then
+    silently plays the host city's engine - so every field it checks is checked
+    here too: a per-model table of 13 offsets, a count of exactly 3, offsets
+    inside the segment, and each sample's payload inside it as well.
+    """
+    problems = []
+    models = [spec for spec in (specs.get("models") or [])
+              if spec.get("model") is not None]
+
+    got = d2_lump(blob, LUMP_CAR_SOUNDS)
+
+    if not models:
+        if got is not None:
+            problems.append("the bank carries a sound segment but nothing "
+                            "declared one")
+        return problems
+
+    if got is None:
+        return ["the bank has no sound segment (%d model(s) declared)"
+                % len(models)]
+
+    body, size = got
+
+    if size < 8 + MAX_CAR_MODELS * 4:
+        return ["the sound segment is %d bytes, shorter than its own table" % size]
+
+    if struct.unpack_from("<i", blob, body)[0] != 1 or             struct.unpack_from("<i", blob, body + 4)[0] != MAX_CAR_MODELS:
+        problems.append("the sound segment's header is not the per-model form "
+                        "(1, %d)" % MAX_CAR_MODELS)
+
+    for spec in models:
+        model = spec["model"]
+        offset = struct.unpack_from("<i", blob, body + 8 + model * 4)[0] if             0 <= model < MAX_CAR_MODELS else -1
+
+        if offset < 0:
+            problems.append("model %d has no sound entry" % model)
+            continue
+
+        if offset + 4 > size:
+            problems.append("model %d sound entry runs past the segment" % model)
+            continue
+
+        count = struct.unpack_from("<i", blob, body + offset)[0]
+
+        if count != SOUND_SAMPLES:
+            problems.append("model %d sound entry holds %d samples, the engine "
+                            "takes exactly %d" % (model, count, SOUND_SAMPLES))
+            continue
+
+        for i in range(count):
+            address, length, _loop, rate = struct.unpack_from(
+                "<IIII", blob, body + offset + 4 + i * 16)
+
+            if offset + 4 + count * 16 + address + length > size:
+                problems.append("model %d sample %d runs past the segment"
+                                % (model, i))
+
+            if not vag.MIN_RATE <= rate <= vag.MAX_RATE:
+                problems.append("model %d sample %d has rate %d"
+                                % (model, i, rate))
+
+    got = d2_lump(blob, LUMP_CAR_SIRENS)
+    wanted = sorted(int(m) for m in (specs.get("sirens") or []))
+
+    if wanted and got is None:
+        problems.append("the bank has no siren flags (%s)" % wanted)
+    elif wanted:
+        body, size = got
+        flagged = [m for m in range(min(MAX_CAR_MODELS, size))
+                   if blob[body + m]]
+        if flagged != wanted:
+            problems.append("siren flags say %s, the declaration says %s"
+                            % (flagged, wanted))
+
+    return problems
+
+
 def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
-                wheel_specs=None):
+                wheel_specs=None, sound_specs=None):
     problems = []
     with open(lev_path, "rb") as f:
         blob = f.read()
@@ -1532,6 +1822,9 @@ def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
 
     if wheel_specs is not None:
         problems.extend(verify_wheels(blob, wheel_specs))
+
+    if sound_specs is not None:
+        problems.extend(verify_sounds(blob, sound_specs))
 
     try:
         with open(lcf_path, "rb") as f:

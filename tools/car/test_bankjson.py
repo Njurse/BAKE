@@ -224,7 +224,7 @@ class RefusalTests(BankFixture):
 
         bank = bankjson.load(self.write(self.declare(car=car)))
 
-        self.assertEqual(bank.cars["car1"].pages[0][0], 1)
+        self.assertEqual(bank.cars["car1"].pages[0].set, 1)
 
     def test_a_wheel_crop_must_be_a_rect(self):
         for island in ([0, 0, 0, 60], [0, 0, 60, 60, 60], [0, 0, 60],

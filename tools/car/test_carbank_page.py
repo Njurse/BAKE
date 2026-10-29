@@ -168,5 +168,51 @@ class KeyMaskTests(unittest.TestCase):
                          [True, True, True, False])
 
 
+class PaletteControlTests(unittest.TestCase):
+    """More than 16 colours on a page means some of them are lost. These are the
+    two ways to decide WHICH ones."""
+
+    def _busy_page(self):
+        # 40 distinct greys plus one proud red: the quantiser folds the greys and
+        # drops the red, which is exactly the "headlight grey became body colour"
+        # complaint
+        pixels = []
+
+        for y in range(fourbpp.PAGE_H):
+            for x in range(fourbpp.PAGE_W):
+                if x < 40 and y < 40:
+                    pixels.append((200, 20, 20))
+                else:
+                    pixels.append((100 + (x % 40), 100 + (y % 40), 110))
+
+        return pixels
+
+    def test_a_protected_colour_survives_the_quantiser(self):
+        pixels = self._busy_page()
+        _blob, colours, _i, _e, _b = carbank_page.bake_page(pixels, protect=[(200, 20, 20)])
+
+        self.assertIn((200, 20, 20), [tuple(c) for c in colours])
+
+    def test_a_fixed_palette_is_used_verbatim(self):
+        pixels = self._busy_page()
+        palette = [(0, 0, 0)] + [(8 * i, 8 * i, 8 * i) for i in range(15)]
+
+        blob, colours, indices, error, _b = carbank_page.bake_page(
+            pixels, palette=palette)
+
+        self.assertEqual([tuple(c) for c in colours], palette)
+        self.assertEqual(len(set(indices)), len(set(indices)))
+        self.assertGreater(error[1], 0, "this palette cannot match the art")
+
+    def test_the_crush_report_names_the_worst_colours(self):
+        pixels = self._busy_page()
+        _blob, colours, indices, _e, background = carbank_page.bake_page(pixels)
+        rows = carbank_page.crush_report(pixels, indices, colours, background)
+
+        self.assertTrue(rows)
+        self.assertEqual(rows, sorted(rows, key=lambda r: (-r["error"], -r["texels"])))
+        self.assertIn("source", rows[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

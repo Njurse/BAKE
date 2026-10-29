@@ -24,6 +24,11 @@ forced onto one palette index and that entry is written 0x0000 in every row.
 KEY is a hex colour (ff00ff), "auto" (the image's own top-left pixel) or
 "alpha" (the PNG's alpha channel, for art exported with one).
 
+--protect keeps colours the 16 must hold (a headlight grey the quantiser would
+otherwise fold into the body); --palette states all 16 outright and quantises
+nothing; --report N prints the N worst-crushed source colours, which is the
+measurement behind "the greys survived".
+
     python carbank_page.py work/pages/page2.png --set 2 --bank . --transparent ff00ff
 """
 
@@ -72,7 +77,102 @@ def key_mask(pixels, key, tolerance=0):
             <= tolerance for p in pixels]
 
 
-def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None):
+def protect_mask(pixels, colours, tolerance=0):
+    """Which texels are within `tolerance` of ANY protected colour."""
+    out = [False] * len(pixels)
+
+    for colour in colours:
+        for i, p in enumerate(pixels):
+            if out[i]:
+                continue
+
+            if (abs(p[0] - colour[0]) <= tolerance
+                    and abs(p[1] - colour[1]) <= tolerance
+                    and abs(p[2] - colour[2]) <= tolerance):
+                out[i] = True
+
+    return out
+
+
+def _palette_with_protected(colours, pixels, protect, tolerance, key_index=None):
+    """Put every protected colour into the 16, evicting the least-used rest.
+
+    The quantiser works on the whole page and folds near-identical tones
+    together, which is how a headlight grey becomes another body grey. Naming a
+    colour here makes it survive: it takes the slot of the colour the fewest
+    texels use (and never a slot that already holds a protected colour).
+    """
+    colours = list(colours)
+    counts = {}
+
+    for p in pixels:
+        counts[tuple(p)] = counts.get(tuple(p), 0) + 1
+
+    present = {tuple(c) for c in colours}
+
+    for want in protect:
+        want = tuple(want)
+
+        if want in present:
+            continue
+
+        best = None
+
+        for i, colour in enumerate(colours):
+            if i == key_index:
+                continue
+
+            if any(abs(colour[c] - want[c]) <= tolerance for c in range(3)):
+                continue
+
+            weight = counts.get(tuple(colour), 0)
+
+            if best is None or weight < best[0]:
+                best = (weight, i)
+
+        if best is None:
+            continue
+
+        present.discard(tuple(colours[best[1]]))
+        colours[best[1]] = want
+        present.add(want)
+
+    return colours
+
+
+def crush_report(pixels, indices, colours, background=None):
+    """Per-colour damage: how far each source colour moved, and where it went.
+
+    "The bake worked" and "the greys survived" are different claims. This is the
+    measurement behind the second one: each distinct source colour, how many
+    texels use it, the page colour it was given, and the worst channel error.
+    """
+    q = [tuple(c) for c in colours]
+    per_colour = {}
+
+    for i, p in enumerate(pixels):
+        if background is not None and indices[i] == background["index"]:
+            continue
+
+        key = tuple(p)
+        got = q[indices[i]]
+        err = max(abs(key[c] - got[c]) for c in range(3))
+        entry = per_colour.get(key)
+
+        if entry is None:
+            per_colour[key] = {"texels": 1, "colour": got, "error": err}
+        else:
+            entry["texels"] += 1
+            entry["error"] = max(entry["error"], err)
+
+    rows = [dict(source=k, **v) for k, v in per_colour.items()]
+    rows.sort(key=lambda r: (-r["error"], -r["texels"]))
+
+    return rows
+
+
+def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
+              palette=None, protect=None, protect_tolerance=0):
     """RGB texels -> (page blob, colours, indices, error, background).
 
     `key` (an (r, g, b)) - or an explicit per-texel `mask` - marks the art's
@@ -82,13 +182,33 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None):
     as an opaque square, which is what a pink/magenta sky behind a wheel sprite
     turns into.
 
+    `palette` (16 (r, g, b)) states the page's colours outright - the texels are
+    then re-indexed to them and the quantiser never runs. `protect` (any number
+    of colours) keeps those colours in an otherwise automatic palette.
+
     `background` is None when nothing was keyed, else {index, keyed, stray,
     colour}: how many texels went transparent, and how many texels that were NOT
     keyed share the transparent index (they vanish too - a stray here means the
     backdrop colour was too close to the art).
     """
-    colours, indices = fourbpp.paletteize(pixels, fourbpp.PAGE_W, fourbpp.PAGE_H)
-    indices = bytearray(indices)
+    if palette is not None:
+        placed = [(int(c[0]), int(c[1]), int(c[2])) for c in palette]
+
+        if len(placed) != fourbpp.CLUT_ROW_ENTRIES:
+            raise SystemExit("a fixed palette is %d colours, not %d"
+                             % (fourbpp.CLUT_ROW_ENTRIES, len(placed)))
+
+        colours = placed
+        indices = bytearray(fourbpp.reindex_to_clut(pixels, colours))
+    else:
+        colours, indices = fourbpp.paletteize(pixels, fourbpp.PAGE_W,
+                                              fourbpp.PAGE_H)
+        indices = bytearray(indices)
+
+        if protect:
+            colours = _palette_with_protected(colours, pixels, protect,
+                                              protect_tolerance, None)
+            indices = bytearray(fourbpp.reindex_to_clut(pixels, colours))
 
     if mask is None and key is not None:
         mask = key_mask(pixels, key, tolerance)
@@ -195,6 +315,20 @@ def read_page(path):
     return blob, fourbpp.clut_rgb(rows[0]) if rows else [], indices
 
 
+def hex_colour(text):
+    """'#rrggbb' / 'rrggbb' -> (r, g, b)."""
+    value = str(text).strip().lower()
+    digits = value[1:] if value.startswith("#") else value
+
+    if len(digits) != 6:
+        raise SystemExit("%r is not a hex colour (rrggbb)" % (text,))
+
+    try:
+        return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise SystemExit("%r is not a hex colour (rrggbb)" % (text,))
+
+
 def _parse_key(text, pixels, alpha):
     """--transparent KEY -> (key colour or None, explicit mask or None)."""
     if text is None:
@@ -240,6 +374,16 @@ def main(argv=None):
     ap.add_argument("--transparent-tolerance", type=int, default=0, metavar="N",
                     help="per-channel slack when matching the colour, 0..255 "
                          "(default 0 = exact; a soft/anti-aliased edge needs more)")
+    ap.add_argument("--protect", metavar="RRGGBB[,RRGGBB...]", default=None,
+                    help="colours the page's 16 MUST keep (headlight greys), "
+                         "evicting the least-used colour instead")
+    ap.add_argument("--protect-tolerance", type=int, default=8, metavar="N",
+                    help="per-channel slack when matching a protected colour "
+                         "(default 8)")
+    ap.add_argument("--palette", metavar="RRGGBB[,...]", default=None,
+                    help="a fixed 16-colour palette; nothing is quantised")
+    ap.add_argument("--report", type=int, default=0, metavar="N",
+                    help="print the N worst-crushed source colours")
     ap.add_argument("--no-preview", action="store_true",
                     help="skip pages/PAGE_<set>.png")
     args = ap.parse_args(argv)
@@ -247,8 +391,16 @@ def main(argv=None):
     pixels, alpha = _load_rgb(args.image)
     key, mask = _parse_key(args.transparent, pixels, alpha)
 
+    def colours_of(text):
+        return [hex_colour(v) for v in text.replace(" ", "").split(",") if v]
+
+    protect = colours_of(args.protect) if args.protect else []
+    palette = colours_of(args.palette) if args.palette else None
+
     blob, colours, indices, error, background = bake_page(
-        pixels, key=key, tolerance=args.transparent_tolerance, mask=mask)
+        pixels, key=key, tolerance=args.transparent_tolerance, mask=mask,
+        palette=palette, protect=protect,
+        protect_tolerance=args.protect_tolerance)
 
     path = write_page(os.path.abspath(args.bank), args.set, blob, indices,
                       colours, preview=not args.no_preview)
@@ -270,6 +422,17 @@ def main(argv=None):
         if background["stray"]:
             print("  warning: %d texel(s) that were NOT transparent share that "
                   "index and vanish too" % background["stray"])
+
+    if args.report:
+        rows = crush_report(pixels, indices, colours, background)
+        print("  worst-crushed source colours:")
+
+        for row in rows[:args.report]:
+            src = row["source"]
+            got = row["colour"]
+            print("    #%02x%02x%02x -> #%02x%02x%02x  off by %3d  (%d texel(s))"
+                  % (src[0], src[1], src[2], got[0], got[1], got[2],
+                     row["error"], row["texels"]))
 
     print("  other pages untouched%s" % (" (previous page was %+d bytes)" % old
                                           if old else ""))

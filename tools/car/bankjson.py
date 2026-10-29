@@ -26,6 +26,11 @@ WHEEL_KEYS = {"clean", "damaged", "fast"}
 WHEEL_ENTRY_KEYS = {"png", "set", "island"}
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
 
+# a declared page describes its own BAKE, not just an image: the refresh path has
+# to reproduce the page from the declaration alone
+PAGE_KEYS = {"set", "png", "source", "transparent", "transparent_tolerance",
+             "palette", "protect", "size"}
+
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
 # crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
 PAGE_TEXELS = 256
@@ -64,13 +69,16 @@ class Car(object):
 
         self.pages = []
         for page in data.get("pages") or []:
-            if not isinstance(page, dict) or set(page) - {"set", "png"}:
-                _fail(where, "pages", "each entry must be {set, png}")
+            if not isinstance(page, dict):
+                _fail(where, "pages", "each entry must be an object")
+
+            _check_keys(where, "pages", page, PAGE_KEYS, "page")
+
             setid = page.get("set")
             if not isinstance(setid, int) or not 0 <= setid <= 255:
                 _fail(where, "pages.set", "%r is not a page set id 0..255" % (setid,))
-            self.pages.append((setid, self._file(where, "pages.png",
-                                                 page.get("png"), required=True)))
+
+            self.pages.append(Page(where, setid, page, self._file))
 
         if not self.atlas and not self.pages:
             _fail(where, "atlas", "a car needs an atlas or per-page PNGs")
@@ -142,6 +150,76 @@ class Car(object):
             _fail(where, field, "%s does not exist (looked at %s)" % (rel, full))
 
         return full
+
+
+class Page(object):
+    """One declared texture page: its image and how to bake it.
+
+    A page is not just a PNG. The bake that turns it into a 4bpp page has real
+    choices - which colour is the transparent backdrop, how wide the match is,
+    which 16 colours to keep - and if the declaration does not carry them, a
+    refresh cannot reproduce the page the author saw. So they live here, and
+    carbank_bake bakes the page from THIS when the image changes.
+    """
+
+    def __init__(self, where, setid, data, file_of):
+        field = "pages[set %d]" % setid
+        self.set = setid
+        self.png = file_of(where, field + ".png", data.get("png"), required=True)
+        # the IMAGE this page is baked from. Absent means png is only a preview
+        # (what the bake wrote back), and the page is never re-baked from it -
+        # a preview round trip is generation loss.
+        self.source = file_of(where, field + ".source", data.get("source"))
+        self.transparent = data.get("transparent")
+        self.transparent_tolerance = data.get("transparent_tolerance", 0)
+        self.palette = data.get("palette")
+        self.protect = data.get("protect") or []
+        self.size = data.get("size")
+
+        if (not isinstance(self.transparent_tolerance, int)
+                or not 0 <= self.transparent_tolerance <= 255):
+            _fail(where, field + ".transparent_tolerance",
+                  "%r is not 0..255" % (self.transparent_tolerance,))
+
+        if self.protect and not isinstance(self.protect, list):
+            _fail(where, field + ".protect", "must be a list of hex colours")
+
+        for colour in self.protect:
+            _hex_colour(where, field + ".protect", colour)
+
+        if self.palette is not None:
+            if not isinstance(self.palette, list):
+                _fail(where, field + ".palette",
+                      "must be a list of 16 hex colours (a fixed palette)")
+
+            if len(self.palette) != 16:
+                _fail(where, field + ".palette",
+                      "a fixed palette is exactly 16 colours, not %d"
+                      % len(self.palette))
+
+            for colour in self.palette:
+                _hex_colour(where, field + ".palette", colour)
+
+    def bake_options(self):
+        """What the page bake needs, from the declaration alone."""
+        return {"transparent": self.transparent,
+                "tolerance": self.transparent_tolerance,
+                "palette": self.palette,
+                "protect": list(self.protect or [])}
+
+
+def _hex_colour(where, field, text):
+    """Validate '#rrggbb' / 'rrggbb' and return (r, g, b)."""
+    value = str(text).strip().lower()
+    digits = value[1:] if value.startswith("#") else value
+
+    if len(digits) != 6:
+        _fail(where, field, "%r is not a hex colour (rrggbb)" % (text,))
+
+    try:
+        return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        _fail(where, field, "%r is not a hex colour (rrggbb)" % (text,))
 
 
 class Wheel(object):
