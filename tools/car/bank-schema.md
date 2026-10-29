@@ -1,18 +1,42 @@
 # bank.json — what a person writes, and what the bake computes
 
 A bank folder holds one car bank: `FIREBIRD.LEV` + `FIREBIRD.LCF` (the loadable
-pair), the `raw/` blocks it was built from, and `bank.json`. That one file has
-two halves:
+pair, installed by the bake), the author's sources, and `bank.json`.
 
-| half | who writes it | what it holds |
-| --- | --- | --- |
-| top level (`city`, `lev`, `lcf`, `size`, `included_sets`, `pages`, `wheels`, `palette_records`, `page_base`, `warnings`, `checks`) | the bake, every time | what the bank turned out to be |
-| `declare` | the author, once | what the author wants: sources, layout, sounds |
-
-**The bake never overwrites `declare`.** It is read, validated, used, and written
-back untouched — including the files it points at, so a rebuild that fails cannot
-leave the declaration half-renamed. A bank with no `declare` block is a
+**`bank.json` is input only.** It holds `city` / `lev` / `lcf` (what the bank is
+called), the optional layout keys below, and `declare` (what the author wants:
+sources, layout, sounds). The bake reads and validates it and never writes it.
+What the bank turned out to be - size, included sets, pages, palette records,
+checks, warnings - goes to `<CITY>.report.json` beside the built manifest.
+(Older banks still carry that computed half at the top level of `bank.json`;
+it is ignored and can be deleted.) A bank with no `declare` block is a
 donor-derived bank (what `basebank.py` builds) and is used as it stands.
+
+## Folder layout
+
+Two optional top-level keys, both relative to the bank folder, split inputs
+from outputs:
+
+```json
+{ "city": "FIREBIRD", "lev": "FIREBIRD.LEV", "lcf": "FIREBIRD.LCF",
+  "donor_dir": "donor", "build_dir": "build", "declare": { ... } }
+```
+
+| folder | who writes it | holds |
+| --- | --- | --- |
+| bank folder | the author (+ the installed LEV/LCF) | `bank.json`, `FIREBIRD.LEV/.LCF`, `cities.ini`, scripts, README |
+| `art/`, `sounds/` (any path the declare names) | the author | OBJ/MTL, page and wheel PNGs, the three WAVs |
+| `donor_dir` | `basebank.py`, once | `<CITY>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<CITY>.donor.LEV` |
+| `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin` (palette_from_pages), `textureinfo.bin` (when page sizes change), the built `<CITY>.json`, `<CITY>.report.json`, and the LEV/LCF when `-o` is not given |
+
+The bake starts from the built manifest when `build_dir` has one (it remembers
+which pages are current) and from the donor manifest otherwise, so deleting
+`build_dir` is always safe - the next bake re-derives everything. Handling still
+comes from the donor's `source.LCF`.
+
+Leave either key out and it is the bank folder itself: the flat layout every
+bank used before, which still bakes exactly as it did (except that `bank.json`
+is no longer rewritten).
 
 ## Schema
 
@@ -90,7 +114,7 @@ bake writes `-1` for them.
 
 ### `textures`
 
-A declared page or sprite may NOT live under `work/` or `pages/`: those are
+A declared page or sprite may NOT live under `work/`, `pages/` or `build/`: those are
 what the bake writes, so a source there is a previous bake's output - and its
 hash would keep looking current however the art changed. That is refused by
 name.

@@ -86,7 +86,7 @@ class BankError(Exception):
 
 # Folders the BAKE writes into. A declaration that points at one of these is
 # pointing at an artefact of a previous bake, not at art.
-OUTPUT_DIRS = ("work", "pages")
+OUTPUT_DIRS = ("work", "pages", "build")
 
 # The default `transparent_tolerance` for a page that declares a key. Rendered
 # art never uses one exact backdrop colour, and the antialiased ring around a
