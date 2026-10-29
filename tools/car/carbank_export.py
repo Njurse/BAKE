@@ -20,14 +20,16 @@ those files, validated by bankjson before it is written.
 Wheels: the bank's LUMP_CAR_WHEELS segment (type 200) holds wheel MODELS, one
 per variant, with -1 for a variant the car does not have - which is exactly the
 case bank-schema.md describes for the Firebird (clean and fast, no damaged). The
-models are listed here; the wheel TEXTURES live on the car's pages, and the
-`wheels` PNGs in the declaration name page crops rather than separate images, so
-this tool does not invent a file per variant. That is the one part of the layout
-it does not emit, and it says so instead of writing a placeholder.
+records are written to `wheels/wheels.json`, and with --declare into the
+declaration as `{set, island}`: the page its poly 2 names and the crop rect its
+UVs cover. That is what a bake needs to carry the wheel again, so exporting a
+bank and re-baking it keeps the wheels rather than quietly dropping them. A bank
+that carries no wheel segment has only the author's wheel PNGs, which name no
+page, and those are copied as plain paths.
 
 The scale is the one the baker and the engine already use (see obj2geom --scale
 and bake.py's model path); the OBJ is written in the bank's own units, so a
-re-import with the same scale reproduces the geometry.
+re-import with `--scale 1` reproduces the geometry.
 """
 
 import argparse
@@ -141,6 +143,54 @@ def _wheel_variants(blob):
     return out
 
 
+VARIANT_NAMES = {"CLEANWHEEL": "clean", "DAMWHEEL": "damaged",
+                 "FASTWHEEL": "fast"}
+
+
+def _wheel_records(blob):
+    """{variant: {set, island}} for the wheels the bank carries, or {}.
+
+    A bank with a LUMP_CAR_WHEELS segment says exactly what a declaration needs
+    to carry it again: the page (poly 2's texture_set) and the crop rect (poly
+    2's UVs). Writing the declaration WITHOUT that would drop the segment on the
+    next bake, because a wheel image alone cannot name a page.
+    """
+    body, size = bake._data1_segment(blob, bake.LUMP_CAR_WHEELS)
+
+    if body is None:
+        return {}
+
+    n = struct.unpack_from("<i", blob, body)[0]
+    out = {}
+
+    for i, name in enumerate(bake.WHEEL_ORDER):
+        if i >= n:
+            break
+
+        ofs = struct.unpack_from("<i", blob, body + 4 + i * 4)[0]
+
+        if ofs < 0 or ofs + 36 > size:
+            continue
+
+        model = lev1.decode_model(blob, body + ofs)
+
+        if len(model.polys) <= 2 or model.errors:
+            continue
+
+        poly = model.polys[2]
+        us = [u for u, _v in poly.uv]
+        vs = [v for _u, v in poly.uv]
+
+        out[VARIANT_NAMES.get(name, name.lower())] = {
+            "set": poly.texture_set,
+            # WheelPolyRect adds 1 to the maxima, so the rect it derives - and the
+            # declaration states - is exclusive, exactly as it was baked
+            "island": [min(us), min(vs), max(us) + 1, max(vs) + 1],
+        }
+
+    return out
+
+
 WHEEL_SOURCES = {
     "clean": ("wheelclean.png", "wheel_clean.png", "cleanwheel.png"),
     "damaged": ("wheeldamaged.png", "wheeldam.png", "wheelsdamaged.png"),
@@ -192,6 +242,10 @@ def export(path, outdir, declare=False):
     pal = exportd2.d2_palette(blob)
     table = exportd2.d2_model_table(blob)
     names = _decode_names(exportd2.model_names(blob))
+    wheels = _wheel_variants(blob)
+    # a bank that carries wheel models names their pages and crop rects; one that
+    # does not has the author's wheel images and nothing else
+    wheel_records = _wheel_records(blob)
 
     included = sorted(entries)
     scale = _levels_scale()
@@ -238,23 +292,25 @@ def export(path, outdir, declare=False):
 
         _write_mtl(os.path.join(cardir, carname + ".mtl"), sorted(materials))
 
-        entry["wheels"] = _wheel_variants(blob) or {}
+        entry["wheels"] = wheel_records or {}
         cars[carname] = entry
         order.append({"slot": slot, "car": carname})
 
     wheels = _wheel_variants(blob)
     wheel_pngs = {}
 
-    if wheels is None:
+    if not wheel_records:
         wheel_pngs = _wheel_pngs_from_sources(os.path.dirname(os.path.abspath(path)),
                                              outdir)
     wheels_dir = os.path.join(outdir, "wheels")
     os.makedirs(wheels_dir, exist_ok=True)
 
     with open(os.path.join(wheels_dir, "wheels.json"), "w") as f:
-        json.dump({"variants": wheels, "note":
-                   "true = the bank carries this wheel model; the textures are "
-                   "page crops named in bank.json, not separate images"},
+        json.dump({"variants": wheels, "records": wheel_records or None,
+                   "note":
+                   "variants: true = the bank carries this wheel model. "
+                   "records: the page set and crop rect it names, which is what "
+                   "a declaration needs to carry it again"},
                   f, indent=2)
 
     for carname in cars:
@@ -286,7 +342,9 @@ def _rebase(decl, outdir, base):
             page["png"] = rel(page["png"])
 
         for variant, rel_path in list((car.get("wheels") or {}).items()):
-            car["wheels"][variant] = rel(rel_path)
+            # {set, island} entries carry no path to rebase
+            if isinstance(rel_path, str):
+                car["wheels"][variant] = rel(rel_path)
 
     return decl
 
@@ -298,7 +356,9 @@ def _declare_block(result, name):
         entry = {"pages": car["pages"]}
         entry.update({k: car[k] for k in PATH_KEYS if k in car})
 
-        if car.get("wheel_pngs"):
+        if car.get("wheels"):
+            entry["wheels"] = dict(car["wheels"])
+        elif car.get("wheel_pngs"):
             entry["wheels"] = dict(car["wheel_pngs"])
 
         cars[carname] = entry

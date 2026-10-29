@@ -79,7 +79,44 @@ class LoadTests(BankFixture):
             car=self.car(wheels={"clean": "wheel.png", "fast": "wheel.png"}))))
 
         self.assertIsNone(bank.cars["car1"].wheels["damaged"])
-        self.assertTrue(bank.cars["car1"].wheels["fast"].endswith("wheel.png"))
+        self.assertTrue(bank.cars["car1"].wheels["fast"].path.endswith("wheel.png"))
+
+    def test_a_plain_wheel_path_names_no_page(self):
+        # back compatible: art without a page cannot become a wheel MODEL, so the
+        # bake leaves that variant on the host level's wheel texture
+        bank = bankjson.load(self.write(self.declare()))
+
+        self.assertIsNone(bank.cars["car1"].wheels["clean"].set)
+        self.assertIsNone(bank.cars["car1"].wheels["clean"].island)
+
+    def test_a_wheel_entry_may_name_its_page_and_crop(self):
+        bank = bankjson.load(self.write(self.declare(car=self.car(wheels={
+            "clean": {"png": "wheel.png", "set": 2,
+                      "island": [0, 0, 60, 60]}}))))
+
+        wheel = bank.cars["car1"].wheels["clean"]
+
+        self.assertTrue(wheel.path.endswith("wheel.png"))
+        self.assertEqual(wheel.set, 2)
+        self.assertEqual(wheel.island, (0, 0, 60, 60))
+
+    def test_a_wheel_entry_may_name_a_page_without_a_crop(self):
+        bank = bankjson.load(self.write(self.declare(car=self.car(wheels={
+            "clean": {"png": "wheel.png", "set": 2}}))))
+
+        self.assertEqual(bank.cars["car1"].wheels["clean"].set, 2)
+        self.assertIsNone(bank.cars["car1"].wheels["clean"].island)
+
+    def test_a_wheel_rect_needs_no_image(self):
+        # this is the shape a declaration read back out of a bank has
+        bank = bankjson.load(self.write(self.declare(car=self.car(wheels={
+            "clean": {"set": 2, "island": [0, 0, 60, 60]}}))))
+
+        wheel = bank.cars["car1"].wheels["clean"]
+
+        self.assertIsNone(wheel.path)
+        self.assertEqual(wheel.set, 2)
+        self.assertEqual(wheel.island, (0, 0, 60, 60))
 
 
 class SoundTests(BankFixture):
@@ -188,6 +225,37 @@ class RefusalTests(BankFixture):
         bank = bankjson.load(self.write(self.declare(car=car)))
 
         self.assertEqual(bank.cars["car1"].pages[0][0], 1)
+
+    def test_a_wheel_crop_must_be_a_rect(self):
+        for island in ([0, 0, 0, 60], [0, 0, 60, 60, 60], [0, 0, 60],
+                       [0, 0, 257, 60], [-1, 0, 60, 60], "0,0,60,60"):
+            with self.assertRaises(bankjson.BankError) as caught:
+                bankjson.load(self.write(self.declare(car=self.car(wheels={
+                    "clean": {"png": "wheel.png", "set": 2,
+                              "island": island}}))))
+
+            self.assertIn("island", str(caught.exception))
+
+    def test_a_wheel_set_must_be_a_set_id(self):
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(car=self.car(wheels={
+                "clean": {"png": "wheel.png", "set": 256}}))))
+
+        self.assertIn("set", str(caught.exception))
+
+    def test_an_unknown_wheel_key_is_refused(self):
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(car=self.car(wheels={
+                "clean": {"png": "wheel.png", "sett": 2}}))))
+
+        self.assertIn("sett", str(caught.exception))
+
+    def test_a_wheel_entry_without_an_image_is_refused(self):
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(car=self.car(wheels={
+                "clean": {"set": 2}}))))
+
+        self.assertIn("png", str(caught.exception))
 
     def test_a_slot_out_of_range_is_refused(self):
         for slot in (-1, 13, "1"):

@@ -23,6 +23,12 @@ CAR_KEYS = {
 }
 SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct"}
 WHEEL_KEYS = {"clean", "damaged", "fast"}
+WHEEL_ENTRY_KEYS = {"png", "set", "island"}
+WHEEL_VARIANTS = ("clean", "damaged", "fast")
+
+# A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
+# crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
+PAGE_TEXELS = 256
 
 MAX_SLOT = 12
 
@@ -77,11 +83,11 @@ class Car(object):
 
         _check_keys(where, "wheels", wheels, WHEEL_KEYS, "wheels")
 
-        for variant in ("clean", "damaged", "fast"):
+        for variant in WHEEL_VARIANTS:
             # deliberately allowed to be absent: the engine keeps the host's
             # wheel texture for a variant the bank does not carry
-            self.wheels[variant] = self._file(where, "wheels.%s" % variant,
-                                              wheels.get(variant))
+            self.wheels[variant] = _wheel(where, "wheels.%s" % variant,
+                                          wheels.get(variant), self._file)
 
         self.sounds = None
         sounds = data.get("sounds")
@@ -136,6 +142,82 @@ class Car(object):
             _fail(where, field, "%s does not exist (looked at %s)" % (rel, full))
 
         return full
+
+
+class Wheel(object):
+    """One declared wheel variant: the art, the page it is cropped from, and the
+    crop rect on that page.
+
+    `set` is what lets the bank carry a wheel MODEL. The engine keeps the host
+    level's wheel mesh and reads the imported wheel only for its page and its
+    crop rect (models.c BuildCarImportWheels: poly 2's texture_set is the page,
+    its UVs the rect, and the first eight polys must all be FT4), so a wheel
+    image with no page named cannot be carried at all - that variant keeps the
+    host's wheel texture instead.
+
+    `island` is (u0, v0, u1, v1) in page texels, u1/v1 EXCLUSIVE - the same
+    rectangle PIL's crop() takes, so a 60x60 sprite at the page origin is
+    (0, 0, 60, 60). Left unset, the bake uses the image's own size at the origin.
+    """
+
+    def __init__(self, path, setid, island):
+        self.path = path
+        self.set = setid
+        self.island = island
+
+
+def _wheel(where, field, data, file_of):
+    """One `wheels.<variant>` entry: a path, or {png, set, island}."""
+    if data is None or data == "":
+        return None
+
+    if isinstance(data, str):
+        # the plain form: art but no page, so no wheel model (see Wheel)
+        return Wheel(file_of(where, field, data), None, None)
+
+    if not isinstance(data, dict):
+        _fail(where, field, "must be a path string or {png, set, island}")
+
+    _check_keys(where, field, data, WHEEL_ENTRY_KEYS, "wheel")
+    # png is how the crop rect is measured, so it may be left out ONLY when the
+    # island is stated - a declaration read back out of a bank names the rect and
+    # has no image file to point at
+    path = file_of(where, field + ".png", data.get("png"))
+
+    setid = data.get("set")
+
+    if setid is not None and (not isinstance(setid, int)
+                              or not 0 <= setid <= 255):
+        _fail(where, field + ".set",
+              "%r is not a page set id 0..255" % (setid,))
+
+    island = data.get("island")
+
+    if island is not None:
+        if not isinstance(island, (list, tuple)) or len(island) != 4:
+            _fail(where, field + ".island",
+                  "must be four texel bounds [u0, v0, u1, v1]")
+
+        for value in island:
+            if not isinstance(value, int) or not 0 <= value <= PAGE_TEXELS:
+                _fail(where, field + ".island",
+                      "%r is not a texel bound 0..%d" % (value, PAGE_TEXELS))
+
+        u0, v0, u1, v1 = island
+
+        if u1 <= u0 or v1 <= v0:
+            _fail(where, field + ".island",
+                  "%r is empty (u1/v1 are exclusive, so u1 > u0 and v1 > v0)"
+                  % (island,))
+
+        island = tuple(island)
+
+    if setid is not None and island is None and path is None:
+        _fail(where, field,
+              "names a page but no crop rect: give \"island\", or a \"png\" to "
+              "measure one from")
+
+    return Wheel(path, setid, island)
 
 
 class Sounds(object):
