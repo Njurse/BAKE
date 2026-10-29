@@ -358,14 +358,16 @@ def sound_specs(bank, warnings):
         entry = {"model": slot,
                  "engine": {"wav": sounds.engine,
                             "rate_pct": sounds.engine_pct or 100,
-                            "loop": False},
+                            "loop_from": sounds.loop_from,
+                            "loop": True},
                  "idle": None,
                  "third": None}
 
         if sounds.idle:
             entry["idle"] = {"wav": sounds.idle,
                              "rate_pct": sounds.idle_pct or 100,
-                             "loop": False}
+                             "loop_from": sounds.loop_from,
+                             "loop": True}
         else:
             warnings.append("%s: no idle declared; the engine loop doubles as "
                             "the idle (as retail D1 banks do)" % carname)
@@ -567,7 +569,8 @@ def _page_source_hash(page, setid):
     """The (image hash, bake options) a page was baked from."""
     record = {"image": os.path.basename(page.source or ""),
               "transparent": page.transparent,
-              "tolerance": page.transparent_tolerance}
+              "tolerance": page.transparent_tolerance,
+              "chroma": page.transparent_chroma}
 
     if page.protect:
         record["protect"] = ["%02x%02x%02x" % tuple(c) for c in page.protect]
@@ -636,7 +639,8 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
 
         blob, colours, indices, _error, background = carbank_page.bake_page(
             pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
-            palette=page.palette, protect=page.protect)
+            palette=page.palette, protect=page.protect,
+            chroma=page.transparent_chroma)
 
         os.makedirs(os.path.dirname(want), exist_ok=True)
 

@@ -73,7 +73,10 @@ class FlagTests(unittest.TestCase):
         blocks = [data[i * vag.BLOCK_BYTES + 1]
                   for i in range(len(data) // vag.BLOCK_BYTES)]
 
-        self.assertEqual(blocks[0] & 0x04, 0x04, "loop start")
+        # the marker cannot be on block 0: PsyX's loop-start derivation drops a
+        # point that sits at the very beginning
+        self.assertEqual(blocks[0] & 0x04, 0, "no loop start on the first block")
+        self.assertEqual(blocks[1] & 0x04, 0x04, "loop start on block 1")
         self.assertEqual(blocks[-1] & 0x03, 0x03, "loop end + repeat")
 
 
@@ -92,6 +95,45 @@ class RateTests(unittest.TestCase):
         out = vag.resample(pcm, 11025, 22050)
 
         self.assertEqual(len(out), 22050)
+
+
+class RateFieldTests(unittest.TestCase):
+    """`samplerate` in a bank is not Hz.
+
+    PsyX plays every decoded buffer at 11000 Hz and applies the SPU pitch; the
+    engine derives that pitch as `samplerate * pitch / 44100`. Writing the Hz
+    rate there made a 11025 Hz VAG play at a quarter speed, which is heard as
+    "the pitch is completely wrong". The field has to be 44100*R/11000.
+    """
+
+    def test_the_field_gives_unity_pitch_for_its_rate(self):
+        for rate in (8000, 11025, 16000, 22050):
+            field = vag.rate_field(rate)
+            pitch = field * 4096 // 44100              # sound.c CompleteSoundSetup
+            played = vag.PSX_PLAYBACK_RATE * pitch / 4096.0
+
+            self.assertAlmostEqual(played, rate, delta=rate * 0.01,
+                                   msg="%d Hz plays at %.0f" % (rate, played))
+
+    def test_the_old_way_is_four_times_too_slow(self):
+        # documenting the bug: the rate as Hz
+        pitch = 11025 * 4096 // 44100
+
+        self.assertEqual(pitch, 1024)
+        self.assertAlmostEqual(vag.PSX_PLAYBACK_RATE * pitch / 4096.0, 2750,
+                               delta=5)
+
+    def test_normalise_uses_the_headroom(self):
+        samples, top, gain = vag.normalise([100, -1000, 500])
+
+        self.assertEqual(top, 1000)
+        self.assertAlmostEqual(gain, 0.9 * 32767 / 1000.0, places=3)
+        self.assertEqual(max(abs(s) for s in samples), int(0.9 * 32767))
+
+    def test_silence_is_left_alone(self):
+        samples, top, gain = vag.normalise([0, 0, 0])
+
+        self.assertEqual((samples, top, gain), ([0, 0, 0], 0, 1.0))
 
 
 if __name__ == "__main__":
