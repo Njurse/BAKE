@@ -143,7 +143,7 @@ donor's rows did.
 A Driver 2 car does not carry its wheels: the level has one shared
 `CLEANWHEEL`/`WHEEL`/`FASTWHEEL` pair of texture details and the engine draws
 every car with the host mesh. An imported car gets its own wheel by carrying a
-wheel MODEL in the bank — a `LUMP_CAR_WHEELS` segment (type 200), one record per
+wheel MODEL in the bank - a `LUMP_CAR_WHEELS` segment (type 200), one record per
 variant, which `models.c BuildCarImportWheels` reads back. The engine still
 keeps the host MESH; the record is where it gets the page and the crop rect to
 draw it with.
@@ -153,28 +153,54 @@ That is why a wheel needs more than an image:
 | key | required | meaning |
 | --- | --- | --- |
 | `set` | for a wheel model | the texture page the art lives on. A wheel record names a page, so a variant with no `set` cannot be carried and keeps the host level's wheel texture |
-| `island` | unless `png` can supply it | the crop rect on that page, `[u0, v0, u1, v1]` in texels, `u1`/`v1` **exclusive** — the same rectangle PIL's `crop()` takes, so a 60x60 sprite at the page origin is `[0, 0, 60, 60]`. Left out, the bake uses the image's own size at the origin |
-| `png` | no | the art. Used to measure a default `island`; a declaration read back out of a bank names the rect and has no image file |
+| `island` | unless `png` can supply it | the crop rect on that page, `[u0, v0, u1, v1]` in texels, `u1`/`v1` **exclusive** - the same rectangle PIL's `crop()` takes, so a 60x60 sprite at the page origin is `[0, 0, 60, 60]`. Left out, the bake uses the image's own size at the origin |
+| `png` | **yes for a wheel that carries art** | the sprite. It is composited INTO its island on the page at bake time (see below), not merely measured |
 
 The whole entry may also be a plain path (`"clean": "source/wheelclean.png"`),
 which is an image with no page: valid, and it bakes no wheel record.
 
-A bank carries **one** wheel set for the whole import — the segment has three
-variants, not three per model slot — so the first car in slot order that declares
+A bank carries **one** wheel set for the whole import - the segment has three
+variants, not three per model slot - so the first car in slot order that declares
 wheels owns it, and another car's wheels are reported rather than silently
 merged.
 
-The art's backdrop has to be **transparent**, and there is no per-texel alpha
-here: the engine's marker is a CLUT entry of `0x0000`, and it keys the backdrop
-off the sprite's corner index. A sprite baked on a pink sky therefore draws as an
-opaque square — bake the page with the colour key:
+**Declare all three variants.** `clean`, `damaged`, `fast` - an undeclared
+variant is written as offset -1, which means "keep the HOST level's wheel", and
+the host's is a retail sprite baked opaque: a pink square around a damaged car's
+wheel. Reusing one sprite for `damaged` is a legitimate placeholder
+(`"damaged": {"png": "textures/wheelclean.png", "set": 2, "island": [0, 0, 60, 60]}`).
 
-    python carbank_page.py work/pages/page2.png --set 2 --bank . --transparent auto
+#### The island is carved from the sprite
 
-`--transparent` takes a hex colour (`ff00ff`), `auto` (the image's top-left
-pixel) or `alpha` (the PNG's own alpha channel); `--transparent-tolerance` widens
-the match for a soft edge. `carbank_bake` warns, naming the page and colour, when
-a wheel's backdrop is still opaque.
+The page's own pixels at the island are **replaced** by the declared sprite, and
+the sprite's own see-through texels (its alpha channel if it has one, else its
+top-left colour) are masked transparent. So:
+
+- whatever the page art carried at that rectangle cannot reach the bank;
+- the declared sprite is the only thing that can end up in the wheel;
+- editing the sprite re-bakes its page - it is part of the page's source hash.
+
+The page still has to key its backdrop, because the engine has no per-texel alpha:
+the marker is a CLUT entry of `0x0000` and `CarImportDeriveWheelPaletteRow` keys
+it off the sprite's **corner index**. Declare the key on the page:
+
+```json
+"textures": {
+  "2": { "png": "textures/page2.png", "transparent": "auto",
+         "transparent_chroma": 128 }
+}
+```
+
+`transparent` takes a hex colour (`ff00ff`), `auto` (the image's top-left pixel)
+or `alpha`; `transparent_tolerance` widens the match and **defaults to 96** when a
+key is given (`0` = the exact colour only, which leaves the antialiased ring round
+a sprite painted). `carbank_bake` warns, naming the page and the indices, if any
+palette entry still paints the key after keying.
+
+A declared page or sprite may not live under `work/` or `pages/` - see the note
+above the `textures` section - and the engine nowadays logs which row it derived
+(`cross-city: ... wheel tyre sprite (0,0)-(60,60) background index 14 -> row 0`)
+and warns instead of returning -1 when no row clears the backdrop.
 
 ### `sounds`
 
@@ -242,8 +268,8 @@ then plays the host city's engine without a word.
 Byte budget: `sample_bytes` per sample (16 KiB) at `max_rate` (16000 Hz). This is
 not taste - `LoadSoundBankDynamic` writes the payload to a running SPU address
 with no bounds check, so an oversized bank writes past the end of SPU RAM and
-takes the game with it. Retail car banks are 2-4 KiB per car for the same
-reason. A longer loop is trimmed and the bake says so.
+takes the game with it. Retail spends what it needs - its own three-sample car
+bank measures 29,008 bytes at 16 kHz - so the cap is a ceiling, not a target. A longer loop is trimmed and the bake says so.
 
 ### `remap`
 
