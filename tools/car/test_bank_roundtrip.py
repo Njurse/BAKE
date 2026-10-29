@@ -20,8 +20,10 @@ Run from this directory:
 """
 
 import hashlib
+import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,7 @@ from collections import Counter
 import carbank_export
 import carbank_import
 import exportd2
+import lev1
 
 BANK = os.path.abspath(os.path.join(HERE, "..", "..", "..",
                                     "betacars", "banks", "firebird"))
@@ -82,6 +85,136 @@ class RebakeIsByteIdenticalTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(rebuilt), "%s was not written" % name)
             self.assertEqual(_sha256(rebuilt), _sha256(os.path.join(BANK, name)),
                              "%s changed when an untouched bank was rebuilt" % name)
+
+
+class WheelSegmentTests(unittest.TestCase):
+    """The wheel segment: one (type 200) segment beside the car models.
+
+    The carrier, the record encoding and the -1 rule were proven before this was
+    attached to the bank; what these check is the placement - the segment the
+    engine finds, naming the pages the bank carries, and nothing carried for a
+    variant the declaration leaves out.
+    """
+
+    def setUp(self):
+        _need_bank(self)
+
+        with open(LEV, "rb") as f:
+            self.blob = f.read()
+
+    def test_the_segment_rides_beside_the_car_models(self):
+        types = [typ for typ, _body, _size in exportd2.d2_segments(self.blob)
+                 if typ]
+
+        self.assertIn(exportd2.LUMP_CAR_WHEELS, types,
+                      "the bank carries no wheel segment")
+        self.assertEqual(types.index(exportd2.LUMP_CAR_WHEELS),
+                         types.index(exportd2.LUMP_CAR_MODELS) + 1,
+                         "the wheel segment is not the one after the car models")
+
+    def test_an_absent_variant_is_minus_one(self):
+        body, size = exportd2.d2_lump(self.blob, exportd2.LUMP_CAR_WHEELS)
+        count = struct.unpack_from("<i", self.blob, body)[0]
+
+        self.assertEqual(count, len(exportd2.WHEEL_VARIANTS))
+
+        offsets = [struct.unpack_from("<i", self.blob, body + 4 + i * 4)[0]
+                   for i in range(count)]
+
+        for i, offset in enumerate(offsets):
+            if offset == -1:
+                continue
+
+            self.assertTrue(0 < offset < size,
+                            "wheel %d offset %d is outside the segment" %
+                            (i, offset))
+
+        # the Firebird has no damaged wheel, and that absence is carried as -1
+        # rather than faked with the clean one
+        self.assertEqual(offsets[exportd2.WHEEL_VARIANTS.index("damaged")], -1,
+                         "the bank fakes a damaged wheel it does not have")
+        self.assertNotEqual(offsets[exportd2.WHEEL_VARIANTS.index("clean")], -1)
+
+    def test_a_wheel_names_its_own_page(self):
+        body, _size = exportd2.d2_lump(self.blob, exportd2.LUMP_CAR_WHEELS)
+
+        for i, variant in enumerate(exportd2.WHEEL_VARIANTS):
+            offset = struct.unpack_from("<i", self.blob, body + 4 + i * 4)[0]
+
+            if offset == -1:
+                continue
+
+            model = lev1.decode_model(self.blob, body + offset)
+
+            self.assertEqual(model.errors, [], "wheel %s does not decode"
+                             % variant)
+            self.assertTrue(8 <= len(model.polys) <= 24,
+                            "the engine takes 8..24 wheel polys, not %d"
+                            % len(model.polys))
+            self.assertEqual({p.kind for p in model.polys[:8]}, {"FT4"},
+                             "the engine rejects a wheel whose first 8 polys "
+                             "are not FT4")
+
+            # the page must be one the bank carries, or the wheel draws
+            # whatever the host has on that slot
+            _base, entries = exportd2.d2_page_entries(
+                self.blob, exportd2.d2_texture_info(self.blob)[3])
+
+            self.assertIn(model.polys[2].texture_set, entries,
+                          "wheel %s names a page the bank does not carry"
+                          % variant)
+
+    def test_the_manifest_and_the_bank_agree(self):
+        # the bank is rebuilt from FIREBIRD.json, so the manifest is what says
+        # which pages the wheels use: verify_wheels reads the segment back
+        # against it
+        with open(MANIFEST, "r") as f:
+            manifest = json.load(f)
+
+        specs = exportd2._load_wheels(manifest)
+
+        self.assertTrue(any(specs), "the manifest declares no wheels")
+        self.assertEqual(exportd2.verify_wheels(self.blob, specs), [])
+
+    def test_a_declaration_read_back_from_the_bank_keeps_its_wheels(self):
+        # carbank_export --declare writes this; a declaration that named only an
+        # image would bake the segment away, because a wheel needs a page
+        records = carbank_export._wheel_records(self.blob)
+
+        self.assertEqual(records.get("clean"),
+                         {"set": 2, "island": [0, 0, 60, 60]})
+        self.assertEqual(records.get("fast"),
+                         {"set": 3, "island": [0, 0, 60, 60]})
+        self.assertNotIn("damaged", records,
+                         "the bank has no damaged wheel to declare")
+
+
+class WheelSegmentIsAdditiveTests(unittest.TestCase):
+    """No declared wheels = no segment, and the segments before it do not move.
+
+    This is the guard the byte-identity check leans on: attaching the wheels had
+    to be an ADDITION, so a bank that declares none writes exactly what it wrote
+    before the segment existed.
+    """
+
+    def _types(self, wheels_body):
+        blob = exportd2.assemble_bank(b"model-body", b"texinfo-body",
+                                      b"pallet-body", [b"\x00" * 2048],
+                                      b"texture-names", b"model-names",
+                                      wheels_body)
+        return [typ for typ, _body, _size in exportd2.d2_segments(blob) if typ]
+
+    def test_no_wheels_means_no_segment(self):
+        self.assertEqual(self._types(None),
+                         [exportd2.LUMP_CAR_MODELS, exportd2.LUMP_TEXTUREINFO,
+                          exportd2.LUMP_PALLET, exportd2.LUMP_TEXTURENAMES,
+                          exportd2.LUMP_MODELNAMES])
+
+    def test_wheels_are_inserted_after_the_car_models(self):
+        self.assertEqual(self._types(b"wheel-body"),
+                         [exportd2.LUMP_CAR_MODELS, exportd2.LUMP_CAR_WHEELS,
+                          exportd2.LUMP_TEXTUREINFO, exportd2.LUMP_PALLET,
+                          exportd2.LUMP_TEXTURENAMES, exportd2.LUMP_MODELNAMES])
 
 
 class ExportImportTests(unittest.TestCase):

@@ -6,7 +6,7 @@ two halves:
 
 | half | who writes it | what it holds |
 | --- | --- | --- |
-| top level (`city`, `lev`, `lcf`, `size`, `included_sets`, `pages`, `palette_records`, `page_base`, `warnings`, `checks`) | the bake, every time | what the bank turned out to be |
+| top level (`city`, `lev`, `lcf`, `size`, `included_sets`, `pages`, `wheels`, `palette_records`, `page_base`, `warnings`, `checks`) | the bake, every time | what the bank turned out to be |
 | `declare` | the author, once | what the author wants: sources, layout, sounds |
 
 **The bake never overwrites `declare`.** It is read, validated, used, and written
@@ -42,9 +42,10 @@ donor-derived bank (what `basebank.py` builds) and is used as it stands.
         "pages":   [ { "set": 1, "png": "source/page1.png" } ],
 
         "wheels": {
-          "clean":   "source/wheelclean.png",
-          "damaged": null,
-          "fast":    "source/wheelfast.png"
+          "clean":   { "png": "source/wheelclean.png", "set": 2,
+                       "island": [0, 0, 60, 60] },
+          "fast":    { "png": "source/wheelfast.png", "set": 3,
+                       "island": [0, 0, 60, 60] }
         },
 
         "sounds": {
@@ -81,12 +82,38 @@ bake writes `-1` for them.
 | `low` | no | the low-detail body (LOD); absent means the donor's |
 | `atlas` | one of | a single atlas PNG covering every page, in page order |
 | `pages[]` | one of | `{set, png}` per texture page — use this instead of `atlas` when the pages are separate images |
-| `wheels.clean` | no | the road wheel; absent means the donor's wheel texture |
-| `wheels.damaged` | no | the buckled wheel — **omit it cleanly** when the car has none; the engine then keeps the host wheel texture for that variant (`models.c:2743`) |
+| `wheels.clean` | no | the road wheel: `{png, set, island}` — see below |
+| `wheels.damaged` | no | the buckled wheel — **omit it cleanly** when the car has none; the bank writes `-1` and the engine keeps the host wheel texture for that variant (`models.c:2743`) |
 | `wheels.fast` | no | the high-speed blur wheel |
 | `sounds` | no | see below |
 | `palette` | no | a CLUT source for a car whose colours are not the donor's |
 | `remap` | no | `set` / `id` maps applied to every poly as it is read |
+
+### `wheels`
+
+A Driver 2 car does not carry its wheels: the level has one shared
+`CLEANWHEEL`/`WHEEL`/`FASTWHEEL` pair of texture details and the engine draws
+every car with the host mesh. An imported car gets its own wheel by carrying a
+wheel MODEL in the bank — a `LUMP_CAR_WHEELS` segment (type 200), one record per
+variant, which `models.c BuildCarImportWheels` reads back. The engine still
+keeps the host MESH; the record is where it gets the page and the crop rect to
+draw it with.
+
+That is why a wheel needs more than an image:
+
+| key | required | meaning |
+| --- | --- | --- |
+| `set` | for a wheel model | the texture page the art lives on. A wheel record names a page, so a variant with no `set` cannot be carried and keeps the host level's wheel texture |
+| `island` | unless `png` can supply it | the crop rect on that page, `[u0, v0, u1, v1]` in texels, `u1`/`v1` **exclusive** — the same rectangle PIL's `crop()` takes, so a 60x60 sprite at the page origin is `[0, 0, 60, 60]`. Left out, the bake uses the image's own size at the origin |
+| `png` | no | the art. Used to measure a default `island`; a declaration read back out of a bank names the rect and has no image file |
+
+The whole entry may also be a plain path (`"clean": "source/wheelclean.png"`),
+which is an image with no page: valid, and it bakes no wheel record.
+
+A bank carries **one** wheel set for the whole import — the segment has three
+variants, not three per model slot — so the first car in slot order that declares
+wheels owns it, and another car's wheels are reported rather than silently
+merged.
 
 ### `sounds`
 

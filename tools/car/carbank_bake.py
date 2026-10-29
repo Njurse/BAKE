@@ -14,6 +14,10 @@ What comes from the declaration (bank.json's `declare` half):
 
   * each car's clean/damaged/low OBJ, read back with its real texture materials
   * the slot order
+  * the wheel variants that name a page: each becomes a wheel MODEL in the bank
+    (LUMP_CAR_WHEELS, type 200). The engine keeps the host level's wheel MESH and
+    reads the imported record only for its page and crop rect, so a wheel with
+    no page is left out of the segment (-1) and keeps the host texture.
 
 A car that declares fewer than the three variants a Driver 2 model needs gets a
 WARNING and has the missing ones filled with the CLEAN model. A Driver 2 model
@@ -42,6 +46,9 @@ import struct
 import exportd2
 
 VARIANTS = ("clean", "damaged", "low")
+# the wheel variants the ENGINE carries, in the order LUMP_CAR_WHEELS holds them
+# (models.c CAR_IMPORT_WHEEL_CLEAN / _DAMAGED / _FAST)
+WHEELS = bankjson.WHEEL_VARIANTS
 
 
 def _warn(msg):
@@ -288,11 +295,141 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
             declared_sets.add(decl_page["set"] if isinstance(decl_page, dict)
                               else decl_page[0])
 
-    wheel_sets = sorted(declared_sets - body_sets)
+    wheel_sets = set(declared_sets - body_sets)
+
+    # A declared wheel that names its page becomes a wheel MODEL in the bank
+    # (LUMP_CAR_WHEELS): the engine keeps the host level's wheel mesh and reads
+    # the imported record only for its page and crop rect, so without a page
+    # there is nothing to carry. A variant the declaration leaves out is written
+    # as -1 and keeps the host level's wheel texture - the missing damaged wheel
+    # on the Firebird is that case, deliberately.
+    wheels = wheel_specs(bank, warnings)
+
+    if any(wheels):
+        manifest["wheels"] = wheels
+    else:
+        manifest.pop("wheels", None)
+
+    # the wheel pages are part of the bank's texture info whether or not a body
+    # poly samples them, so they are named here rather than inferred later
+    wheel_sets.update(spec["set"] for spec in wheels if spec)
+
     if wheel_sets:
-        manifest["wheel_sets"] = wheel_sets
+        manifest["wheel_sets"] = sorted(wheel_sets)
+    else:
+        manifest.pop("wheel_sets", None)
 
     return manifest, warnings
+
+
+def _png_size(path):
+    """(width, height) straight out of a PNG's IHDR, or None.
+
+    The declared wheel art is a PNG and the bake only needs its extent, so this
+    reads the header rather than decoding a 256x256 image to measure it.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+    except OSError:
+        return None
+
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+
+    return struct.unpack(">II", head[16:24])
+
+
+def wheel_specs(bank, warnings):
+    """One entry per wheel variant the bank should carry, or None for -1.
+
+    The declaration is per car, but a bank carries ONE wheel set for the whole
+    import (the engine reads three variants, not one per model slot), so the
+    first car in slot order that declares wheels owns it and any other car's
+    wheels are reported rather than silently merged.
+    """
+    specs = [None] * len(WHEELS)
+
+    owner = None
+
+    for _slot, carname in bank.order:
+        car = bank.cars[carname]
+        declared = [(variant, car.wheels.get(variant)) for variant in WHEELS]
+        declared = [(variant, wheel) for variant, wheel in declared
+                    if wheel is not None]
+
+        if not declared:
+            continue
+
+        if owner is not None:
+            warnings.append(
+                "%s declares wheels too; a bank carries one wheel set for the "
+                "whole import, and %s's is already it" % (carname, owner))
+            continue
+
+        owner = carname
+
+        for variant, wheel in declared:
+            if wheel.set is None:
+                warnings.append(
+                    "%s: wheels.%s has an image but no page set, so the bank "
+                    "cannot name a page for it; that variant keeps the host "
+                    "level's wheel texture" % (carname, variant))
+                continue
+
+            island = wheel.island
+
+            if island is None:
+                island = _default_island(wheel.path, carname, variant, warnings)
+
+            if island is None:
+                continue
+
+            specs[WHEELS.index(variant)] = {"variant": variant,
+                                            "set": wheel.set,
+                                            "island": list(island)}
+
+    if owner is not None:
+        absent = [variant for variant, spec in zip(WHEELS, specs)
+                  if spec is None]
+        if absent:
+            _warn("%s: the bank carries no %s wheel (offset -1), so the engine "
+                  "keeps the host level's wheel for %s"
+                  % (owner, "/".join(absent),
+                     "it" if len(absent) == 1 else "them"))
+
+    return specs
+
+
+def _default_island(path, carname, variant, warnings):
+    """The declared image's own extent at the page origin."""
+    if not path:
+        warnings.append(
+            "%s: wheels.%s names no crop rect and no image to measure one from; "
+            "declare \"island\" for that variant" % (carname, variant))
+        return None
+
+    size = _png_size(path)
+
+    if size is None:
+        warnings.append(
+            "%s: wheels.%s is not a PNG, so its crop rect cannot be read from "
+            "it; declare \"island\" for that variant" % (carname, variant))
+        return None
+
+    wheels_w, wheels_h = size
+
+    if not (1 <= wheels_w <= 256 and 1 <= wheels_h <= 256):
+        warnings.append(
+            "%s: wheels.%s is %dx%d; a crop rect has to fit one 256x256 page"
+            % (carname, variant, wheels_w, wheels_h))
+        return None
+
+    _warn("%s: wheels.%s takes its crop rect from the image, %dx%d at the page "
+          "origin - declare \"island\" if the art sits elsewhere on the page"
+          % (carname, variant, wheels_w, wheels_h))
+
+    return (0, 0, wheels_w, wheels_h)
 
 
 def _sync_page_sizes(manifest, bank_dir, out_dir):
