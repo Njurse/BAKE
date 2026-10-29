@@ -42,6 +42,8 @@ import bake
 import bankjson
 import carbank_import
 import exportd2
+import fourbpp
+import pages1
 import struct
 import exportd2
 
@@ -314,12 +316,75 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # poly samples them, so they are named here rather than inferred later
     wheel_sets.update(spec["set"] for spec in wheels if spec)
 
+    _wheel_transparency_warnings(wheels, bank_dir, warnings)
+
     if wheel_sets:
         manifest["wheel_sets"] = sorted(wheel_sets)
     else:
         manifest.pop("wheel_sets", None)
 
     return manifest, warnings
+
+
+def _wheel_transparency_warnings(wheels, bank_dir, warnings):
+    """Say so when a wheel sprite's backdrop is OPAQUE on its page.
+
+    The engine has no per-texel alpha: it keys the backdrop off a CLUT entry of
+    0x0000 at the sprite's background index (models.c
+    CarImportDeriveWheelPaletteRow only accepts a row whose entry at that index
+    is 0 in its first pass). A backdrop baked as a colour - a pink sky behind the
+    wheel - therefore leaves the sprite's square corners drawing on the wheel.
+    The fast variant is exempt: CarImportReserveFastWheelPalette gives it its own
+    row with that entry cleared.
+    """
+    for spec in wheels:
+        if spec is None or spec["variant"] == "fast":
+            continue
+
+        path = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % spec["set"])
+
+        if not os.path.isfile(path):
+            continue
+
+        try:
+            with open(path, "rb") as f:
+                blob = f.read()
+
+            rows, raw = pages1.read_page(blob, 0, len(blob))
+            indices = fourbpp.decode_indices(raw)
+        except (ValueError, struct.error) as exc:
+            warnings.append("wheel %s: page %d cannot be read (%s), so its "
+                            "transparency cannot be checked"
+                            % (spec["variant"], spec["set"], exc))
+            continue
+
+        u0, v0, u1, v1 = spec["island"]
+
+        if not rows or not (0 <= u0 < u1 <= fourbpp.PAGE_W
+                            and 0 <= v0 < v1 <= fourbpp.PAGE_H):
+            continue
+
+        # the engine votes the sprite's background from its four corners
+        votes = {}
+
+        for x, y in ((u0, v0), (u1 - 1, v0), (u0, v1 - 1), (u1 - 1, v1 - 1)):
+            k = indices[y * fourbpp.PAGE_W + x]
+            votes[k] = votes.get(k, 0) + 1
+
+        bg = max(votes, key=lambda k: (votes[k], -k))
+
+        if any(struct.unpack_from("<H", row, bg * 2)[0] == 0 for row in rows):
+            continue
+
+        value = struct.unpack_from("<H", rows[0], bg * 2)[0]
+        r, g, b = ((value & 31) << 3, ((value >> 5) & 31) << 3,
+                   ((value >> 10) & 31) << 3)
+
+        warnings.append(
+            "wheel %s: its sprite's backdrop is index %d (#%02x%02x%02x) on page "
+            "%d and no CLUT row clears it, so the square's corners draw - re-bake "
+            "that page with carbank_page.py --transparent %02x%02x%02x"
+            % (spec["variant"], bg, r, g, b, spec["set"], r, g, b))
 
 
 def _png_size(path):
