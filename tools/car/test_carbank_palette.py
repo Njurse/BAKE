@@ -26,8 +26,14 @@ import fourbpp
 BANK = os.path.abspath(os.path.join(HERE, "..", "..", "..",
                                     "betacars", "banks", "firebird"))
 LEV = os.path.join(BANK, "FIREBIRD.LEV")
-PALLET = os.path.join(BANK, "pallet.bin")
-PALETTE_JSON = os.path.join(BANK, "palette.json")
+# donor/ in the split layout (bank.json "donor_dir"), the bank folder when flat
+_DONOR = (os.path.join(BANK, "donor")
+          if os.path.isfile(os.path.join(BANK, "donor", "pallet.bin")) else BANK)
+PALLET = os.path.join(_DONOR, "pallet.bin")
+PALETTE_JSON = os.path.join(_DONOR, "palette.json")
+# the baked pages: build/ in the split layout, the bank folder when flat
+PAGES_BASE = (os.path.join(BANK, "build")
+              if os.path.isdir(os.path.join(BANK, "build", "pages")) else BANK)
 
 STP = 0x8000
 
@@ -121,12 +127,12 @@ class FromPagesTests(unittest.TestCase):
 
         import pages1
 
-        rows = carbank_palette.rows_from_pages(BANK, {1, 2, 3})
+        rows = carbank_palette.rows_from_pages(PAGES_BASE, {1, 2, 3})
 
         self.assertEqual([r["tpageindex"] for r in rows], [1, 2, 3])
 
         for row in rows:
-            with open(os.path.join(BANK, "pages",
+            with open(os.path.join(PAGES_BASE, "pages",
                                    "PAGE_%d.bin" % row["tpageindex"]), "rb") as f:
                 page = f.read()
 

@@ -44,7 +44,10 @@ BANK = os.path.abspath(os.path.join(HERE, "..", "..", "..",
                                     "betacars", "banks", "firebird"))
 LEV = os.path.join(BANK, "FIREBIRD.LEV")
 # the REBUILD manifest (raw blocks), not bank.json which carries the declaration
-MANIFEST = os.path.join(BANK, "FIREBIRD.json")
+# build/ in the split layout (bank.json "build_dir"), the bank folder when flat
+MANIFEST = next((p for p in (os.path.join(BANK, "build", "FIREBIRD.json"),
+                             os.path.join(BANK, "FIREBIRD.json"))
+                 if os.path.isfile(p)), os.path.join(BANK, "FIREBIRD.json"))
 
 
 def _sha256(path):
