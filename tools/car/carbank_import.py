@@ -31,7 +31,7 @@ import obj2geom
 
 def import_car(obj_path, scale=0.68267, grey=False,
                set_map=None, id_map=None, default_page=None,
-               flip_y=False, flip_winding=False):
+               flip_y=False, flip_winding=False, flip_z=False):
     """An OBJ (as carbank_export wrote it) -> a geom record bake.py can use.
 
     `default_page` is (set, id) for an OBJ whose materials are not named
@@ -56,7 +56,7 @@ def import_car(obj_path, scale=0.68267, grey=False,
     name = os.path.splitext(os.path.basename(obj_path))[0]
 
     return obj2geom.build_geom(verts, uvs, faces, scale, grey, name, mats,
-                               flip_y, flip_winding, kinds)
+                               flip_y, flip_winding, kinds, flip_z)
 
 
 def _remap_page(page, set_map, id_map):
