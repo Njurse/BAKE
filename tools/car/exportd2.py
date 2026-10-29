@@ -1070,6 +1070,16 @@ def build_wheel_body(specs):
 def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     """One sample: the WAV encoded to VAG blocks, with its bank header fields.
 
+    Every knob arrives already resolved (see carbank_bake._resolved_sample), and
+    they are applied in this order, because the order is audible:
+
+        resample -> trim -> fade_out -> gain_db -> level -> budget -> encode
+
+    Trimming before the fade means the fade lands on the new tail; the fade
+    before the level means a fade cannot pull the peak down and make `level`
+    scale everything else up; and the level last means `gain_db` is a relative
+    trim against a fixed ceiling rather than a fight with normalisation.
+
     `budget` is a BYTE cap, and it is not cosmetic. LoadSoundBankDynamic writes
     the payload to the SPU at a running address and takes its size from the
     bank itself - `lsbTabs.addr += length - slength` with no bounds check - so a
@@ -1088,34 +1098,85 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
         return None
 
     samples, rate = vag.read_wav(path)
-    pct = spec.get("rate_pct") or 100
+    source_rate = rate
+    wanted = spec.get("rate")
 
-    if pct != 100:
-        rate = int(rate * pct / 100)
+    if wanted:
+        rate = int(wanted)
+    else:
+        pct = spec.get("rate_pct") or 100
 
-    if rate > SOUND_MAX_RATE:
-        samples = vag.resample(samples, rate, SOUND_MAX_RATE)
-        rate = SOUND_MAX_RATE
+        if pct != 100:
+            rate = int(rate * pct / 100)
+
+    max_rate = int(spec.get("max_rate") or SOUND_MAX_RATE)
+
+    if rate > max_rate:
+        samples = vag.resample(samples, source_rate, max_rate)
+        rate = max_rate
 
     rate, clamped = vag.fit_rate(rate)
 
     if clamped:
-        samples = vag.resample(samples, clamped, rate)
+        samples = vag.resample(samples, source_rate, clamped)
+        source_rate = clamped
+        rate = clamped
         warnings.append("sound %s: %d Hz is outside the SPU range; resampled to "
                         "%d" % (label, clamped, rate))
 
+    trim = spec.get("trim")
+
+    if trim:
+        before = len(samples)
+        samples = vag.trim(samples, trim[0], trim[1], rate)
+
+        if len(samples) != before:
+            warnings.append("sound %s: trimmed %s -> %.2fs"
+                            % (label, "%.2f-%.2fs" % (trim[0], trim[1]),
+                               len(samples) / float(rate or 1)))
+
+    fade = float(spec.get("fade_out") or 0.0)
+
+    if fade:
+        samples = vag.fade_out(samples, fade, rate)
+
+    gain = float(spec.get("gain_db") or 0.0)
+
+    if gain:
+        samples = vag.gain_db(samples, gain)
+        warnings.append("sound %s: %+.1f dB applied" % (label, gain))
+
     # A bank sample has no gain of its own: the engine's channel volume is the
     # same for every car, so an un-normalised WAV plays quietly next to retail's.
-    samples, had_peak, gain = vag.normalise(samples, SOUND_PEAK)
+    # `normalise: false` is the escape hatch for a sample whose own level is the
+    # point - a siren that must sit under the engine, a take already mastered -
+    # and then gain_db is the only level control there is.
+    level = spec.get("level")
 
-    if gain != 1.0:
+    if level is None:
+        level = SOUND_PEAK
+
+    normalise = spec.get("normalise")
+
+    if normalise is None:
+        normalise = True
+
+    if normalise:
+        samples, had_peak, applied = vag.normalise(
+            samples, float(level), force=bool(spec.get("force")))
+    else:
+        had_peak = max((abs(v) for v in samples), default=0)
+        applied = 1.0
+
+    if applied != 1.0:
         rms = (sum(float(v) * v for v in samples) / len(samples)) ** 0.5
         warnings.append("sound %s: normalised peak %d -> %d (x%.2f); rms %.0f "
                         "(%.0f%% of full scale, retail is 29-39%%)"
-                        % (label, had_peak, int(SOUND_PEAK * 32767), gain, rms,
-                           100.0 * rms / 32767.0))
+                        % (label, had_peak, int(float(level) * 32767), applied,
+                           rms, 100.0 * rms / 32767.0))
 
     # 16 bytes per 28 samples: how many samples fit the byte budget
+    budget = int(spec.get("sample_bytes") or budget)
     limit = (budget // vag.BLOCK_BYTES) * vag.SAMPLES_PER_BLOCK
 
     if limit > 0 and len(samples) > limit:
@@ -1136,7 +1197,8 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
                         % (label, rms))
 
     return {"data": data, "rate": rate, "loop": 1 if spec.get("loop") else 0,
-            "samples": count, "rate_field": vag.rate_field(rate)}
+            "samples": count, "rate_field": vag.rate_field(rate),
+            "level": float(level), "gain_db": gain}
 
 
 def build_sounds_body(specs, warnings):

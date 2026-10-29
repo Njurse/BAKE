@@ -182,27 +182,54 @@ Per car, in the same shape for every model slot the bank carries:
 | `horn` | yes unless `cop` | the civilian horn |
 | `siren` | yes when `cop` | the police siren |
 | `cop` | no (default false) | this car is a police vehicle |
+| `engine_pct` / `idle_pct` | no (100) | the source rate as a percentage, the Driver 1 beta knob |
+| `loop_from` | no (0) | seconds into the looping samples where the loop starts |
+| `peak` | no (0.999) | block-wide target level for every sample |
+| `max_rate` | no (16000) | block-wide rate ceiling |
+| `sample_bytes` | no (16384) | per-sample SPU byte budget |
+
+Each of `engine` / `idle` / `horn` / `siren` is either a path or an object with
+that path as `wav` plus its own settings:
+
+```json
+"engine": { "wav": "sounds/engine.wav", "level": 0.999, "normalise": true,
+            "force": false, "gain_db": 0.0, "rate": null, "rate_pct": 100,
+            "loop": true, "loop_from": 0.0, "trim": null, "fade_out": 0.0 }
+```
+
+`level` (target peak), `normalise` (false = keep the source level),
+`force` (rescale even when already at level), `gain_db`, `rate` (an exact
+frequency, which wins over `rate_pct`), `rate_pct`, `loop`, `loop_from`,
+`trim` (`[start, end]` seconds) and `fade_out` (seconds). The defaults are the
+values above, and `docs/SOUNDS.md` explains what each one does and the order
+they are applied in.
+
+**A bare path is complete.** Everything above has a default that the bake fills
+in, so `"engine": "sounds/engine.wav"` is a legal, finished declaration.
+`carbank_bake --complete` writes those defaults into the file instead, which
+changes nothing about the bake (`test_sound_knobs.py` asserts a completed
+declaration bakes byte for byte the same) and lets someone read - and adjust -
+what they are getting.
 
 The samples are converted to PSX VAG/ADPCM at bake time (see
 `docs/SOUNDS.md`), and the engine reads them as a three-sample bank: **engine,
 idle, then the third sample**. A `cop` car puts the **siren** in the third slot
-and leaves `horn` unused â€” the siren replaces the horn rather than joining it,
+and leaves `horn` unused - the siren replaces the horn rather than joining it,
 because that is the slot the game presses for a police car. Declaring both on a
 cop car is refused: it hides which one would actually play.
 
-Rate: each sample keeps its own file's rate unless `sounds.engine_pct` /
-`sounds.idle_pct` restate it, in the same percent-of-source-rate sense as the
-Driver 1 beta knobs (`add_car_sounds.BETA_ENGINE_PITCH` = 60,
-`BETA_IDLE_PITCH` = 75). Rates are clamped to what the SPU can play.
+`engine_pct` / `idle_pct` scale the source rate the way the Driver 1 beta knobs
+do (`add_car_sounds.BETA_ENGINE_PITCH` = 60, `BETA_IDLE_PITCH` = 75). The result
+is capped at `max_rate`, and then at what the SPU can play.
 
-The bake writes the samples as `LUMP_CAR_SOUNDS` (201) — a per-model D2 dynamic
-bank — and `cop` also sets `LUMP_CAR_SIRENS` (202). Both are verified the way
+The bake writes the samples as `LUMP_CAR_SOUNDS` (201) - a per-model D2 dynamic
+bank - and `cop` also sets `LUMP_CAR_SIRENS` (202). Both are verified the way
 `CarImportSoundEntry` reads them (count exactly 3, offsets and payloads inside
 the segment), because that reader answers a bad bank with "no sounds" and the car
 then plays the host city's engine without a word.
 
-Byte budget: **8 KiB per sample**, and the rate is capped at 11025 Hz. This is
-not taste — `LoadSoundBankDynamic` writes the payload to a running SPU address
+Byte budget: `sample_bytes` per sample (16 KiB) at `max_rate` (16000 Hz). This is
+not taste - `LoadSoundBankDynamic` writes the payload to a running SPU address
 with no bounds check, so an oversized bank writes past the end of SPU RAM and
 takes the game with it. Retail car banks are 2-4 KiB per car for the same
 reason. A longer loop is trimmed and the bake says so.

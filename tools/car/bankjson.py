@@ -21,8 +21,44 @@ CAR_KEYS = {
     "clean", "damaged", "low", "atlas", "textures", "wheels",
     "sounds", "palette", "remap",
 }
+# A car's sounds: three samples (engine, idle, horn-or-siren) plus the knobs
+# the bake applies to them. Every sample can be a bare path - the short form
+# almost every bank uses - or an object carrying that path as `wav` plus its own
+# settings, so one car can trim its loop while another leaves its alone.
+#
+# The values below are ALL spelling out what the bake does when a key is absent:
+# carbank_bake --complete writes them into bank.json so a hand-edited bank says
+# out loud what it is getting, and filling them in by hand reproduces the bake
+# exactly (SOUND_DEFAULTS / SOUND_SAMPLE_DEFAULTS are the one source for both).
 SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct",
-              "loop_from"}
+              "loop_from", "peak", "max_rate", "sample_bytes"}
+SOUND_SAMPLE_KEYS = {"wav", "level", "force", "normalise", "gain_db",
+                     "rate", "rate_pct", "loop", "loop_from", "trim",
+                     "fade_out"}
+
+# bank-wide defaults (a car may override the per-sample ones per sample)
+SOUND_DEFAULTS = {
+    "engine_pct": 100,
+    "idle_pct": 100,
+    "loop_from": 0.0,
+    "peak": 0.999,      # retail's own car banks sit at 100% (sound_level_diag)
+    "max_rate": 16000,  # retail's rate, and the SPU budget is sized for it
+    "sample_bytes": 16384,
+}
+
+# per-sample defaults; `loop` is decided by the sample's ROLE (the third sample
+# is a one-shot horn, the other two are loops), so it is not listed here.
+SOUND_SAMPLE_DEFAULTS = {
+    "level": None,      # None = the bank's `peak`
+    "force": False,     # scale even inside the level dead band
+    "normalise": True,  # False = keep the source level; gain_db only
+    "gain_db": 0.0,
+    "rate": None,       # None = the source rate, capped at max_rate
+    "rate_pct": 100,
+    "loop_from": None,  # None = the sounds-level loop_from
+    "trim": None,       # [start, end] seconds
+    "fade_out": 0.0,
+}
 WHEEL_KEYS = {"clean", "damaged", "fast"}
 WHEEL_ENTRY_KEYS = {"png", "set", "island"}
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -337,16 +373,19 @@ class Sounds(object):
         _check_keys(where, "sounds", data, SOUND_KEYS, "sounds")
 
         self.cop = bool(data.get("cop", False))
-        self.engine = file_of(where, "sounds.engine", data.get("engine"),
-                              required=True)
-        self.idle = file_of(where, "sounds.idle", data.get("idle"))
-        self.horn = file_of(where, "sounds.horn", data.get("horn"))
-        self.siren = file_of(where, "sounds.siren", data.get("siren"))
+        self.engine = self._sample(where, "engine", data.get("engine"),
+                                   file_of, required=True)
+        self.idle = self._sample(where, "idle", data.get("idle"), file_of)
+        self.horn = self._sample(where, "horn", data.get("horn"), file_of)
+        self.siren = self._sample(where, "siren", data.get("siren"), file_of)
         self.engine_pct = data.get("engine_pct")
         self.idle_pct = data.get("idle_pct")
         # seconds into the sample where the loop starts; a car engine
         # loop with an attack otherwise repeats the attack every cycle
         self.loop_from = data.get("loop_from")
+        self.peak = data.get("peak")
+        self.max_rate = data.get("max_rate")
+        self.sample_bytes = data.get("sample_bytes")
 
         for name in ("engine_pct", "idle_pct"):
             pct = getattr(self, name)
@@ -355,6 +394,26 @@ class Sounds(object):
                                     or not 10 <= pct <= 400):
                 _fail(where, "sounds.%s" % name,
                       "%r is not a percentage between 10 and 400" % (pct,))
+
+        if self.peak is not None and (not isinstance(self.peak, (int, float))
+                                      or not 0.05 <= self.peak <= 1.0):
+            _fail(where, "sounds.peak",
+                  "%r is not a target level between 0.05 and 1.0 - a bank "
+                  "sample has no gain of its own, so this IS its volume"
+                  % (self.peak,))
+
+        if self.max_rate is not None and (not isinstance(self.max_rate, int)
+                                          or not 4000 <= self.max_rate <= 44100):
+            _fail(where, "sounds.max_rate",
+                  "%r is not a sample rate between 4000 and 44100"
+                  % (self.max_rate,))
+
+        if self.sample_bytes is not None and (
+                not isinstance(self.sample_bytes, int)
+                or not 1024 <= self.sample_bytes <= 65536):
+            _fail(where, "sounds.sample_bytes",
+                  "%r is not a per-sample byte budget between 1024 and 65536"
+                  % (self.sample_bytes,))
 
         if self.cop:
             if self.siren is None:
@@ -373,6 +432,99 @@ class Sounds(object):
                 _fail(where, "sounds.siren",
                       "a siren on a civilian car would never play; set "
                       "sounds.cop = true if this is a police car")
+
+    def _sample(self, where, name, value, file_of, required=False):
+        """A sample as its full spec: the path plus every knob, defaults filled.
+
+        The short form (`"engine": "sounds/engine.wav"`) and the long form
+        (`"engine": {"wav": ..., "level": 0.8}`) both end up here, so nothing
+        downstream cares which one a bank used.
+        """
+        if value is None or value == "":
+            if required:
+                _fail(where, "sounds." + name, "is required")
+            return None
+
+        if isinstance(value, str):
+            entry = {"wav": value}
+        elif isinstance(value, dict):
+            entry = dict(value)
+            _check_keys(where, "sounds." + name, entry, SOUND_SAMPLE_KEYS,
+                        "sample")
+        else:
+            _fail(where, "sounds." + name,
+                  "must be a path or an object with that path as `wav`")
+
+        if entry.get("wav") is None:
+            _fail(where, "sounds.%s.wav" % name, "is required")
+
+        field = "sounds." + name
+        path = file_of(where, field + ".wav", entry["wav"], required=True)
+        level = entry.get("level")
+        rate = entry.get("rate")
+        trim = entry.get("trim")
+        fade = entry.get("fade_out")
+        gain = entry.get("gain_db")
+        pct = entry.get("rate_pct")
+
+        if level is not None and (not isinstance(level, (int, float))
+                                  or not 0.05 <= level <= 1.0):
+            _fail(where, field + ".level",
+                  "%r is not a target level between 0.05 and 1.0" % (level,))
+
+        if rate is not None and (not isinstance(rate, int)
+                                 or not 4000 <= rate <= 44100):
+            _fail(where, field + ".rate",
+                  "%r is not a sample rate between 4000 and 44100" % (rate,))
+
+        if pct is not None and (not isinstance(pct, (int, float))
+                                or not 10 <= pct <= 400):
+            _fail(where, field + ".rate_pct",
+                  "%r is not a percentage between 10 and 400" % (pct,))
+        elif pct is not None and rate is not None and pct != 100:
+            _fail(where, field + ".rate",
+                  "set either rate (a frequency) or rate_pct (a percentage of "
+                  "the source), not both")
+
+        if gain is not None and (not isinstance(gain, (int, float))
+                                 or not -60 <= gain <= 24):
+            _fail(where, field + ".gain_db",
+                  "%r is not a gain between -60 and +24 dB" % (gain,))
+
+        if fade is not None and (not isinstance(fade, (int, float))
+                                 or not 0 <= fade <= 5):
+            _fail(where, field + ".fade_out",
+                  "%r is not a fade length between 0 and 5 seconds" % (fade,))
+
+        if trim is not None:
+            if (not isinstance(trim, list) or not 1 <= len(trim) <= 2
+                    or not all(isinstance(v, (int, float)) and v >= 0
+                               for v in trim)):
+                _fail(where, field + ".trim",
+                      "%r is not [start, end] in seconds" % (trim,))
+            if len(trim) == 2 and trim[1] <= trim[0]:
+                _fail(where, field + ".trim",
+                      "end %r is not after start %r" % (trim[1], trim[0]))
+
+        if entry.get("loop_from") is not None:
+            lf = entry["loop_from"]
+            if not isinstance(lf, (int, float)) or lf < 0:
+                _fail(where, field + ".loop_from",
+                      "%r is not a non-negative number of seconds" % (lf,))
+
+        if entry.get("loop") is not None and not isinstance(entry["loop"], bool):
+            _fail(where, field + ".loop",
+                  "%r is not true or false" % (entry["loop"],))
+
+        spec = dict(SOUND_SAMPLE_DEFAULTS)
+        spec["wav"] = path
+        spec["loop"] = entry.get("loop")   # None = decided by the sample's role
+
+        for key in SOUND_SAMPLE_DEFAULTS:
+            if key in entry:
+                spec[key] = entry[key]
+
+        return spec
 
 
 class Bank(object):

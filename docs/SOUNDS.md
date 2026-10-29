@@ -51,6 +51,59 @@ useful dump, several seconds after the sound loaded. The encoder writes `0x03` o
 the last block of a looping sample and `0x01` on a one-shot for exactly this
 reason. If a sample plays as silence or kills the game, look here first.
 
+## The knobs: what a bank can say about a sample
+
+Every sample is either a bare path or an object carrying that path as `wav`.
+Both are legal; the long form is what `carbank_bake --complete` writes:
+
+```json
+"sounds": {
+  "engine": { "wav": "sounds/engine.wav", "level": 0.999, "normalise": true,
+              "force": false, "gain_db": 0.0, "rate": null, "rate_pct": 100,
+              "loop": true, "loop_from": 0.0, "trim": null, "fade_out": 0.0 },
+  "idle":   { "wav": "sounds/idle.wav" },
+  "horn":   { "wav": "sounds/horn.wav", "loop": false },
+  "cop": false,
+  "engine_pct": 100, "idle_pct": 100, "loop_from": 0.0,
+  "peak": 0.999, "max_rate": 16000, "sample_bytes": 16384
+}
+```
+
+| key | default | what it does |
+| --- | --- | --- |
+| `level` | the block's `peak` (0.999) | target peak, 0.05..1.0. A bank sample has no gain of its own - the channel volume is the same for every car - so this IS its volume |
+| `normalise` | `true` | `false` keeps the source's own level; then `gain_db` is the only level control |
+| `force` | `false` | rescale even when the sample is already at `level` (see the dead band below) |
+| `gain_db` | `0.0` | relative gain, applied before the level |
+| `rate` | `null` (= the source rate) | exact output frequency, 4000..44100; wins over `rate_pct` |
+| `rate_pct` | `100` | the source rate as a percentage, the Driver 1 beta knob |
+| `loop` | by role (engine/idle `true`, third `false`) | mark the VAG as looping |
+| `loop_from` | the block's `loop_from` (0) | seconds into the sample where the loop starts |
+| `trim` | `null` | `[start, end]` seconds to keep - drops silence, and buys byte budget back |
+| `fade_out` | `0.0` | linear fade over the last N seconds, so a one-shot does not click |
+
+Block-wide: `peak`, `max_rate` (byte-budget ceiling, default 16000) and
+`sample_bytes` (per-sample cap, default 16384).
+
+They are applied in a fixed order, and the order is audible:
+
+    resample -> trim -> fade_out -> gain_db -> level -> byte budget -> encode
+
+Trimming before the fade puts the fade on the new tail; the fade before the
+level stops it from dragging the peak down and making `level` scale everything
+up; and `level` last means `gain_db` is a relative trim against a fixed ceiling.
+
+### The level dead band
+
+`normalise` leaves a sample alone when it is already within **6%** of `level`.
+That is not laziness: most car sounds are decoded VAGs, and a decoded PSX sample
+sits exactly ON the ADPCM lattice. Scaling it by 3% moves every value off the
+lattice and forces a re-quantisation, which measures ~30 dB instead of ~76 dB.
+Measured on the Firebird's three samples, the gains the target would have applied
+were 1.7%, 3.3% and 5.2% - all inside the band, so all three are used as they
+are, and the idle went from 32.6 dB to 79.3 dB. Use `force: true` when the exact
+level is the point.
+
 ## Level: measured against the game's own banks
 
 `JERICHO_SOUND_DIAG=1` makes `sound.c` log the level of every bank as it loads -
@@ -61,38 +114,57 @@ mixer sees:
     sound level: bank 3 samples 3 payload 29008 rate 16000 loop 1 peak 32749 (100%) rms 9557
 
 Measured on CHICAGO's own car banks: **peak 32749-32767 (100%), rms 9557-12629
-(29-39%), crest factor 2.6-3.4**. The bake normalises to `SOUND_PEAK = 0.999`
-(peak), which is what retail does; the old 90% was quieter than retail, not
-safer. The Firebird's samples now measure:
+(29-39%), crest factor 2.6-3.4**. The bake normalises to `peak 0.999`, which is
+what retail does; the old 90% was quieter than retail, not safer. The Firebird's
+samples now measure:
 
-| sample | peak | rms | crest |
-| --- | --- | --- | --- |
-| idle | 100% | 33% | 3.0 (retail 2.6-3.4) |
-| horn | 100% | 36% | 2.8 |
-| engine | 99% | **49%** | **2.0** |
+| sample | bytes | rate | peak | rms | crest |
+| --- | --- | --- | --- | --- | --- |
+| idle | 13392 | 16000 | 100% | 33% | 3.0 (retail 2.6-3.4) |
+| horn | 3008 | 16000 | 100% | 36% | 2.8 |
+| engine | 8384 | 16000 | 99% | **49%** | **2.0** |
 
 The engine loop is the outlier, and it is the source: `sounds/engine.wav` is
 already limited (crest 2.0 means its peaks are flat-topped), so 4-bit ADPCM has
 the least headroom exactly where the ear is most sensitive. The bake cannot
-un-limit a limited recording - re-export that loop with more dynamic range (or
-run it through the bake with less compression) if it still sounds crushed.
+un-limit a limited recording - re-export that loop with more dynamic range, or
+`trim` it to the part that sounds right, if it still sounds crushed.
+
+## Completing a declaration
+
+A bank rarely states every knob. That is convenient to write and impossible to
+check by reading, so:
+
+    python carbank_bake.py bank.json --complete --dry-run   # list what is missing
+    python carbank_bake.py bank.json --complete             # write it in
+
+It only *adds*: a value already in the file is never touched, a bare path becomes
+the long form, and a sample the bank does not declare stays undeclared (the bake
+warns about those, it does not invent them). Re-baking afterwards is a no-op -
+that is the guarantee, and `test_sound_knobs.py` asserts it by baking a minimal
+declaration and a completed one and comparing the bytes.
 
 ## Budgets
 
-- **Rate**: capped at 11025 Hz (the SPU takes 4000..44100; car banks sound right
-  lower). `sounds.engine_pct` / `idle_pct` still scale the source rate the way
-  the Driver 1 beta knobs do.
-- **Size**: 8 KiB per sample. `LoadSoundBankDynamic` advances the SPU write
-  address by the payload with no bounds check, so an oversized bank corrupts SPU
-  RAM rather than being refused. Retail car banks are 2-4 KiB per car. A longer
+- **Rate**: `sounds.max_rate`, default **16000 Hz** - retail's own car banks are
+  16000, and the SPU budget is sized for it. The SPU itself takes
+  4000..44100. `engine_pct` / `idle_pct` still scale the source rate the way the
+  Driver 1 beta knobs do.
+- **Size**: `sounds.sample_bytes`, default **16384 per sample**.
+  `LoadSoundBankDynamic` advances the SPU write address by the payload with no
+  bounds check, so an oversized bank corrupts SPU RAM rather than being refused
+  (on this build: an access violation a few frames later, with a dump that
+  points somewhere useless). Retail car banks are 2-4 KiB per car. A longer
   sample is trimmed and the bake prints the trim.
 
 ## Verifying
 
     python carbank_bake.py bank.json -o out ...        # bake (prints the byte cost)
+    python wav2vag.py sounds/engine.wav -o e.vag --loop --level 0.8   # one file
     play_chicago.bat test 250                          # headless take-a-drive
 
-and grep the log for
+`wav2vag.py` takes the same knobs in the same order, so a single file can be
+auditioned with the exact settings the bake will use. Then grep the log for
 
     gamesnd: resident slot 5 uses the imported model bank (FIREBIRD model 1) -> block 7
 

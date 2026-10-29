@@ -31,6 +31,7 @@ it, and a bake of an unchanged declaration reproduces the bank byte for byte.
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -350,6 +351,58 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     return manifest, warnings
 
 
+def _resolved_sample(sounds, key, role, defaults):
+    """One sample spec with every knob spelled out, or None when undeclared.
+
+    Nothing downstream is allowed to have an opinion about a default: the
+    manifest carries the numbers the encoder will use, so a bank can be checked
+    (and a hand-edited declaration completed) without re-reading the bake code.
+    `role` decides only the one thing a sample cannot state for itself - whether
+    it loops - since the third slot is a horn/siren.
+    """
+    spec = getattr(sounds, key)
+
+    if not spec:
+        return None
+
+    out = {"wav": spec["wav"]}
+
+    if spec.get("loop") is None:
+        out["loop"] = role != "third"
+    else:
+        out["loop"] = bool(spec["loop"])
+
+    level = spec.get("level")
+    out["level"] = float(level) if level is not None else defaults["peak"]
+
+    # a per-sample rate wins over a per-sample percentage, which wins over the
+    # sounds-level percentage (engine_pct / idle_pct); each is already validated
+    out["rate"] = spec.get("rate")
+    out["rate_pct"] = spec.get("rate_pct") or 100
+    out["max_rate"] = defaults["max_rate"]
+    out["sample_bytes"] = defaults["sample_bytes"]
+
+    loop_from = spec.get("loop_from")
+
+    if loop_from is None:
+        loop_from = defaults["loop_from"]
+
+    if key == "idle" and sounds.idle_pct:
+        out["rate_pct"] = sounds.idle_pct
+    elif key == "engine" and sounds.engine_pct:
+        out["rate_pct"] = sounds.engine_pct
+
+    out["loop_from"] = float(loop_from or 0.0)
+    out["force"] = bool(spec.get("force"))
+    out["normalise"] = (True if spec.get("normalise") is None
+                        else bool(spec.get("normalise")))
+    out["gain_db"] = float(spec.get("gain_db") or 0.0)
+    out["trim"] = spec.get("trim")
+    out["fade_out"] = float(spec.get("fade_out") or 0.0)
+
+    return out
+
+
 def sound_specs(bank, warnings):
     """The manifest's `sounds` block, from the declaration's per-car sounds.
 
@@ -368,37 +421,51 @@ def sound_specs(bank, warnings):
         if sounds is None or not sounds.engine:
             continue
 
+        defaults = dict(bankjson.SOUND_DEFAULTS)
+
+        for key in ("peak", "max_rate", "sample_bytes"):
+            if getattr(sounds, key) is not None:
+                defaults[key] = getattr(sounds, key)
+
+        if sounds.loop_from:
+            defaults["loop_from"] = sounds.loop_from
+
         entry = {"model": slot,
-                 "engine": {"wav": sounds.engine,
-                            "rate_pct": sounds.engine_pct or 100,
-                            "loop_from": sounds.loop_from,
-                            "loop": True},
-                 "idle": None,
+                 "engine": _resolved_sample(sounds, "engine", "engine", defaults),
+                 "idle": _resolved_sample(sounds, "idle", "idle", defaults),
                  "third": None}
 
+        # the bank-wide knobs travel too: verify_sounds and --complete compare
+        # against what the bake actually used
+        entry["peak"] = defaults["peak"]
+        entry["max_rate"] = defaults["max_rate"]
+        entry["sample_bytes"] = defaults["sample_bytes"]
+
         if sounds.idle:
-            entry["idle"] = {"wav": sounds.idle,
-                             "rate_pct": sounds.idle_pct or 100,
-                             "loop_from": sounds.loop_from,
-                             "loop": True}
+            if sounds.idle_pct:
+                entry["idle"]["rate_pct"] = sounds.idle_pct
         else:
             warnings.append("%s: no idle declared; the engine loop doubles as "
                             "the idle (as retail D1 banks do)" % carname)
 
+        third = None
+
         if sounds.cop:
             sirens.append(slot)
+            third = _resolved_sample(sounds, "siren", "third", defaults)
 
-            if sounds.siren:
-                entry["third"] = {"wav": sounds.siren, "loop": False}
-            else:
+            if third is None:
                 warnings.append("%s: declared a cop car with no siren"
                                 % carname)
-        elif sounds.horn:
-            entry["third"] = {"wav": sounds.horn, "loop": False}
         else:
-            warnings.append("%s: no horn declared; the third sample repeats the "
-                            "engine, so the horn will sound wrong" % carname)
+            third = _resolved_sample(sounds, "horn", "third", defaults)
 
+            if third is None:
+                warnings.append("%s: no horn declared; the third sample repeats "
+                                "the engine, so the horn will sound wrong"
+                                % carname)
+
+        entry["third"] = third
         models.append(entry)
 
     if not models:
@@ -1059,6 +1126,152 @@ def _report_only(args):
     return 0
 
 
+SOUND_ROLES = ("engine", "idle")
+
+
+def _completed_sample(role, entry, sounds):
+    """One sample's long form: the path, plus every knob it did not state.
+
+    Defaults come from the `sounds` block first (a car may set `peak` or
+    `loop_from` once) and from bankjson.SOUND_SAMPLE_DEFAULTS otherwise, so what
+    is written here is exactly what carbank_bake._resolved_sample would derive.
+    """
+    before = dict(entry) if isinstance(entry, dict) else {"wav": entry}
+    out = dict(before)
+    block = sounds
+
+    if out.get("level") is None:
+        out["level"] = (block.get("peak")
+                        if block.get("peak") is not None
+                        else bankjson.SOUND_DEFAULTS["peak"])
+
+    if out.get("loop_from") is None:
+        out["loop_from"] = (block.get("loop_from")
+                            if block.get("loop_from") is not None
+                            else bankjson.SOUND_DEFAULTS["loop_from"])
+
+    if out.get("loop") is None:
+        out["loop"] = role in SOUND_ROLES
+
+    for key, value in bankjson.SOUND_SAMPLE_DEFAULTS.items():
+        if key not in out:
+            out[key] = value
+
+    # a rate is either an exact frequency or a percentage of the source, and the
+    # percentage lives at the sounds level for the two looping samples
+    pct = block.get(role + "_pct")
+
+    if out.get("rate") is not None:
+        # a frequency and a percentage would fight: the frequency wins, and the
+        # percentage is left out rather than written as a contradiction
+        out.pop("rate_pct", None)
+    elif pct is not None:
+        out["rate_pct"] = pct
+
+    return before, out
+
+
+def complete_declaration(js, out=None, dry_run=False):
+    """Fill every missing sound knob in a bank.json, leaving values alone.
+
+    A declaration may legally say `"engine": "sounds/engine.wav"` and nothing
+    else - the bake fills in the rate, the level, the loop, the byte budget.
+    That is convenient to write and impossible to check by reading, so this
+    writes the whole set out: the short form becomes
+    `{"wav": ..., "level": 0.999, "rate": null, ...}` and the block gains
+    `peak` / `max_rate` / `sample_bytes`. Re-baking afterwards is a no-op, which
+    is what proves the numbers written are the ones the bake used.
+    """
+    with io.open(js, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    declare = raw.get("declare") or {}
+    cars = declare.get("cars") or {}
+    added = []
+
+    for carname, car in cars.items():
+        sounds = car.get("sounds")
+
+        if not isinstance(sounds, dict):
+            continue
+
+        for key, value in bankjson.SOUND_DEFAULTS.items():
+            if sounds.get(key) is None:
+                sounds[key] = value
+                added.append("%s.sounds.%s" % (carname, key))
+
+        if sounds.get("cop") is None:
+            sounds["cop"] = False
+            added.append("%s.sounds.cop" % carname)
+
+        cop = bool(sounds.get("cop"))
+
+        for role in ("engine", "idle", "siren" if cop else "horn"):
+            entry = sounds.get(role)
+
+            if entry is None:
+                if role == "engine":
+                    added.append("%s.sounds.engine (REQUIRED - the bake skips "
+                                 "this car until it is declared)" % carname)
+                elif role == "idle":
+                    added.append("%s.sounds.idle (optional: the engine loop "
+                                 "doubles as the idle)" % carname)
+                elif role == "horn":
+                    added.append("%s.sounds.horn (REQUIRED for a civilian car)"
+                                 % carname)
+                else:
+                    added.append("%s.sounds.siren (REQUIRED for a cop car)"
+                                 % carname)
+                continue
+
+            before, after = _completed_sample(role, entry, sounds)
+
+            for key in bankjson.SOUND_SAMPLE_KEYS:
+                if key not in before:
+                    added.append("%s.sounds.%s.%s" % (carname, role, key))
+
+            # keep the key order stable: wav first, then the knobs
+            ordered = {"wav": after["wav"]}
+
+            for key in ("level", "force", "normalise", "gain_db", "rate",
+                        "rate_pct", "loop", "loop_from", "trim", "fade_out"):
+                if key in after:
+                    ordered[key] = after[key]
+
+            sounds[role] = ordered
+
+    if not added:
+        print("%s: every sound knob is already stated"
+              % os.path.basename(js))
+        return 0
+
+    if dry_run:
+        print("%s: would fill in %d entry(ies):" % (os.path.basename(js),
+                                                    len(added)))
+
+        for name in added:
+            print("  " + name)
+
+        return 0
+
+    target = out or js
+
+    with io.open(target, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=1)
+        f.write("\n")
+
+    print("%s: filled in %d entry(ies)" % (os.path.basename(target), len(added)))
+
+    for name in added:
+        print("  " + name)
+
+    bank = bankjson.load(target)
+    print("  re-read clean: %d car(s) declare sounds"
+          % len([c for c in bank.cars.values() if c.sounds]))
+
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("bank", help="the bank.json with the declare block")
@@ -1083,12 +1296,24 @@ def main(argv=None):
                     help="bake a DRIVER 1 LEV instead (pool shape, bake.build_file)")
     ap.add_argument("--check", action="store_true",
                     help="write nothing; report page/palette sources that are stale")
+    ap.add_argument("--complete", action="store_true",
+                    help="write every sound knob the bake would assume into "
+                         "bank.json (an unchanged bake stays byte-identical)")
+    ap.add_argument("--complete-out", metavar="FILE", default=None,
+                    help="with --complete, write the finished declaration here "
+                         "instead of over the bank.json")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --complete, list what would be added and stop")
     ap.add_argument("--audit", metavar="RRGGBB", default=None,
                     help="write nothing; report where a colour still lives (page, "
                          "texel count, palette index, CLUT word)")
     ap.add_argument("--audit-tolerance", type=int, default=8, metavar="N",
                     help="per-channel slack for --audit (default 8)")
     args = ap.parse_args(argv)
+
+    if args.complete:
+        return complete_declaration(os.path.abspath(args.bank),
+                                    args.complete_out, args.dry_run)
 
     if args.check or args.audit:
         return _report_only(args)
