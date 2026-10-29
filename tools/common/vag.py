@@ -43,24 +43,31 @@ MIN_RATE = 4000
 MAX_RATE = 44100
 DEFAULT_RATE = 11025
 
-# PsyCross plays EVERY decoded VAG buffer at this rate (PsyX_SPUAL.cpp:
-# `alBufferData(..., 11000)`) and then applies the SPU pitch, and the engine
-# derives that pitch as `samplerate * pitch / 44100`. So a bank's `samplerate`
-# field is not "the sample's rate in Hz": writing the rate there makes the sample
-# play FOUR TIMES TOO SLOW (11025*4096/44100 = 1024, i.e. a quarter of 4096).
-# The field that gives unity pitch for a VAG recorded at R is 44100*R/11000.
-PSX_PLAYBACK_RATE = 11000
+# A bank's `samplerate` IS the sample's rate in Hz, and it is worth writing down
+# why, because the arithmetic is easy to read the wrong way round:
+#
+#   * PsyX decodes the VAG and hands the PCM to OpenAL declaring 44100 Hz
+#     (PsyX_SPUAL.cpp UpdateVoiceSample: `alBufferData(..., 44100)`), then sets
+#     `AL_PITCH = attr.pitch / 4096`;
+#   * the engine derives that pitch as `samplerate * pitch / 44100`
+#     (sound.c CompleteSoundSetup), with pitch = 4096 for unity.
+#
+# so the played rate is `samplerate` Hz exactly, and the field is the recording
+# rate - nothing to scale. (There are `alBufferData(..., 11000)` calls in the
+# same file, in PsyX_SPUAL_Write and inside an `#if 0` sample test; neither is
+# the voice path. Reading one of those instead makes a 11025 Hz sample look like
+# it should be written as 44100, which plays it four times too high.)
 SPU_PITCH_UNITY = 44100
 
 
 def rate_field(rate):
-    """The bank's `samplerate` for a VAG recorded at `rate` Hz."""
-    return int(round(rate * (float(SPU_PITCH_UNITY) / PSX_PLAYBACK_RATE)))
+    """The bank's `samplerate` for a VAG recorded at `rate` Hz - the rate."""
+    return int(round(rate))
 
 
 def rate_from_field(field):
-    """The recording rate a bank's `samplerate` field implies."""
-    return field * (float(PSX_PLAYBACK_RATE) / SPU_PITCH_UNITY)
+    """The recording rate a bank's `samplerate` field plays at."""
+    return int(field)
 
 
 def normalise(samples, peak=0.9):

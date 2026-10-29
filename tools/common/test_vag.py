@@ -98,30 +98,32 @@ class RateTests(unittest.TestCase):
 
 
 class RateFieldTests(unittest.TestCase):
-    """`samplerate` in a bank is not Hz.
+    """`samplerate` in a bank is the recording rate in Hz.
 
-    PsyX plays every decoded buffer at 11000 Hz and applies the SPU pitch; the
-    engine derives that pitch as `samplerate * pitch / 44100`. Writing the Hz
-    rate there made a 11025 Hz VAG play at a quarter speed, which is heard as
-    "the pitch is completely wrong". The field has to be 44100*R/11000.
+    PsyX declares every decoded buffer to OpenAL at 44100 Hz and applies
+    `AL_PITCH = attr.pitch / 4096`; the engine derives that pitch as
+    `samplerate * 4096 / 44100`. The two cancel, so the played rate is the field.
     """
 
-    def test_the_field_gives_unity_pitch_for_its_rate(self):
+    def test_the_field_is_the_recording_rate(self):
         for rate in (8000, 11025, 16000, 22050):
             field = vag.rate_field(rate)
+
+            self.assertEqual(field, rate)
+
             pitch = field * 4096 // 44100              # sound.c CompleteSoundSetup
-            played = vag.PSX_PLAYBACK_RATE * pitch / 4096.0
+            played = 44100 * pitch / 4096.0            # PsyX UpdateVoiceSample
 
             self.assertAlmostEqual(played, rate, delta=rate * 0.01,
                                    msg="%d Hz plays at %.0f" % (rate, played))
 
-    def test_the_old_way_is_four_times_too_slow(self):
-        # documenting the bug: the rate as Hz
-        pitch = 11025 * 4096 // 44100
+    def test_scaling_the_field_scales_the_pitch(self):
+        # this is the failure the other reading of the code produces: 44100 in
+        # the field plays a 11025 Hz sample four times too high
+        pitch = 44200 * 4096 // 44100
+        played = 44100 * pitch / 4096.0
 
-        self.assertEqual(pitch, 1024)
-        self.assertAlmostEqual(vag.PSX_PLAYBACK_RATE * pitch / 4096.0, 2750,
-                               delta=5)
+        self.assertAlmostEqual(played / 11025.0, 4.0, delta=0.05)
 
     def test_normalise_uses_the_headroom(self):
         samples, top, gain = vag.normalise([100, -1000, 500])
