@@ -126,11 +126,58 @@ class RateFieldTests(unittest.TestCase):
         self.assertAlmostEqual(played / 11025.0, 4.0, delta=0.05)
 
     def test_normalise_uses_the_headroom(self):
-        samples, top, gain = vag.normalise([100, -1000, 500])
+        samples, top, gain = vag.normalise([100, -1000, 500], peak=0.9)
 
         self.assertEqual(top, 1000)
         self.assertAlmostEqual(gain, 0.9 * 32767 / 1000.0, places=3)
         self.assertEqual(max(abs(s) for s in samples), int(0.9 * 32767))
+
+    def test_stats_read_crest_and_dc(self):
+        # a limited square-ish wave: peak at full scale, rms close behind it
+        hot = [32767 if i % 2 else -32767 for i in range(100)]
+        st = vag.stats(hot)
+        self.assertEqual(st["peak"], 32767)
+        self.assertAlmostEqual(st["crest"], 1.0, places=2)
+        self.assertEqual(st["clipped"], 100)
+        self.assertEqual(st["longest_run"], 100)
+
+    def test_remove_dc_centres_the_waveform(self):
+        out = vag.remove_dc([1000, 1000, 1000, 1000])
+        self.assertEqual(out, [0, 0, 0, 0])
+        self.assertAlmostEqual(vag.stats([1000, -1000, 1000])["dc"], 333.3,
+                               places=1)
+
+    def test_level_pulls_a_hot_sample_down_to_the_rms_target(self):
+        # crest 2.0 at full scale: the Firebird engine loop's problem
+        hot = [32767, -32767, 16000, -16000] * 250
+        out, before, gain = vag.level(hot, peak=0.999, rms=0.34, force=True)
+        after = vag.stats(out)
+        self.assertAlmostEqual(after["rms"] / 32767.0, 0.34, places=2)
+        self.assertLess(after["peak"], 32767)
+        self.assertLess(gain, 1.0)
+
+    def test_level_never_crosses_the_peak_ceiling(self):
+        # a dynamic sample: matching its rms would blow the ceiling, so the
+        # ceiling wins and it lands at full scale like retail's
+        dynamic = [32767] + [0] * 4999
+        out, before, gain = vag.level(dynamic, peak=0.999, rms=0.34, force=True)
+        self.assertLessEqual(vag.stats(out)["peak"], int(0.999 * 32767) + 1)
+        self.assertAlmostEqual(gain, 0.999, places=2)
+
+    def test_level_leaves_a_sample_inside_both_bands(self):
+        # 98% peak, 33% rms, crest 3.1: retail's own measured shape - and a
+        # decoded VAG, so rescaling it would cost ~45 dB of encode fidelity
+        quiet, spike = 10385, 32000
+        samples = ([quiet, -quiet] * 148) + [spike, -spike, spike]
+        out, before, gain = vag.level(samples, peak=0.999, rms=0.34)
+        self.assertEqual(gain, 1.0)
+        self.assertEqual(out, samples)
+
+    def test_level_scales_a_quiet_sample_up(self):
+        quiet = [1000, -1000] * 500
+        out, before, gain = vag.level(quiet, peak=0.999, rms=0.34)
+        self.assertGreater(gain, 1.0)
+        self.assertAlmostEqual(vag.stats(out)["rms"] / 32767.0, 0.34, places=2)
 
     def test_silence_is_left_alone(self):
         samples, top, gain = vag.normalise([0, 0, 0])

@@ -37,6 +37,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import struct
 import sys
@@ -99,6 +100,11 @@ SOUND_MAX_RATE = 16000
 # - so 90% was quieter than retail, not safer. Peak is what a mixer clips on,
 # and retail runs it to full scale.
 SOUND_PEAK = 0.999
+# The loudness those same banks measure: rms 29-39% of full scale. Peak
+# alone is not loudness - a limited take reaches 100% peak with an rms half
+# again as high, which plays loud AND squashed. levelled against this, the
+# Firebird's engine loop (crest 2.0, rms 49%) is pulled down ~3 dB.
+SOUND_RMS = 0.34
 
 WHEEL_DETAIL_NAMES = ("WHLCLEAN", "WHLBOTH", "WHEEL")
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
@@ -1156,24 +1162,52 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     if level is None:
         level = SOUND_PEAK
 
+    target_rms = spec.get("rms")
+
+    if target_rms is None:
+        target_rms = SOUND_RMS
+
     normalise = spec.get("normalise")
 
     if normalise is None:
         normalise = True
 
+    samples = vag.remove_dc(samples)
+
+    before = vag.stats(samples)
+
+    if before["clipped"]:
+        warnings.append("sound %s: the source is clipped already - %d sample(s) "
+                        "at full scale, longest run %d - no level can undo that"
+                        % (label, before["clipped"], before["longest_run"]))
+
     if normalise:
-        samples, had_peak, applied = vag.normalise(
-            samples, float(level), force=bool(spec.get("force")))
+        samples, before, applied = vag.level(
+            samples, peak=float(level), rms=float(target_rms or 0),
+            force=bool(spec.get("force")))
     else:
-        had_peak = max((abs(v) for v in samples), default=0)
         applied = 1.0
 
+    after = vag.stats(samples)
+
     if applied != 1.0:
-        rms = (sum(float(v) * v for v in samples) / len(samples)) ** 0.5
-        warnings.append("sound %s: normalised peak %d -> %d (x%.2f); rms %.0f "
-                        "(%.0f%% of full scale, retail is 29-39%%)"
-                        % (label, had_peak, int(float(level) * 32767), applied,
-                           rms, 100.0 * rms / 32767.0))
+        warnings.append(
+            "sound %s: levelled x%.3f (%+.1f dB) - peak %d -> %d, rms %.0f%% -> "
+            "%.0f%% of full scale (retail's own samples are 29-39%% rms)"
+            % (label, applied, 20.0 * math.log10(applied) if applied > 0 else 0,
+               before["peak"], after["peak"],
+               100.0 * before["rms"] / 32767.0, 100.0 * after["rms"] / 32767.0))
+    elif after["rms"] > 0.45 * 32767.0:
+        warnings.append(
+            "sound %s: rms is %.0f%% of full scale against retail's 29-39%% - this "
+            "sample will play loud, and with crest %.1f its transients are "
+            "already flat (set a lower `rms` or `gain_db` to sit it under)"
+            % (label, 100.0 * after["rms"] / 32767.0, after["crest"]))
+
+    if 0 < after["crest"] < 2.2:
+        warnings.append("sound %s: crest factor %.1f (retail 2.6-3.4) - the "
+                        "source has been limited, so it will sound squashed"
+                        % (label, after["crest"]))
 
     # 16 bytes per 28 samples: how many samples fit the byte budget
     budget = int(spec.get("sample_bytes") or budget)

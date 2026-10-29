@@ -47,6 +47,11 @@ DEFAULT_RATE = 11025
 # peak 32749-32767, i.e. full scale. Retailed here so wav2vag and a bank bake
 # cannot disagree about what "level" means.
 DEFAULT_PEAK = 0.999
+# The loudness those same banks measure: rms 9557-12629 of 32767 = 29-39%, so
+# the middle of the band is the target. Peak alone is not loudness - a limited
+# recording reaches 100% peak with an rms half again as high, and sounds loud
+# and squashed rather than loud and punchy.
+DEFAULT_RMS = 0.34
 
 # A bank's `samplerate` IS the sample's rate in Hz, and it is worth writing down
 # why, because the arithmetic is easy to read the wrong way round:
@@ -75,41 +80,118 @@ def rate_from_field(field):
     return int(field)
 
 
-def normalise(samples, peak=0.9, tolerance=0.06, force=False):
-    """Scale a sample so its loudest point sits at `peak` of full scale.
+def stats(samples):
+    """Peak, RMS, crest factor, DC offset and clipping for a sample.
 
-    A bank's samples have no gain of their own: the engine's channel volume is
-    the same -10000..0 for every car, so a WAV that peaks at 20% plays at 20% of
-    the level next to a retail sample.
-
-    The `tolerance` dead band matters more than it looks. Many car sounds come
-    from a VAG in the first place - a decoded PSX sample sits exactly ON the
-    ADPCM lattice - and scaling it by even 3% moves every sample off that
-    lattice, so the encoder has to re-quantise and the result measures 30 dB
-    instead of ~76 dB. On the Firebird's own three samples the gains the target
-    would have applied were 1.7% (engine), 3.3% (idle) and 5.2% (horn); leaving
-    them alone took the idle from 32.6 dB to 79.3 dB. Hence the 6% band: wide
-    enough for a source that is already at level, narrow enough that a
-    deliberate `level: 0.85` is still honoured (that is a 12% gain). `force`
-    scales anyway, for when the exact level is the point.
-
-    `force` scales even inside the dead band, for the case where the exact
-    level is the point (a sample that must sit 1 dB under another).
-
-    Returns (samples, old_peak, applied_gain) - gain 1.0 means untouched.
+    This is the "how loud is this really" measurement the level needs. Peak alone
+    is not loudness: a limited recording can sit at 100% peak while its RMS is
+    half again what retail's is, and it will sound loud AND squashed. Crest
+    factor (peak/RMS) is the tell - retail's own car samples measure 2.6-3.4,
+    and anything near 2.0 has had its transients flattened already.
     """
-    top = max((abs(s) for s in samples), default=0)
+    n = len(samples)
 
-    if top <= 0:
-        return list(samples), 0, 1.0
+    if not n:
+        return {"n": 0, "peak": 0, "rms": 0.0, "crest": 0.0, "dc": 0.0,
+                "clipped": 0, "longest_run": 0}
 
-    target = int(peak * 32767)
-    gain = target / float(top)
+    total = sum(samples)
+    dc = total / float(n)
+    peak = max(abs(v) for v in samples)
+    rms = (sum(float(v) * v for v in samples) / n) ** 0.5
+    pinned = 32700
+    clipped = sum(1 for v in samples if abs(v) >= pinned)
+    longest = run = 0
+
+    for v in samples:
+        if abs(v) >= pinned:
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+
+    return {"n": n, "peak": peak, "rms": rms, "dc": dc,
+            "crest": (peak / rms) if rms else 0.0,
+            "clipped": clipped, "longest_run": longest}
+
+
+def remove_dc(samples):
+    """Subtract the mean.
+
+    A DC offset is silent but it eats headroom: a sample offset by 300 can only
+    reach 32467 before it clips, and every level measurement - peak especially -
+    is then reading the offset rather than the signal.
+    """
+    if not samples:
+        return list(samples)
+
+    dc = int(round(sum(samples) / float(len(samples))))
+
+    if dc == 0:
+        return list(samples)
+
+    return [max(-32768, min(32767, v - dc)) for v in samples]
+
+
+def level(samples, peak=DEFAULT_PEAK, rms=None, tolerance=0.06, force=False):
+    """Set a sample's level: match the RMS loudness, never cross the peak ceiling.
+
+    A bank's samples have no gain of their own - the engine's channel volume is
+    the same -10000..0 for every car - so this IS the sample's volume.
+
+    Two measurements, two jobs:
+
+    * `peak` is the ceiling. It is what clips, and retail runs its own car
+      banks right up to it (peak 32749-32767, measured with
+      JERICHO_SOUND_DIAG=1), so it is a limit, not a target.
+    * `rms` is the loudness. Retail's own samples sit at 29-39% of full scale
+      (crest 2.6-3.4). A peak-normalised sample whose crest is only 2.0 lands
+      at 49% instead - measurably ~3 dB hot, and since its transients are
+      already flattened it sounds loud and squashed rather than loud and punchy.
+
+    So the gain is the smaller of "reach the RMS target" and "reach the peak
+    ceiling". A dynamic source is limited by the ceiling and lands at full
+    scale, exactly like retail's; a hot or limited source is pulled *down* to
+    retail's loudness instead of being pushed to full scale on top of it.
+
+    The dead band still applies, and it is not laziness: many car sounds are
+    decoded VAGs, and a decoded PSX sample sits exactly ON the ADPCM lattice.
+    Scaling it by 3% moves every value off the lattice and forces a
+    re-quantisation, which measures ~30 dB instead of ~76 dB. A sample already
+    inside both bands is used as it is. `force` scales anyway.
+
+    Returns (samples, stats_before, applied_gain). gain 1.0 means untouched.
+    """
+    before = stats(samples)
+
+    if not samples or before["peak"] == 0:
+        return list(samples), before, 1.0
+
+    gain = 1.0
+
+    if rms:
+        if before["rms"] > 0:
+            gain = (float(rms) * 32767.0) / before["rms"]
+    else:
+        gain = (float(peak) * 32767.0) / before["peak"]
+
+    # the ceiling always wins: loudness is a preference, clipping is a defect
+    ceiling = float(peak) * 32767.0
+
+    if before["peak"] * gain > ceiling:
+        gain = ceiling / float(before["peak"])
 
     if not force and abs(gain - 1.0) <= tolerance:
-        return list(samples), top, 1.0
+        return list(samples), before, 1.0
 
-    return scale(samples, gain), top, gain
+    return scale(samples, gain), before, gain
+
+
+def normalise(samples, peak=DEFAULT_PEAK, tolerance=0.06, force=False):
+    """Peak-only level. Kept for callers that want exactly that."""
+    out, _before, gain = level(samples, peak=peak, rms=None,
+                               tolerance=tolerance, force=force)
+    return out, _before["peak"], gain
 
 
 def scale(samples, gain):

@@ -58,20 +58,22 @@ Both are legal; the long form is what `carbank_bake --complete` writes:
 
 ```json
 "sounds": {
-  "engine": { "wav": "sounds/engine.wav", "level": 0.999, "normalise": true,
-              "force": false, "gain_db": 0.0, "rate": null, "rate_pct": 100,
-              "loop": true, "loop_from": 0.0, "trim": null, "fade_out": 0.0 },
+  "engine": { "wav": "sounds/engine.wav", "level": 0.999, "rms": 0.34,
+              "normalise": true, "force": false, "gain_db": 0.0,
+              "rate": null, "rate_pct": 100, "loop": true,
+              "loop_from": 0.0, "trim": null, "fade_out": 0.0 },
   "idle":   { "wav": "sounds/idle.wav" },
   "horn":   { "wav": "sounds/horn.wav", "loop": false },
   "cop": false,
   "engine_pct": 100, "idle_pct": 100, "loop_from": 0.0,
-  "peak": 0.999, "max_rate": 16000, "sample_bytes": 16384
+  "peak": 0.999, "rms": 0.34, "max_rate": 16000, "sample_bytes": 16384
 }
 ```
 
 | key | default | what it does |
 | --- | --- | --- |
-| `level` | the block's `peak` (0.999) | target peak, 0.05..1.0. A bank sample has no gain of its own - the channel volume is the same for every car - so this IS its volume |
+| `level` | the block's `peak` (0.999) | the peak **ceiling**, 0.05..1.0. A bank sample has no gain of its own - the channel volume is the same for every car - so the level knobs ARE its volume |
+| `rms` | the block's `rms` (0.34) | the **loudness** target, 0.05..1.0, or `0` for peak-only. Retail's own car samples measure 29-39% rms |
 | `normalise` | `true` | `false` keeps the source's own level; then `gain_db` is the only level control |
 | `force` | `false` | rescale even when the sample is already at `level` (see the dead band below) |
 | `gain_db` | `0.0` | relative gain, applied before the level |
@@ -82,16 +84,48 @@ Both are legal; the long form is what `carbank_bake --complete` writes:
 | `trim` | `null` | `[start, end]` seconds to keep - drops silence, and buys byte budget back |
 | `fade_out` | `0.0` | linear fade over the last N seconds, so a one-shot does not click |
 
-Block-wide: `peak`, `max_rate` (byte-budget ceiling, default 16000) and
-`sample_bytes` (per-sample cap, default 16384).
+Block-wide: `peak`, `rms`, `max_rate` (byte-budget ceiling, default 16000)
+and `sample_bytes` (per-sample cap, default 16384).
 
 They are applied in a fixed order, and the order is audible:
 
-    resample -> trim -> fade_out -> gain_db -> level -> byte budget -> encode
+    dc offset -> resample -> trim -> fade_out -> gain_db -> level -> byte budget
+    -> encode
 
 Trimming before the fade puts the fade on the new tail; the fade before the
-level stops it from dragging the peak down and making `level` scale everything
-up; and `level` last means `gain_db` is a relative trim against a fixed ceiling.
+level stops it from dragging the peak down and making the level scale
+everything up; and the level last means `gain_db` is a relative trim against a
+fixed target.
+
+### Amplitude: peak is the ceiling, rms is the loudness
+
+Peak alone cannot set a level, and treating it as if it can is what made the
+Firebird sound loud and crushed. The engine loop measures **peak 99% with
+rms 49%** - crest factor 2.0 - because the recording has already been
+limited. Pushing that to 100% peak put its rms 10 points above retail's
+29-39%, i.e. about **+3 dB**, on a waveform whose transients were already
+flat. Loudness, not peak, is the thing a listener compares.
+
+So the gain is the smaller of two moves: reach the `rms` target, or reach the
+`peak` ceiling. A dynamic recording is stopped by the ceiling and lands at
+full scale exactly like retail's; a hot or limited one is pulled *down* to
+retail's loudness instead of being pushed up on top of it. The Firebird's
+three samples came out at:
+
+| sample | peak | rms | crest | what happened |
+| --- | --- | --- | --- | --- |
+| engine | 71% | 34% | 2.1 | pulled down 3.2 dB to retail loudness |
+| idle | 97% | 32% | 3.0 | inside both bands, left untouched |
+| horn | 97% | 34% | 2.8 | inside both bands, left untouched |
+
+Retail's own car banks: peak 100%, rms 29-39%, crest 2.6-3.4.
+
+DC offset is removed first, because an offset is silent but eats headroom -
+a sample sitting 300 high can only reach 32467 before it clips, and every
+peak measurement is then reading the offset rather than the signal. The bake
+also reports a source that is already clipped, and says so when a sample's
+crest factor is under 2.2: no level can undo a limited recording, and
+normalising it only makes the crush louder.
 
 ### The level dead band
 
