@@ -1388,8 +1388,10 @@ def build_sounds_body(specs, warnings):
         warnings.append("sound model %d: %d bytes - %s"
                         % (model, sum(r[1] for r in rows),
                            "; ".join(
-                               "%s %d B rms %d%% crest %.1f field %d%s%s"
+                               "%s %d B %.2fs rms %d%% crest %.1f field %d%s%s"
                                % (name, sample["data"] and len(sample["data"]),
+                                  len(sample["data"]) / (sample["rate"] / 2.0)
+                                  if sample["rate"] else 0.0,
                                   100.0 * sample["rms"] / 32767.0,
                                   sample["crest"], sample["rate_field"],
                                   " loop" if sample["loop"] else "",
