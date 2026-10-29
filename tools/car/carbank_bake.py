@@ -192,7 +192,8 @@ def source_lev_of(bank):
 
 
 def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=False,
-                   flip_winding=False, colors=None, flip_normals=False, flip_z=False):
+                   flip_winding=False, colors=None, flip_normals=False, flip_z=False,
+                   force_pages=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
     lev_name = bank.raw.get("lev") or ""
@@ -252,7 +253,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     warnings = []
 
     # ...and the declaration owns each page's BAKE, not just its image
-    _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=out_dir)
+    _sync_declared_pages(manifest, bank, bank_dir, warnings,
+                         out_dir=out_dir, force=force_pages)
 
     # With palette_from_pages the pages ARE the palette, so the rows are rebuilt
     # from them after the page step. Without it a re-baked page silently keeps a
@@ -369,6 +371,10 @@ def _resolved_sample(sounds, key, role, defaults):
 
     if spec.get("loop") is None:
         out["loop"] = role != "third"
+    elif spec["loop"] == "auto":
+        # "auto" survives as itself: the encoder needs to know it may search for
+        # loop points, which bool() would throw away
+        out["loop"] = "auto"
     else:
         out["loop"] = bool(spec["loop"])
 
@@ -381,6 +387,7 @@ def _resolved_sample(sounds, key, role, defaults):
     # a per-sample rate wins over a per-sample percentage, which wins over the
     # sounds-level percentage (engine_pct / idle_pct); each is already validated
     out["rate"] = spec.get("rate")
+    out["pitch"] = float(spec.get("pitch") or 1.0)
     out["rate_pct"] = spec.get("rate_pct") or 100
     out["max_rate"] = defaults["max_rate"]
     out["sample_bytes"] = defaults["sample_bytes"]
@@ -396,6 +403,7 @@ def _resolved_sample(sounds, key, role, defaults):
         out["rate_pct"] = sounds.engine_pct
 
     out["loop_from"] = float(loop_from or 0.0)
+    out["loop_to"] = spec.get("loop_to")
     out["force"] = bool(spec.get("force"))
     out["normalise"] = (True if spec.get("normalise") is None
                         else bool(spec.get("normalise")))
@@ -649,12 +657,23 @@ def _default_island(path, carname, variant, warnings):
     return (0, 0, wheels_w, wheels_h)
 
 
-def _page_source_hash(page, setid):
-    """The (image hash, bake options) a page was baked from."""
+def _page_source_hash(page, setid, sprites=None):
+    """The (image hash, bake options, wheel sprites) a page was baked from.
+
+    The sprites are part of the source: an island is composited from them, so a
+    re-painted wheel image has to re-bake its page even though the page image
+    itself never changed.
+    """
     record = {"image": os.path.basename(page.image or ""),
               "transparent": page.transparent,
               "tolerance": page.transparent_tolerance,
               "chroma": page.transparent_chroma}
+
+    if sprites:
+        record["wheels"] = [{"variant": variant,
+                             "image": os.path.basename(path),
+                             "island": [int(v) for v in island]}
+                            for variant, path, island in sprites]
 
     if page.protect:
         record["protect"] = ["%02x%02x%02x" % tuple(c) for c in page.protect]
@@ -671,7 +690,41 @@ def _page_source_hash(page, setid):
     return record
 
 
-def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
+def wheel_islands(bank):
+    """{set: [(variant, image path, island)]} for every declared wheel sprite.
+
+    The FIRST car in slot order owns the bank's wheels (see wheel_specs), so only
+    that car's sprites are composited; another car's would be reported by
+    wheel_specs and never reach the bank anyway.
+    """
+    islands = {}
+    owner = None
+
+    for _slot, carname in bank.order:
+        car = bank.cars[carname]
+        declared = [(v, car.wheels.get(v)) for v in WHEELS]
+        declared = [(v, w) for v, w in declared if w is not None]
+
+        if not declared:
+            continue
+
+        if owner is not None:
+            continue
+
+        owner = carname
+
+        for variant, wheel in declared:
+            if wheel.set is None or wheel.island is None or not wheel.path:
+                continue
+
+            islands.setdefault(wheel.set, []).append(
+                (variant, wheel.path, wheel.island))
+
+    return islands
+
+
+def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
+                         force=False):
     """Bake every declared page whose IMAGE, or whose bake options, changed.
 
     The bank bake used to read `pages/PAGE_<set>.bin` and nothing else, so a new
@@ -701,13 +754,15 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
             owner[page.set] = carname
 
     by_set = {p.get("set"): p for p in (manifest.get("pages") or [])}
+    islands = wheel_islands(bank)
 
     for setid, page in sorted(declared.items()):
         entry = by_set.setdefault(setid, {"set": setid})
-        source = _page_source_hash(page, setid)
+        source = _page_source_hash(page, setid, islands.get(setid))
         want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
 
-        if (entry.get("source") == source and os.path.isfile(want)
+        if (not force and entry.get("source") == source
+                and os.path.isfile(want)
                 and entry.get("bin") == "pages/PAGE_%d.bin" % setid):
             continue
 
@@ -719,6 +774,30 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
         pixels, alpha = carbank_page._load_rgb(page.image)
         key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
 
+        # A wheel island is CARVED, not inherited: whatever the page art carried
+        # at the island is replaced by the declared sprite. Without this the
+        # wheel came from the page image, so a stale pink square in the page
+        # survived every rebake no matter what sprite was declared.
+        sprites = islands.get(setid) or []
+
+        if sprites:
+            mask = list(mask) if mask else [False] * len(pixels)
+
+            for variant, sprite_path, island in sprites:
+                sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
+                transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+                masked = carbank_page.composite(
+                    pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
+                    island, transparent, key if key is not None else sprite[0])
+
+                for index in masked:
+                    mask[index] = True
+
+                warnings.append("page set %d: composited the %s wheel from %s "
+                                "into island %s"
+                                % (setid, variant, os.path.basename(sprite_path),
+                                   tuple(island)))
+
         blob, colours, indices, _error, background = carbank_page.bake_page(
             pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
             palette=page.palette, protect=page.protect,
@@ -729,6 +808,21 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
         with open(want, "wb") as f:
             f.write(blob)
 
+        # The preview, right here, so it can never describe a page it was not
+        # baked from. It is RGBA and paints the transparent index as alpha 0:
+        # an RGB preview of this page paints that index as black, and re-baking
+        # one turns the keyed backdrop back into paint.
+        try:
+            rows, _raw = pages1.read_page(blob, 0, len(blob))
+            keyed = {background["index"]} if background else set()
+            exportd2.page_png(os.path.join(bank_dir, "pages",
+                                           "PAGE_%d.png" % setid),
+                              rows, fourbpp.decode_indices(_raw),
+                              transparent=keyed)
+        except (ValueError, struct.error) as exc:
+            warnings.append("page set %d: preview not written (%s)"
+                            % (setid, exc))
+
         entry.update({"set": setid, "size": len(blob), "ncluts": 1,
                       "bin": "pages/PAGE_%d.bin" % setid,
                       "source": source})
@@ -738,23 +832,88 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
             warnings.append("page set %d: re-baked from %s (no transparent "
                             "colour)" % (setid, os.path.basename(page.image)))
         else:
-            warnings.append("page set %d: re-baked from %s (transparent index "
-                            "%d, %d texel(s))"
-                            % (setid, os.path.basename(page.image),
-                               background["index"], background["keyed"]))
+            folded = background.get("folded") or []
+            warnings.append(
+                "page set %d: re-baked from %s (transparent index %d, %d "
+                "texel(s)%s)"
+                % (setid, os.path.basename(page.image), background["index"],
+                   background["keyed"],
+                   ", folded %d near-key entr%s %s"
+                   % (len(folded), "y" if len(folded) == 1 else "ies",
+                      folded) if folded else ""))
+
+            # Whatever the fold did, nothing in this row may still paint the key
+            try:
+                rows, _raw = pages1.read_page(blob, 0, len(blob))
+                stray = carbank_page.stray_key_entries(
+                    rows, key, page.transparent_tolerance,
+                    page.transparent_chroma, transparent=[background["index"]])
+
+                if stray:
+                    warnings.append(
+                        "page set %d: %d palette entr%s still paint%s the key "
+                        "#%02x%02x%02x (indices %s) - a texel landing there "
+                        "draws the backdrop"
+                        % (setid, len(stray), "y" if len(stray) == 1 else "ies",
+                           "s" if len(stray) == 1 else "", key[0], key[1],
+                           key[2], stray))
+            except (ValueError, struct.error):
+                pass
 
     manifest["pages"] = [by_set[k] for k in sorted(by_set)]
 
 
+def poly_palette_use(lev_path):
+    """{(set, palette index)} that some car poly actually samples.
+
+    A poly carries a page SET and a CLUT id; it draws index `texture_id` out of
+    the row chosen for that set. So a colour can be on screen without a single
+    texel painting it - the poly's own index does it.
+    """
+    used = set()
+
+    try:
+        import lev1
+
+        with open(lev_path, "rb") as f:
+            blob = f.read()
+
+        got = exportd2.d2_lump(blob, exportd2.LUMP_CAR_MODELS)
+
+        if got is None:
+            return used
+
+        body, size = got
+        offsets = struct.unpack_from("<13i", blob, body)
+
+        for offset in offsets:
+            if offset < 0 or offset + 36 > size:
+                continue
+
+            model = lev1.decode_model(blob, body + offset)
+
+            for poly in model.polys:
+                if poly.kind in exportd2.TEXTURED_KINDS:
+                    used.add((poly.texture_set, poly.texture_id))
+    except (ImportError, ValueError, struct.error, OSError):
+        pass
+
+    return used
+
+
 def audit_colour(bank_dir, manifest, colour, tolerance=0):
-    """Every place a colour still appears: page, texels, index, CLUT word.
+    """Every place a colour can still reach the screen: texels, rows, polys.
 
     "There is still pink on the car" has exactly three answers - the texels are
-    on a page, the palette row paints them, or the poly samples a page that was
-    never re-baked - and this prints all three rather than leaving it to guesswork.
+    on a page, the palette row paints them, or the poly samples that entry - and
+    this prints all three rather than leaving it to guesswork. The texel test
+    alone once said "not on any page" while a pink wheel was on screen, because
+    the wheel's row was derived at draw time.
     """
     found = []
     key = tuple(colour)
+    lev_path = os.path.join(bank_dir, os.path.basename(manifest.get("lev") or ""))
+    used_by_polys = poly_palette_use(lev_path) if os.path.isfile(lev_path) else set()
 
     for page in manifest.get("pages") or []:
         setid = page.get("set")
@@ -773,26 +932,61 @@ def audit_colour(bank_dir, manifest, colour, tolerance=0):
             continue
 
         rgb_rows = [fourbpp.clut_rgb(r) for r in rows]
-        hits = {}
+        hist = {}
 
-        for i, index in enumerate(indices):
-            if index in hits:
-                continue
+        for index in indices:
+            hist[index] = hist.get(index, 0) + 1
 
+        # (a) palette entries that PAINT the colour, used or not: an unused
+        #     magenta entry is one texel away from being pink again
+        for index in range(16):
             for r, row in enumerate(rgb_rows):
                 got = row[index]
 
-                if max(abs(got[c] - key[c]) for c in range(3)) <= tolerance:
-                    hits[index] = (r, got)
-                    break
+                if max(abs(got[c] - key[c]) for c in range(3)) > tolerance:
+                    continue
 
-        for index, (row, got) in sorted(hits.items()):
-            count = indices.count(index)
-            word = struct.unpack_from("<H", rows[row], index * 2)[0]
+                word = struct.unpack_from("<H", rows[r], index * 2)[0] if rows else 1
 
-            found.append({"set": setid, "index": index, "row": row,
-                          "texels": count, "colour": got, "word": word,
-                          "transparent": word == 0})
+                found.append({"set": setid, "index": index, "row": r,
+                              "texels": hist.get(index, 0), "colour": got,
+                              "word": word, "transparent": word == 0,
+                              "poly": (setid, index) in used_by_polys})
+
+        # (b) same question for the bank's palette records, which is what the
+        #     engine binds for an imported car
+    pallet = os.path.join(bank_dir, "pallet.bin")
+
+    if os.path.isfile(pallet):
+        try:
+            with open(pallet, "rb") as f:
+                pal = exportd2.d2_palette_from_bytes(f.read())
+
+            for record in pal["records"]:
+                raw = record.get("raw")
+
+                if not raw or len(raw) < 32:
+                    continue
+
+                row = fourbpp.clut_rgb(raw[:32])
+
+                for index in range(16):
+                    got = row[index]
+
+                    if max(abs(got[c] - key[c]) for c in range(3)) > tolerance:
+                        continue
+
+                    found.append({"set": record.get("tpageindex"),
+                                  "index": index,
+                                  "row": record.get("palette"),
+                                  "texels": None, "colour": got,
+                                  "word": struct.unpack_from("<H", raw, index * 2)[0],
+                                  "transparent": False,
+                                  "poly": (record.get("tpageindex"),
+                                           index) in used_by_polys,
+                                  "palette_record": True})
+        except (ValueError, struct.error):
+            pass
 
     return found
 
@@ -800,13 +994,14 @@ def audit_colour(bank_dir, manifest, colour, tolerance=0):
 def check_sources(bank, manifest, bank_dir, stale_only=True):
     """What the bake would change: a stale page source, a stale palette."""
     problems = []
+    islands = wheel_islands(bank)
 
     for carname in bank.cars:
         for page in bank.cars[carname].textures:
             record = next((p for p in (manifest.get("pages") or [])
                            if p.get("set") == page.set), None)
             want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % page.set)
-            source = _page_source_hash(page, page.set)
+            source = _page_source_hash(page, page.set, islands.get(page.set))
 
             if record is None:
                 problems.append("page set %d has no record in the manifest"
@@ -996,7 +1191,8 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
           "on disk")
 
 def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
-              flip_y=False, flip_winding=False, flip_normals=False, flip_z=False):
+              flip_y=False, flip_winding=False, flip_normals=False, flip_z=False,
+              force_pages=False):
     """Bake the declared bank into out_dir. Returns (ok, warnings)."""
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
@@ -1022,7 +1218,8 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
     colors = _source_colors(source_lev_of(bank))
     manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip_y,
                                        flip_winding,
-                                       colors, flip_normals, flip_z)
+                                       colors, flip_normals, flip_z,
+                                       force_pages=force_pages)
 
     # build_bank resolves raw/pages/PAGE_<set>.bin relative to the MANIFEST, so
     # the manifest is written beside the bank (and removed afterwards)
@@ -1117,15 +1314,24 @@ def _report_only(args):
     print("#%02x%02x%02x:" % colour)
 
     if not found:
-        print("  not on any page")
+        print("  not on any page, palette row or poly")
         return 0
 
     for hit in found:
-        print("  set %3d  index %2d  row %d  %d texel(s)  #%02x%02x%02x  word "
-              "%04x%s"
-              % (hit["set"], hit["index"], hit["row"], hit["texels"],
+        where = "palette  " if hit.get("palette_record") else "page set"
+        texels = ("unused" if not hit["texels"]
+                  else "%d texel(s)" % hit["texels"])
+
+        print("  %s %3d  index %2d  row %s  %-11s #%02x%02x%02x  word %04x%s"
+              "%s"
+              % (where, hit["set"], hit["index"], hit["row"], texels,
                  hit["colour"][0], hit["colour"][1], hit["colour"][2],
-                 hit["word"], "  TRANSPARENT" if hit["transparent"] else ""))
+                 hit["word"], "  TRANSPARENT" if hit["transparent"] else "",
+                 "  DRAWN BY A POLY" if hit.get("poly") else ""))
+
+    if not any(hit.get("poly") for hit in found):
+        print("  no poly samples any of those entries, so this colour is not "
+              "currently on screen")
 
     return 0
 
@@ -1161,6 +1367,12 @@ def _completed_sample(role, entry, sounds):
 
     if out.get("loop") is None:
         out["loop"] = role in SOUND_ROLES
+
+    if out.get("loop_to") is None:
+        out["loop_to"] = None
+
+    if out.get("pitch") is None:
+        out["pitch"] = bankjson.SOUND_SAMPLE_DEFAULTS["pitch"]
 
     for key, value in bankjson.SOUND_SAMPLE_DEFAULTS.items():
         if key not in out:
@@ -1243,8 +1455,8 @@ def complete_declaration(js, out=None, dry_run=False):
             ordered = {"wav": after["wav"]}
 
             for key in ("level", "rms", "force", "normalise", "gain_db",
-                        "rate", "rate_pct", "loop", "loop_from", "trim",
-                        "fade_out"):
+                        "rate", "rate_pct", "pitch", "loop", "loop_from",
+                        "loop_to", "trim", "fade_out"):
                 if key in after:
                     ordered[key] = after[key]
 
@@ -1304,6 +1516,9 @@ def main(argv=None):
                     help="reverse every face: required with --flip-y, or the car is inside-out")
     ap.add_argument("--d1", metavar="LEV",
                     help="bake a DRIVER 1 LEV instead (pool shape, bake.build_file)")
+    ap.add_argument("--force-pages", action="store_true",
+                    help="re-bake every declared page even when its source, its "
+                         "bake options and its wheel sprites are unchanged")
     ap.add_argument("--check", action="store_true",
                     help="write nothing; report page/palette sources that are stale")
     ap.add_argument("--complete", action="store_true",
@@ -1340,7 +1555,8 @@ def main(argv=None):
     ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
                              default_page=default_page,
                              flip_y=args.flip_y, flip_winding=args.flip_winding,
-                             flip_normals=args.flip_normals, flip_z=args.flip_z)
+                             flip_normals=args.flip_normals, flip_z=args.flip_z,
+                             force_pages=args.force_pages)
 
     print("baked %s -> %s" % (os.path.basename(args.bank), args.out))
 

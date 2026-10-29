@@ -510,16 +510,52 @@ def write_png_rgb(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
-def page_png(path, rows, idx):
+def write_png_rgba(path, w, h, pix):
+    """A PNG with an alpha channel, so a preview can show what is NOT drawn.
+
+    The page's transparent index is written 0x0000 in every CLUT row, which as a
+    colour is black - so an RGB preview paints it opaque black and looks like
+    art. Anyone re-baking such a preview then gets the backdrop back as paint,
+    which is how a keyed-out backdrop returns one generation later.
+    """
+    raw = bytearray()
+
+    for y in range(h):
+        raw.append(0)
+        raw += pix[y * w * 4:(y + 1) * w * 4]
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
+        f.write(chunk(b"IEND", b""))
+
+
+def page_png(path, rows, idx, transparent=None):
+    """The page as a PNG. `transparent` names the indices the bake keyed out.
+
+    It is passed in rather than guessed: a 0x0000 entry on a BODY page can just
+    be black paint, and treating it as transparency makes a preview claim the
+    body has holes. When nothing was keyed, nothing is transparent.
+    """
     pal = pages1.clut_rgb(rows[0]) if rows else [(0, 0, 0)] * 16
-    pix = bytearray(256 * 256 * 3)
+    transparent = set(transparent or ())
+
+    pix = bytearray(256 * 256 * 4)
+
     for i, v in enumerate(idx):
         if v < len(pal):
             r, g, b = pal[v]
         else:
             r = g = b = 0
-        pix[i * 3:i * 3 + 3] = bytes((r, g, b))
-    write_png_rgb(path, 256, 256, pix)
+
+        pix[i * 4:i * 4 + 4] = bytes((r, g, b, 0 if v in transparent else 255))
+
+    write_png_rgba(path, 256, 256, pix)
 
 
 def palette_png(path, records, included):
@@ -1221,18 +1257,66 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
         samples = samples[:limit]
 
     loop_from = int(float(spec.get("loop_from") or 0) * rate)
+    loop_end = None
+    looping = spec.get("loop")
 
-    data, count, rms = vag.encode(samples, loop=bool(spec.get("loop")),
-                                  loop_from=loop_from)
+    if looping == "auto":
+        # The SPU cannot crossfade a loop: the join has to meet itself or it
+        # clicks once per cycle, which on a car engine reads as gravel. Pick the
+        # block-aligned pair with the smallest join and trim the tail to it.
+        found = vag.find_loop(samples, spec.get("loop_from") or 0.0, rate)
+
+        if found is None:
+            warnings.append("sound %s: too short to search for a loop point; "
+                            "looping the whole buffer" % label)
+            looping = True
+        else:
+            before = vag.seam_error(samples, int(float(spec.get("loop_from") or 0)
+                                                * rate), len(samples) - 1)
+            loop_from = found["start"]
+            loop_end = found["end"] + 1
+            warnings.append(
+                "sound %s: loop %d..%d (%.3fs); the join drops from %d to %d"
+                % (label, found["start"], loop_end, found["seconds"],
+                   before, found["seam"]))
+            looping = True
+
+    if spec.get("loop_to"):
+        loop_end = min(int(float(spec["loop_to"]) * rate),
+                       len(samples) if loop_end is None else loop_end)
+
+    data, count, rms = vag.encode(samples, loop=bool(looping),
+                                  loop_from=loop_from, loop_end=loop_end)
 
     if rms > 4000:
         warnings.append("sound %s: encode error is high (rms %.0f) - the sample "
                         "is probably too loud or too noisy for 4-bit ADPCM"
                         % (label, rms))
 
-    return {"data": data, "rate": rate, "loop": 1 if spec.get("loop") else 0,
-            "samples": count, "rate_field": vag.rate_field(rate),
-            "level": float(level), "gain_db": gain}
+    # The rate FIELD is what the game multiplies by its own pitch request, so
+    # this is the knob that decides where the sample lands in play. Measured
+    # against gamesnd.c: a rev sample is asked for at 1500+revs/4 over 4096, an
+    # idle at 4096+revs/4 over 4096.
+    pitch = float(spec.get("pitch") or 1.0)
+    field = int(round(vag.rate_field(rate) * pitch))
+
+    if pitch != 1.0:
+        warnings.append("sound %s: pitch x%.2f - declared rate %d Hz plays at "
+                        "%.0f Hz when the game asks %.2f"
+                        % (label, pitch, rate, rate * pitch,
+                           1500.0 / 4096.0))
+
+    # the stream's real length: what decode() returns, not the length before the
+    # loop-end trim (a trimmed loop would otherwise report its old duration)
+    count = (len(data) // vag.BLOCK_BYTES) * vag.SAMPLES_PER_BLOCK
+    measured = vag.stats(vag.decode(data, count))
+
+    return {"data": data, "rate": rate, "loop": 1 if looping else 0,
+            "samples": count, "rate_field": field,
+            "level": float(level), "gain_db": gain, "pitch": pitch,
+            "rms": measured["rms"], "crest": measured["crest"],
+            "seam": vag.seam_error(vag.decode(data, count), loop_from,
+                                   (loop_end or count) - 1) if looping else 0}
 
 
 def build_sounds_body(specs, warnings):
@@ -1301,11 +1385,19 @@ def build_sounds_body(specs, warnings):
 
         body += payload
 
-        warnings.append("sound model %d: %d bytes (engine %d, idle %d, third "
-                        "%d), rate fields %d/%d/%d"
-                        % (model, len(rows) and sum(r[1] for r in rows),
-                           rows[0][1], rows[1][1], rows[2][1],
-                           rows[0][3], rows[1][3], rows[2][3]))
+        warnings.append("sound model %d: %d bytes - %s"
+                        % (model, sum(r[1] for r in rows),
+                           "; ".join(
+                               "%s %d B rms %d%% crest %.1f field %d%s%s"
+                               % (name, sample["data"] and len(sample["data"]),
+                                  100.0 * sample["rms"] / 32767.0,
+                                  sample["crest"], sample["rate_field"],
+                                  " loop" if sample["loop"] else "",
+                                  (" seam %d" % sample["seam"])
+                                  if sample["loop"] else "")
+                               for name, sample in
+                               (("engine", engine), ("idle", idle),
+                                ("third", third)))))
 
     for i in range(MAX_CAR_MODELS):
         struct.pack_into("<i", body, 8 + i * 4, offsets[i])

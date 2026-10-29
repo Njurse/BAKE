@@ -185,5 +185,50 @@ class RateFieldTests(unittest.TestCase):
         self.assertEqual((samples, top, gain), ([0, 0, 0], 0, 1.0))
 
 
+class LoopPointTests(unittest.TestCase):
+    """find_loop exists because the SPU cannot crossfade: the join must meet."""
+
+    def wave(self, periods=8, rate=16000, hz=148.0, phase=0.0):
+        import math
+        n = int(rate * periods / hz)
+        return [int(20000 * math.sin(2 * math.pi * hz * i / rate + phase))
+                for i in range(n)]
+
+    def test_it_finds_a_join_much_quieter_than_the_default(self):
+        # a wave that does NOT end on a zero crossing is the normal case, and
+        # the default loop (block 1 to the end) then clicks every cycle
+        samples = self.wave()
+        found = vag.find_loop(samples, 0.0, 16000)
+        self.assertIsNotNone(found)
+        default = vag.seam_error(samples, 28, len(samples) - 1)
+        self.assertLess(found["seam"], default)
+
+    def test_the_loop_end_is_block_aligned(self):
+        found = vag.find_loop(self.wave(), 0.0, 16000)
+        self.assertEqual((found["end"] + 1) % vag.SAMPLES_PER_BLOCK, 0,
+                         "the encoder can only end a loop on a block boundary")
+
+    def test_the_loop_starts_after_the_attack(self):
+        samples = self.wave(periods=80)
+        found = vag.find_loop(samples, 0.1, 16000)
+        self.assertIsNotNone(found)
+        self.assertGreaterEqual(found["start"], int(0.1 * 16000))
+
+    def test_a_loop_end_trims_the_encoded_stream(self):
+        samples = self.wave(periods=80)
+        end = len(samples) - 100
+        data, _count, _rms = vag.encode(samples, loop=True, loop_from=56,
+                                        loop_end=end)
+        blocks = len(data) // vag.BLOCK_BYTES
+        kept = blocks * vag.SAMPLES_PER_BLOCK
+        self.assertEqual(len(data) % vag.BLOCK_BYTES, 0)
+        # the tail is padded up to the block boundary, never further
+        self.assertLess(kept - vag.SAMPLES_PER_BLOCK, end)
+        self.assertGreaterEqual(kept, end)
+
+    def test_too_short_a_sample_has_no_loop_points(self):
+        self.assertIsNone(vag.find_loop([0] * 40, 0.0, 16000))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

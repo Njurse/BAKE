@@ -90,6 +90,11 @@ bake writes `-1` for them.
 
 ### `textures`
 
+A declared page or sprite may NOT live under `work/` or `pages/`: those are
+what the bake writes, so a source there is a previous bake's output - and its
+hash would keep looking current however the art changed. That is refused by
+name.
+
 A car names the image for each texture page it uses, keyed by **set id**:
 
 ```json
@@ -195,12 +200,15 @@ that path as `wav` plus its own settings:
 ```json
 "engine": { "wav": "sounds/engine.wav", "level": 0.999, "rms": 0.34,
             "normalise": true, "force": false, "gain_db": 0.0,
-            "rate": null, "rate_pct": 100, "loop": true,
-            "loop_from": 0.0, "trim": null, "fade_out": 0.0 }
+            "rate": null, "rate_pct": 100, "pitch": 2.0,
+            "loop": "auto", "loop_from": 0.0, "loop_to": null,
+            "trim": null, "fade_out": 0.0 }
 ```
 
 `level` (peak ceiling), `rms` (loudness target; `0` = peak only),
-`normalise` (false = keep the source level),
+`normalise` (false = keep the source level), `pitch` (scales the rate field
+only, for a sample the game pitches down as it plays it), `loop`
+(`true`/`false`/`"auto"`), `loop_to`,
 `force` (rescale even when already at level), `gain_db`, `rate` (an exact
 frequency, which wins over `rate_pct`), `rate_pct`, `loop`, `loop_from`,
 `trim` (`[start, end]` seconds) and `fade_out` (seconds). The defaults are the
