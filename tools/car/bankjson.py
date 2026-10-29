@@ -18,7 +18,7 @@ import os
 SCHEMA = 1
 
 CAR_KEYS = {
-    "clean", "damaged", "low", "atlas", "pages", "wheels",
+    "clean", "damaged", "low", "atlas", "textures", "wheels",
     "sounds", "palette", "remap",
 }
 SOUND_KEYS = {"engine", "idle", "horn", "siren", "cop", "engine_pct", "idle_pct",
@@ -29,8 +29,8 @@ WHEEL_VARIANTS = ("clean", "damaged", "fast")
 
 # a declared page describes its own BAKE, not just an image: the refresh path has
 # to reproduce the page from the declaration alone
-PAGE_KEYS = {"set", "png", "source", "transparent", "transparent_tolerance",
-             "transparent_chroma", "palette", "protect", "size"}
+TEXTURE_KEYS = {"png", "transparent", "transparent_tolerance",
+                "transparent_chroma", "palette", "protect"}
 
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
 # crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
@@ -68,21 +68,39 @@ class Car(object):
         self.low = self._file(where, "low", data.get("low"))
         self.atlas = self._file(where, "atlas", data.get("atlas"))
 
-        self.pages = []
-        for page in data.get("pages") or []:
-            if not isinstance(page, dict):
-                _fail(where, "pages", "each entry must be an object")
+        # TEXTURES: set id -> the image that page is baked from, plus how.
+        #
+        # There is no `pages` in a declaration, and that is the point: a page's
+        # PNG preview is a product of the bake, so naming it here would make the
+        # output an input (and re-baking from a preview is generation loss). The
+        # images in the car json ARE the source of truth; the manifest's pages[]
+        # is the computed record of what they produced.
+        if "pages" in data:
+            _fail(where, "pages",
+                  "a declaration names TEXTURES, not pages: keys are set ids, "
+                  "e.g. \"textures\": {\"1\": \"textures/car.png\"}. A page's "
+                  "png is a bake output and is not an input.")
 
-            _check_keys(where, "pages", page, PAGE_KEYS, "page")
+        self.textures = []
+        textures = data.get("textures") or {}
 
-            setid = page.get("set")
-            if not isinstance(setid, int) or not 0 <= setid <= 255:
-                _fail(where, "pages.set", "%r is not a page set id 0..255" % (setid,))
+        if not isinstance(textures, dict):
+            _fail(where, "textures", "must be an object of set id -> image")
 
-            self.pages.append(Page(where, setid, page, self._file))
+        for key, value in sorted(textures.items()):
+            try:
+                setid = int(str(key), 0)
+            except ValueError:
+                _fail(where, "textures.%s" % key,
+                      "is not a page set id (keys are set ids, e.g. \"1\")")
 
-        if not self.atlas and not self.pages:
-            _fail(where, "atlas", "a car needs an atlas or per-page PNGs")
+            if not 0 <= setid <= 255:
+                _fail(where, "textures.%s" % key, "is not a set id 0..255")
+
+            self.textures.append(Texture(where, setid, value, self._file))
+
+        if not self.atlas and not self.textures:
+            _fail(where, "atlas", "a car needs an atlas or a textures map")
 
         self.wheels = {}
         wheels = data.get("wheels") or {}
@@ -153,30 +171,38 @@ class Car(object):
         return full
 
 
-class Page(object):
-    """One declared texture page: its image and how to bake it.
+class Texture(object):
+    """One page's image and how to bake it: `textures[set]` in the declaration.
 
-    A page is not just a PNG. The bake that turns it into a 4bpp page has real
-    choices - which colour is the transparent backdrop, how wide the match is,
-    which 16 colours to keep - and if the declaration does not carry them, a
-    refresh cannot reproduce the page the author saw. So they live here, and
-    carbank_bake bakes the page from THIS when the image changes.
+    The image IS the declaration - there is no separate preview path, because a
+    preview is what the bake writes back and re-baking from it is generation
+    loss. The bake's own record of the page (its size, its palette row, the
+    sha256 it was baked from, its preview PNG) lives in the manifest instead.
+
+    A set's entry may be a path, or an object with that path as `png` plus the
+    choices the bake cannot guess: which colour is the transparent backdrop, how
+    wide the match is, which 16 colours to keep.
     """
 
     def __init__(self, where, setid, data, file_of):
-        field = "pages[set %d]" % setid
+        field = "textures.%d" % setid
         self.set = setid
-        self.png = file_of(where, field + ".png", data.get("png"), required=True)
-        # the IMAGE this page is baked from. Absent means png is only a preview
-        # (what the bake wrote back), and the page is never re-baked from it -
-        # a preview round trip is generation loss.
-        self.source = file_of(where, field + ".source", data.get("source"))
+
+        if isinstance(data, str):
+            data = {"png": data}
+
+        if not isinstance(data, dict):
+            _fail(where, field, "must be a path or an object with a png")
+
+        _check_keys(where, field, data, TEXTURE_KEYS, "texture")
+
+        self.image = file_of(where, field + ".png", data.get("png"),
+                             required=True)
         self.transparent = data.get("transparent")
         self.transparent_tolerance = data.get("transparent_tolerance", 0)
         self.transparent_chroma = data.get("transparent_chroma")
         self.palette = data.get("palette")
         self.protect = data.get("protect") or []
-        self.size = data.get("size")
 
         if (not isinstance(self.transparent_tolerance, int)
                 or not 0 <= self.transparent_tolerance <= 255):
@@ -206,6 +232,7 @@ class Page(object):
         """What the page bake needs, from the declaration alone."""
         return {"transparent": self.transparent,
                 "tolerance": self.transparent_tolerance,
+                "chroma": self.transparent_chroma,
                 "palette": self.palette,
                 "protect": list(self.protect or [])}
 
@@ -403,6 +430,16 @@ class Bank(object):
                 _fail(where, "declare.cars.%s" % name, "must be an object")
 
             label = "declare.cars.%s" % name
+
+            # named BEFORE the generic key check, so the message teaches the
+            # replacement instead of listing allowed keys
+            if "pages" in data:
+                _fail(where, label + ".pages",
+                      "a declaration names TEXTURES, not pages: keys are set "
+                      "ids, e.g. \"textures\": {\"1\": \"textures/car.png\"}. "
+                      "A page's png is a bake output (a preview) and is not an "
+                      "input - re-baking from it is generation loss.")
+
             _check_keys(where, label, data, CAR_KEYS, "car")
             self.cars[name] = Car(label, path, data, self.base, where)
 

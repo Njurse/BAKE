@@ -233,14 +233,20 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # page only when something names it, so a declared-but-unlisted set is baked
     # to disk and pruned straight back out ("1 sets"). The wheel art lives on
     # its own sets, which the donor manifest has never heard of.
-    listed_sets = {page.get("set") for page in (manifest.get("pages") or [])}
+    # The manifest's pages[] is COMPUTED from the declaration's textures map:
+    # the images in the car json are the source of truth and the pages record is
+    # what they produced (its png is a preview, never an input).
     for carname in bank.cars:
-        for decl_page in bank.cars[carname].pages:
-            if decl_page.set in listed_sets:
-                continue
-            listed_sets.add(decl_page.set)
-            manifest.setdefault("pages", []).append({"set": decl_page.set,
-                                                     "png": decl_page.png})
+        for texture in bank.cars[carname].textures:
+            if not any(p.get("set") == texture.set
+                       for p in (manifest.get("pages") or [])):
+                manifest.setdefault("pages", []).append({"set": texture.set})
+
+    # and a set the declaration no longer names stops being carried
+    declared = {texture.set for car in bank.cars.values()
+                for texture in car.textures}
+    manifest["pages"] = [p for p in (manifest.get("pages") or [])
+                         if p.get("set") in declared]
 
     warnings = []
 
@@ -305,8 +311,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
 
     declared_sets = set()
     for carname in bank.cars:
-        for decl_page in bank.cars[carname].pages:
-            declared_sets.add(decl_page.set)
+        for texture in bank.cars[carname].textures:
+            declared_sets.add(texture.set)
 
     wheel_sets = set(declared_sets - body_sets)
 
@@ -574,7 +580,7 @@ def _default_island(path, carname, variant, warnings):
 
 def _page_source_hash(page, setid):
     """The (image hash, bake options) a page was baked from."""
-    record = {"image": os.path.basename(page.source or ""),
+    record = {"image": os.path.basename(page.image or ""),
               "transparent": page.transparent,
               "tolerance": page.transparent_tolerance,
               "chroma": page.transparent_chroma}
@@ -586,7 +592,7 @@ def _page_source_hash(page, setid):
         record["palette"] = list(page.palette)
 
     try:
-        with open(page.source, "rb") as f:
+        with open(page.image, "rb") as f:
             record["sha256"] = hashlib.sha256(f.read()).hexdigest()
     except OSError:
         record["sha256"] = None
@@ -610,9 +616,7 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
     owner = {}
 
     for carname in bank.cars:
-        for page in bank.cars[carname].pages:
-            if page.source is None:
-                continue                    # a preview, not a source
+        for page in bank.cars[carname].textures:
             first = declared.get(page.set)
 
             if first is not None:
@@ -638,10 +642,10 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
 
         if not source["sha256"]:
             warnings.append("page set %d: %s cannot be read; keeping the page "
-                            "on disk" % (setid, page.source))
+                            "on disk" % (setid, page.image))
             continue
 
-        pixels, alpha = carbank_page._load_rgb(page.source)
+        pixels, alpha = carbank_page._load_rgb(page.image)
         key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
 
         blob, colours, indices, _error, background = carbank_page.bake_page(
@@ -661,11 +665,11 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
 
         if background is None:
             warnings.append("page set %d: re-baked from %s (no transparent "
-                            "colour)" % (setid, os.path.basename(page.source)))
+                            "colour)" % (setid, os.path.basename(page.image)))
         else:
             warnings.append("page set %d: re-baked from %s (transparent index "
                             "%d, %d texel(s))"
-                            % (setid, os.path.basename(page.source),
+                            % (setid, os.path.basename(page.image),
                                background["index"], background["keyed"]))
 
     manifest["pages"] = [by_set[k] for k in sorted(by_set)]
@@ -727,10 +731,7 @@ def check_sources(bank, manifest, bank_dir, stale_only=True):
     problems = []
 
     for carname in bank.cars:
-        for page in bank.cars[carname].pages:
-            if page.source is None:
-                continue
-
+        for page in bank.cars[carname].textures:
             record = next((p for p in (manifest.get("pages") or [])
                            if p.get("set") == page.set), None)
             want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % page.set)
@@ -742,7 +743,7 @@ def check_sources(bank, manifest, bank_dir, stale_only=True):
             elif record.get("source") != source:
                 problems.append("page set %d is STALE: %s (or its bake options) "
                                 "changed since it was baked"
-                                % (page.set, os.path.basename(page.source)))
+                                % (page.set, os.path.basename(page.image)))
             elif not os.path.isfile(want):
                 problems.append("page set %d has no %s"
                                 % (page.set, os.path.basename(want)))
@@ -815,7 +816,8 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
 
     # the DECLARED pages, not every entry the manifest has accumulated: a stale
     # page for a set this bank no longer carries must not add a palette row
-    sets = {page.set for car in bank.cars.values() for page in car.pages}
+    sets = {texture.set for car in bank.cars.values()
+            for texture in car.textures}
     rows = carbank_palette.rows_from_pages(bank_dir, sets)
 
     if not rows:
@@ -1031,8 +1033,7 @@ def _report_only(args):
             print(problem)
 
         if not problems:
-            declared = [p for c in bank.cars.values() for p in c.pages
-                        if p.source is not None]
+            declared = [t for c in bank.cars.values() for t in c.textures]
             print("%d declared source(s) are current" % len(declared))
             print("  (a page with no \"source\" is a preview and is never "
                   "re-baked)")

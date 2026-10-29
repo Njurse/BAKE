@@ -279,7 +279,9 @@ def export(path, outdir, declare=False):
         cardir = os.path.join(outdir, "cars", carname)
         os.makedirs(cardir, exist_ok=True)
 
-        entry = {"pages": [{"set": s, "png": page_files[s]} for s in included],
+        # the declaration carries the IMAGES (a textures map keyed by set);
+        # a page preview is a bake output, so it is not declared
+        entry = {"textures": {str(s): page_files[s] for s in included},
                  "wheels": {}}
 
         materials = set()
@@ -338,8 +340,11 @@ def _rebase(decl, outdir, base):
             if key in car:
                 car[key] = rel(car[key])
 
-        for page in car.get("pages") or []:
-            page["png"] = rel(page["png"])
+        for setid, image in list((car.get("textures") or {}).items()):
+            if isinstance(image, str):
+                car["textures"][setid] = rel(image)
+            elif isinstance(image, dict) and isinstance(image.get("png"), str):
+                image["png"] = rel(image["png"])
 
         for variant, rel_path in list((car.get("wheels") or {}).items()):
             # {set, island} entries carry no path to rebase
@@ -353,7 +358,7 @@ def _declare_block(result, name):
     cars = {}
 
     for carname, car in result["cars"].items():
-        entry = {"pages": car["pages"]}
+        entry = {"textures": dict(car["textures"])}
         entry.update({k: car[k] for k in PATH_KEYS if k in car})
 
         if car.get("wheels"):
