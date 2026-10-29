@@ -217,7 +217,23 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
                             page["png"] if os.path.isabs(str(page["png"]))
                             else os.path.join(bank_dir, str(page["png"]))))
             for page in manifest["pages"]]
+    # Every DECLARED page has to exist in the manifest: the assembler carves a
+    # page only when something names it, so a declared-but-unlisted set is baked
+    # to disk and pruned straight back out ("1 sets"). The wheel art lives on
+    # its own sets, which the donor manifest has never heard of.
+    listed_sets = {page.get("set") for page in (manifest.get("pages") or [])}
+    for carname in bank.cars:
+        for decl_page in bank.cars[carname].pages:
+            # bankjson hands pages back as (set, png) pairs
+            setid, png = ((decl_page["set"], decl_page.get("png"))
+                          if isinstance(decl_page, dict) else decl_page[:2])
+            if setid in listed_sets:
+                continue
+            listed_sets.add(setid)
+            manifest.setdefault("pages", []).append({"set": setid, "png": png})
+
     _sync_page_sizes(manifest, bank_dir, out_dir)
+
 
     # the DECLARATION owns the slot order: the source manifest still names the
     # donor ids, which no longer exist once the cars are rebuilt
@@ -249,6 +265,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
 
     manifest["models"] = list(by_car.values())
 
+
     # the sets a car names come from its own geom, not the declaration: a car
     # may use any page the source bank carries
     for model in manifest["models"]:
@@ -256,6 +273,24 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
         geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding, None, flip_z)
         model["sets"] = sorted({p["set"] for p in geom["polys"]
                                 if p["set"] not in (0, 255)})
+
+    # A page the DECLARATION adds but no rebuilt body model samples is a wheel
+    # page. This has to run HERE, after the loop above fills model["sets"]:
+    # reading it earlier is what made the first attempt treat every page as a
+    # wheel page, sweep the donor's set 65 in and grow the bank to 106496 bytes.
+    body_sets = set()
+    for model in manifest["models"]:
+        body_sets.update(model.get("sets") or [])
+
+    declared_sets = set()
+    for carname in bank.cars:
+        for decl_page in bank.cars[carname].pages:
+            declared_sets.add(decl_page["set"] if isinstance(decl_page, dict)
+                              else decl_page[0])
+
+    wheel_sets = sorted(declared_sets - body_sets)
+    if wheel_sets:
+        manifest["wheel_sets"] = wheel_sets
 
     return manifest, warnings
 
@@ -303,6 +338,22 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
 
     perms = fix(perms)
     specs = fix(specs)
+
+    # a page the declaration adds is not in textureinfo yet, and fix() can only
+    # restate the size of one that is: append it, with the size of the file on
+    # disk, or the assembler has no length to carve
+    listed = {setid for setid, _ in perms}
+    for page in manifest.get("pages") or []:
+        setid = page.get("set")
+        if setid in listed:
+            continue
+        path = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+        if os.path.isfile(path):
+            size = os.path.getsize(path)
+            perms.append((setid, size))
+            sizes[setid] = size
+            listed.add(setid)
+            changed = True
 
     for page in manifest.get("pages") or []:
         if page.get("set") in sizes:
