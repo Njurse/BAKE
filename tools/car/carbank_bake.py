@@ -30,6 +30,7 @@ it, and a bake of an unchanged declaration reproduces the bank byte for byte.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -41,6 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import bake
 import bankjson
 import carbank_import
+import carbank_page
 import exportd2
 import fourbpp
 import pages1
@@ -199,7 +201,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     source_manifest_path = os.path.join(
         bank_dir,
         bank.raw.get("manifest")
-        or (os.path.splitext(lev_name)[0] + ".json" if lev_name else ""))
+        or (os.path.splitext(os.path.basename(lev_name))[0] + ".json"
+            if lev_name else ""))
 
     # start from the SOURCE manifest (it carries the page blobs, the palette
     # sets and the cosmetics record) and replace only the models and the order:
@@ -233,13 +236,16 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     listed_sets = {page.get("set") for page in (manifest.get("pages") or [])}
     for carname in bank.cars:
         for decl_page in bank.cars[carname].pages:
-            # bankjson hands pages back as (set, png) pairs
-            setid, png = ((decl_page["set"], decl_page.get("png"))
-                          if isinstance(decl_page, dict) else decl_page[:2])
-            if setid in listed_sets:
+            if decl_page.set in listed_sets:
                 continue
-            listed_sets.add(setid)
-            manifest.setdefault("pages", []).append({"set": setid, "png": png})
+            listed_sets.add(decl_page.set)
+            manifest.setdefault("pages", []).append({"set": decl_page.set,
+                                                     "png": decl_page.png})
+
+    warnings = []
+
+    # ...and the declaration owns each page's BAKE, not just its image
+    _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=out_dir)
 
     _sync_page_sizes(manifest, bank_dir, out_dir)
 
@@ -250,7 +256,6 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
                                 for slot, carname in bank.order]
 
     os.makedirs(blocks_dir, exist_ok=True)
-    warnings = []
 
     by_car = {}
 
@@ -294,8 +299,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     declared_sets = set()
     for carname in bank.cars:
         for decl_page in bank.cars[carname].pages:
-            declared_sets.add(decl_page["set"] if isinstance(decl_page, dict)
-                              else decl_page[0])
+            declared_sets.add(decl_page.set)
 
     wheel_sets = set(declared_sets - body_sets)
 
@@ -305,6 +309,13 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # there is nothing to carry. A variant the declaration leaves out is written
     # as -1 and keeps the host level's wheel texture - the missing damaged wheel
     # on the Firebird is that case, deliberately.
+    sounds = sound_specs(bank, warnings)
+
+    if sounds:
+        manifest["sounds"] = sounds
+    else:
+        manifest.pop("sounds", None)
+
     wheels = wheel_specs(bank, warnings)
 
     if any(wheels):
@@ -324,6 +335,61 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
         manifest.pop("wheel_sets", None)
 
     return manifest, warnings
+
+
+def sound_specs(bank, warnings):
+    """The manifest's `sounds` block, from the declaration's per-car sounds.
+
+    One SOUNDS entry per model slot the declaration fills. The engine's dynamic
+    bank is three samples - engine, idle, then the horn (or the cop siren) - and
+    it rejects a bank whose count is not 3, so a car that declares no idle plays
+    its engine loop for both, which is what retail Driver 1 banks do.
+    """
+    models = []
+    sirens = []
+
+    for slot, carname in bank.order:
+        car = bank.cars[carname]
+        sounds = car.sounds
+
+        if sounds is None or not sounds.engine:
+            continue
+
+        entry = {"model": slot,
+                 "engine": {"wav": sounds.engine,
+                            "rate_pct": sounds.engine_pct or 100,
+                            "loop": False},
+                 "idle": None,
+                 "third": None}
+
+        if sounds.idle:
+            entry["idle"] = {"wav": sounds.idle,
+                             "rate_pct": sounds.idle_pct or 100,
+                             "loop": False}
+        else:
+            warnings.append("%s: no idle declared; the engine loop doubles as "
+                            "the idle (as retail D1 banks do)" % carname)
+
+        if sounds.cop:
+            sirens.append(slot)
+
+            if sounds.siren:
+                entry["third"] = {"wav": sounds.siren, "loop": False}
+            else:
+                warnings.append("%s: declared a cop car with no siren"
+                                % carname)
+        elif sounds.horn:
+            entry["third"] = {"wav": sounds.horn, "loop": False}
+        else:
+            warnings.append("%s: no horn declared; the third sample repeats the "
+                            "engine, so the horn will sound wrong" % carname)
+
+        models.append(entry)
+
+    if not models:
+        return {}
+
+    return {"models": models, "sirens": sirens}
 
 
 def _wheel_transparency_warnings(wheels, bank_dir, warnings):
@@ -497,6 +563,241 @@ def _default_island(path, carname, variant, warnings):
     return (0, 0, wheels_w, wheels_h)
 
 
+def _page_source_hash(page, setid):
+    """The (image hash, bake options) a page was baked from."""
+    record = {"image": os.path.basename(page.source or ""),
+              "transparent": page.transparent,
+              "tolerance": page.transparent_tolerance}
+
+    if page.protect:
+        record["protect"] = ["%02x%02x%02x" % tuple(c) for c in page.protect]
+
+    if page.palette:
+        record["palette"] = list(page.palette)
+
+    try:
+        with open(page.source, "rb") as f:
+            record["sha256"] = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        record["sha256"] = None
+
+    return record
+
+
+def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None):
+    """Bake every declared page whose IMAGE, or whose bake options, changed.
+
+    The bank bake used to read `pages/PAGE_<set>.bin` and nothing else, so a new
+    or edited atlas changed nothing until someone remembered to run
+    carbank_page.py by hand - and a stale page is exactly what a "the pink is
+    still there" report turns out to be. The declaration now carries the page's
+    bake (transparent key, tolerance, palette, protect list) and this bakes the
+    page when any of that or the image itself differs from what the manifest
+    recorded last time. An unchanged declaration still produces identical bytes:
+    nothing is rewritten when the hash and the options match.
+    """
+    declared = {}
+    owner = {}
+
+    for carname in bank.cars:
+        for page in bank.cars[carname].pages:
+            if page.source is None:
+                continue                    # a preview, not a source
+            first = declared.get(page.set)
+
+            if first is not None:
+                if first.bake_options() != page.bake_options():
+                    warnings.append(
+                        "%s and %s declare page set %d differently; %s wins"
+                        % (owner[page.set], carname, page.set, owner[page.set]))
+                continue
+
+            declared[page.set] = page
+            owner[page.set] = carname
+
+    by_set = {p.get("set"): p for p in (manifest.get("pages") or [])}
+
+    for setid, page in sorted(declared.items()):
+        entry = by_set.setdefault(setid, {"set": setid})
+        source = _page_source_hash(page, setid)
+        want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+
+        if (entry.get("source") == source and os.path.isfile(want)
+                and entry.get("bin") == "pages/PAGE_%d.bin" % setid):
+            continue
+
+        if not source["sha256"]:
+            warnings.append("page set %d: %s cannot be read; keeping the page "
+                            "on disk" % (setid, page.source))
+            continue
+
+        pixels, alpha = carbank_page._load_rgb(page.source)
+        key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
+
+        blob, colours, indices, _error, background = carbank_page.bake_page(
+            pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
+            palette=page.palette, protect=page.protect)
+
+        os.makedirs(os.path.dirname(want), exist_ok=True)
+
+        with open(want, "wb") as f:
+            f.write(blob)
+
+        entry.update({"set": setid, "size": len(blob), "ncluts": 1,
+                      "bin": "pages/PAGE_%d.bin" % setid,
+                      "source": source})
+        by_set[setid] = entry
+
+        if background is None:
+            warnings.append("page set %d: re-baked from %s (no transparent "
+                            "colour)" % (setid, os.path.basename(page.source)))
+        else:
+            warnings.append("page set %d: re-baked from %s (transparent index "
+                            "%d, %d texel(s))"
+                            % (setid, os.path.basename(page.source),
+                               background["index"], background["keyed"]))
+
+    manifest["pages"] = [by_set[k] for k in sorted(by_set)]
+
+
+def audit_colour(bank_dir, manifest, colour, tolerance=0):
+    """Every place a colour still appears: page, texels, index, CLUT word.
+
+    "There is still pink on the car" has exactly three answers - the texels are
+    on a page, the palette row paints them, or the poly samples a page that was
+    never re-baked - and this prints all three rather than leaving it to guesswork.
+    """
+    found = []
+    key = tuple(colour)
+
+    for page in manifest.get("pages") or []:
+        setid = page.get("set")
+        path = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+
+        if not os.path.isfile(path):
+            continue
+
+        try:
+            with open(path, "rb") as f:
+                blob = f.read()
+
+            rows, raw = pages1.read_page(blob, 0, len(blob))
+            indices = fourbpp.decode_indices(raw)
+        except (ValueError, struct.error):
+            continue
+
+        rgb_rows = [fourbpp.clut_rgb(r) for r in rows]
+        hits = {}
+
+        for i, index in enumerate(indices):
+            if index in hits:
+                continue
+
+            for r, row in enumerate(rgb_rows):
+                got = row[index]
+
+                if max(abs(got[c] - key[c]) for c in range(3)) <= tolerance:
+                    hits[index] = (r, got)
+                    break
+
+        for index, (row, got) in sorted(hits.items()):
+            count = indices.count(index)
+            word = struct.unpack_from("<H", rows[row], index * 2)[0]
+
+            found.append({"set": setid, "index": index, "row": row,
+                          "texels": count, "colour": got, "word": word,
+                          "transparent": word == 0})
+
+    return found
+
+
+def check_sources(bank, manifest, bank_dir, stale_only=True):
+    """What the bake would change: a stale page source, a stale palette."""
+    problems = []
+
+    for carname in bank.cars:
+        for page in bank.cars[carname].pages:
+            if page.source is None:
+                continue
+
+            record = next((p for p in (manifest.get("pages") or [])
+                           if p.get("set") == page.set), None)
+            want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % page.set)
+            source = _page_source_hash(page, page.set)
+
+            if record is None:
+                problems.append("page set %d has no record in the manifest"
+                                % page.set)
+            elif record.get("source") != source:
+                problems.append("page set %d is STALE: %s (or its bake options) "
+                                "changed since it was baked"
+                                % (page.set, os.path.basename(page.source)))
+            elif not os.path.isfile(want):
+                problems.append("page set %d has no %s"
+                                % (page.set, os.path.basename(want)))
+
+    # The palette the bank carries is what PAINTS the pages' indices. If a row
+    # disagrees with the page it paints, every texel on that index draws someone
+    # else's colour - which is what a stray magenta or a wrong grey on a panel
+    # actually is. Compare them and say so.
+    try:
+        import carbank_palette
+
+        with open(os.path.join(bank_dir, "pallet.bin"), "rb") as f:
+            pal_body = f.read()
+
+        pal = exportd2.d2_palette_from_bytes(pal_body)
+        lev = os.path.join(bank_dir, os.path.basename(bank.raw.get("lev") or ""))
+        pages = carbank_palette.page_sets(lev) if os.path.isfile(lev) else set()
+        pages = pages or {p.get("set") for p in (manifest.get("pages") or [])}
+        rows = carbank_palette.rows_from_pages(bank_dir, pages)
+        bank_rows = {r["tpageindex"]: r["clut"] for r in pal["records"]}
+
+        for row in rows:
+            have = bank_rows.get(row["tpageindex"])
+
+            if have is None:
+                problems.append("set %d is not in the bank's palette, so its "
+                                "texels paint whatever row is picked"
+                                % row["tpageindex"])
+            elif have != row["clut"]:
+                differing = sum(1 for i in range(16)
+                                if have[i * 2:i * 2 + 2] != row["clut"][i * 2:i * 2 + 2])
+                problems.append("set %d: the palette row differs from the page's "
+                                "own in %d of 16 entries - the page was quantised "
+                                "against a palette the bank does not carry. Run "
+                                "carbank_palette.py --from-pages"
+                                % (row["tpageindex"], differing))
+    except (OSError, ValueError, struct.error):
+        pass
+
+    palette_json = os.path.join(bank_dir, "palette.json")
+    pallet_bin = os.path.join(bank_dir, "pallet.bin")
+
+    if os.path.isfile(palette_json) and os.path.isfile(pallet_bin):
+        import carbank_palette
+
+        doc = carbank_palette.load_json(palette_json)
+        # only the rows for sets the BANK carries can reach it, so compare on
+        # that intersection - carbank_palette writes exactly that view
+        lev = os.path.join(bank_dir,
+                           os.path.basename(bank.raw.get("lev") or ""))
+        sets = carbank_palette.page_sets(lev) if os.path.isfile(lev) else set()
+        sets = sets or {p.get("set") for p in (manifest.get("pages") or [])}
+        rows = carbank_palette.rows_from_doc(doc, sets)
+        body = exportd2.build_palette_body(rows, doc.get("total_cluts"))
+        want = carbank_palette.embedded_palette_body(pallet_bin, sets)[0]
+
+        if want != body:
+            problems.append("pallet.bin is STALE: palette.json says %d row(s) "
+                            "for sets %s, the file says otherwise - run "
+                            "carbank_palette.py"
+                            % (len(rows),
+                               ",".join(str(s) for s in sorted(sets))))
+
+    return problems
+
+
 def _sync_page_sizes(manifest, bank_dir, out_dir):
     """Rebuild LUMP_TEXTUREINFO when a page on disk is not the size it claims.
 
@@ -611,23 +912,111 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
     # self-describing (a later --rebuild-bank reproduces what is installed)
     manifest_path = os.path.join(
         bank_dir,
-        os.path.splitext(bank.raw.get("lev") or "bank.LEV")[0] + ".json")
+        os.path.splitext(os.path.basename(bank.raw.get("lev") or "bank.LEV"))[0]
+        + ".json")
 
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
 
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=1)
+    report = exportd2.build_bank(manifest, manifest_path, out_dir, None)
 
-    exportd2.build_bank(manifest, manifest_path, out_dir, None)
+    # A bakes's own checks are the only thing standing between a workshop and a
+    # bank with holes in it: build_bank writes the files either way, so the
+    # verdict has to reach the caller and the exit code (rebake.bat installs on
+    # a 0). A page whose bytes were missing used to print "bank ok" and be
+    # installed with no textures at all.
+    problems = (report.get("checks") or {}).get("problems") or []
+    ok = (report.get("checks") or {}).get("ok", True) and not problems
 
-    return True, warnings
+    if problems:
+        warnings = list(warnings) + ["check: %s" % p for p in problems]
+
+    # refresh the workspace's own computed half: a bake to a scratch folder used
+    # to leave bank.json describing a bank that no longer exists (empty
+    # included_sets, an ancient size), which every --check then compared against
+    _sync_bank_report(bank_path, report)
+
+    return ok, warnings
+
+
+def _sync_bank_report(bank_path, report):
+    """Write the bake's computed half into the workspace's bank.json."""
+    try:
+        with open(bank_path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return
+
+    for key, value in report.items():
+        if key == "declare":
+            continue
+
+        # the report names the files in the SCRATCH folder it baked into; the
+        # workspace's own copies have the same names
+        if key in ("lev", "lcf") and isinstance(value, str):
+            value = os.path.basename(value)
+
+        doc[key] = value
+
+    with open(bank_path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1)
+
+
+def _report_only(args):
+    """--check / --audit: read the workspace, write nothing."""
+    bank = bankjson.load(args.bank)
+    bank_dir = os.path.dirname(os.path.abspath(args.bank))
+
+    manifest_path = os.path.join(
+        bank_dir,
+        os.path.splitext(os.path.basename(bank.raw.get("lev") or "bank.LEV"))[0]
+        + ".json")
+
+    manifest = {}
+
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+
+    if args.check:
+        problems = check_sources(bank, manifest, bank_dir)
+
+        for problem in problems:
+            print(problem)
+
+        if not problems:
+            declared = [p for c in bank.cars.values() for p in c.pages
+                        if p.source is not None]
+            print("%d declared source(s) are current" % len(declared))
+            print("  (a page with no \"source\" is a preview and is never "
+                  "re-baked)")
+
+        return 1 if problems else 0
+
+    colour = carbank_page.hex_colour(args.audit)
+    found = audit_colour(bank_dir, manifest, colour, args.audit_tolerance)
+
+    print("#%02x%02x%02x:" % colour)
+
+    if not found:
+        print("  not on any page")
+        return 0
+
+    for hit in found:
+        print("  set %3d  index %2d  row %d  %d texel(s)  #%02x%02x%02x  word "
+              "%04x%s"
+              % (hit["set"], hit["index"], hit["row"], hit["texels"],
+                 hit["colour"][0], hit["colour"][1], hit["colour"][2],
+                 hit["word"], "  TRANSPARENT" if hit["transparent"] else ""))
+
+    return 0
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("bank", help="the bank.json with the declare block")
-    ap.add_argument("-o", "--out", required=True, help="output folder")
+    ap.add_argument("-o", "--out", help="output folder (not needed for "
+                                        "--check / --audit)")
     ap.add_argument("--scale", type=float, default=0.68267,
                     help="OBJ scale (default 0.68267, the D2/D1 cell ratio)")
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
@@ -645,7 +1034,17 @@ def main(argv=None):
                     help="reverse every face: required with --flip-y, or the car is inside-out")
     ap.add_argument("--d1", metavar="LEV",
                     help="bake a DRIVER 1 LEV instead (pool shape, bake.build_file)")
+    ap.add_argument("--check", action="store_true",
+                    help="write nothing; report page/palette sources that are stale")
+    ap.add_argument("--audit", metavar="RRGGBB", default=None,
+                    help="write nothing; report where a colour still lives (page, "
+                         "texel count, palette index, CLUT word)")
+    ap.add_argument("--audit-tolerance", type=int, default=8, metavar="N",
+                    help="per-channel slack for --audit (default 8)")
     args = ap.parse_args(argv)
+
+    if args.check or args.audit:
+        return _report_only(args)
 
     if args.d1:
         raise SystemExit("carbank_bake: --d1 is not implemented in this tool; "
@@ -665,6 +1064,10 @@ def main(argv=None):
 
     for w in warnings:
         _warn(w)
+
+    if not ok:
+        print("carbank_bake: FAILED - the bank is unusable, see the check "
+              "problems above", file=sys.stderr)
 
     return 0 if ok else 1
 
