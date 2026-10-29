@@ -70,12 +70,23 @@ def rate_from_field(field):
     return int(field)
 
 
-def normalise(samples, peak=0.9):
+def normalise(samples, peak=0.9, tolerance=0.25):
     """Scale a sample so its loudest point sits at `peak` of full scale.
 
     A bank's samples have no gain of their own: the engine's channel volume is
     the same -10000..0 for every car, so a WAV that peaks at 20% plays at 20% of
-    the level next to a retail sample. Returns (samples, old_peak, applied_gain).
+    the level next to a retail sample.
+
+    The `tolerance` dead band matters more than it looks. Many car sounds come
+    from a VAG in the first place - a decoded PSX sample sits exactly ON the
+    ADPCM lattice - and scaling it by even 3% moves every sample off that
+    lattice, so the encoder has to re-quantise and the result measures 30 dB
+    instead of ~76 dB. Measured on the Firebird's own three samples: leaving the
+    gain alone took the idle from 32.6 dB to 76.3 dB and the horn from 24.4 dB to
+    (resampling-limited) 40 dB. So a sample already within `tolerance` of the
+    target level is used as it is; only a quiet one is lifted.
+
+    Returns (samples, old_peak, applied_gain) - gain 1.0 means untouched.
     """
     top = max((abs(s) for s in samples), default=0)
 
@@ -85,7 +96,7 @@ def normalise(samples, peak=0.9):
     target = int(peak * 32767)
     gain = target / float(top)
 
-    if 0.98 < gain < 1.02:
+    if abs(gain - 1.0) <= tolerance:
         return list(samples), top, 1.0
 
     return [max(-32768, min(32767, int(round(s * gain)))) for s in samples], top, gain
