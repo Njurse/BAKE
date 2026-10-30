@@ -144,6 +144,31 @@ what the images produced: size, palette row, the image's sha256, the preview pat
 | `transparent_chroma` | no | match by COLOUR CAST instead: a texel whose `(r-g, b-g)` is within N of the backdrop's. Catches a soft blended edge without eating grey art |
 | `protect` | no | colours the page's 16 MUST keep (`["b8b8c0", ...]`); the quantiser evicts the least-used colour instead |
 | `palette` | no | exactly 16 hex colours: the page is re-indexed to them and nothing is quantised |
+| `paints` | no | colour variants, in order: `{"yellow": "e0c020", "red": "c02020", ...}` (max 5). Needs `palette_from_pages`. See *Paints* below |
+| `paint_body` | no | which page colours a paint recolours (`["c0e0f0", ...]`). Default: every mid/light blue entry |
+
+#### Paints (colour variants)
+
+    "1": { "png": "art/textures/firebird.png",
+           "protect": ["ebebe8", "4b0a08"],
+           "paints": { "yellow": "e0c020", "red": "c02020",
+                       "green": "20a040", "grey": "909090" } }
+
+The engine keeps six colour columns per texture (`civ_clut[row][tex][0..5]`).
+Column 0 is ALWAYS the page's own colours - the original paint. Each declared
+paint becomes one more palette record (lump `palette` k -> column k+1), so the
+example above gives 0 blue, 1 yellow, 2 red, 3 green, 4 grey.
+
+A paint copies the page's 16-colour row and recolours only the BODY entries:
+hue and saturation from the paint, shading kept (the brightest body entry lands
+on the paint colour's own lightness). Never touched: `0x0000` (transparent),
+`protect` colours (lights), and anything that is not body - by default the
+dark/near-grey entries (glass, trim, tyres). If glass is a light blue and gets
+painted, list the body colours explicitly in `paint_body`.
+
+Civilian cars pick a column at random. The player car uses the frontend palette
+(SQUARE on the car select cycles "Palette n/6"); a column nothing filled falls
+back to column 0.
 
 `atlas` is still there as the one-image shorthand for the single-page case: it
 covers the sets the models name.
@@ -311,3 +336,8 @@ that a non-cop car declares `horn`, and that no unknown key appears (a typo in a
 key would otherwise silently mean "use the donor's").
 
 `tools/car/test_bankjson.py` holds the cases.
+
+## Preview
+
+`preview_car.py <bank.json|dir>` renders `declare.cars.<car>` authoring art (clean OBJ+MTL, wheel PNGs, engine/idle WAVs) with a slow yaw and an idle -> gears -> damaged-wheel coast loop. Options: `--car`, `--timeout`, `--stop-file`, `--mute`, `--flip-y` (Y-down art), `--shot DIR`. Copy the Firebird `rebake.bat` preview block (`STOPF` + `start /b python preview_car.py`) into other banks' rebake scripts.
+

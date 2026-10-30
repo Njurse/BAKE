@@ -72,7 +72,8 @@ WHEEL_VARIANTS = ("clean", "damaged", "fast")
 # a declared page describes its own BAKE, not just an image: the refresh path has
 # to reproduce the page from the declaration alone
 TEXTURE_KEYS = {"png", "transparent", "transparent_tolerance",
-                "transparent_chroma", "palette", "protect"}
+                "transparent_chroma", "palette", "protect",
+                "paints", "paint_body"}
 
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
 # crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
@@ -293,8 +294,26 @@ class Texture(object):
         if self.protect and not isinstance(self.protect, list):
             _fail(where, field + ".protect", "must be a list of hex colours")
 
-        for colour in self.protect:
-            _hex_colour(where, field + ".protect", colour)
+        self.protect = [_hex_colour(where, field + ".protect", colour)
+                        for colour in self.protect]
+
+        # Colour variants (civ_clut columns 1..4): {"name": "rrggbb", ...} in
+        # column order. Column 0 is always the page's own colours. Only the
+        # body entries of the page row are recoloured (paint_body, or every
+        # mid/light blue by default); protect colours and 0x0000 never move.
+        paints = data.get("paints") or {}
+        if not isinstance(paints, dict):
+            _fail(where, field + ".paints", "must be an object of name: rrggbb")
+        if len(paints) > 5:
+            _fail(where, field + ".paints",
+                  "at most 5 variants (civ_clut columns 1..5), not %d" % len(paints))
+        self.paints = [(str(name), _hex_colour(where, field + ".paints." + str(name), c))
+                       for name, c in paints.items()]
+        body = data.get("paint_body")
+        if body is not None and not isinstance(body, list):
+            _fail(where, field + ".paint_body", "must be a list of hex colours")
+        self.paint_body = (None if body is None else
+                           [_hex_colour(where, field + ".paint_body", c) for c in body])
 
         if self.palette is not None:
             if not isinstance(self.palette, list):
@@ -306,8 +325,8 @@ class Texture(object):
                       "a fixed palette is exactly 16 colours, not %d"
                       % len(self.palette))
 
-            for colour in self.palette:
-                _hex_colour(where, field + ".palette", colour)
+            self.palette = [_hex_colour(where, field + ".palette", colour)
+                            for colour in self.palette]
 
     def bake_options(self):
         """What the page bake needs, from the declaration alone."""

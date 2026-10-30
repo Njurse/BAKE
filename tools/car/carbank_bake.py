@@ -1095,11 +1095,13 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
         lev = os.path.join(bank_dir, os.path.basename(bank.raw.get("lev") or ""))
         pages = carbank_palette.page_sets(lev) if os.path.isfile(lev) else set()
         pages = pages or {p.get("set") for p in (manifest.get("pages") or [])}
-        rows = carbank_palette.rows_from_pages(gen_dir, pages)
-        bank_rows = {r["tpageindex"]: r["clut"] for r in pal["records"]}
+        paints = _paints_of(bank)
+        rows = carbank_palette.rows_from_pages(gen_dir, pages, paints)
+        bank_rows = {(r["tpageindex"], r["palette"]): r["clut"]
+                     for r in pal["records"]}
 
         for row in rows:
-            have = bank_rows.get(row["tpageindex"])
+            have = bank_rows.get((row["tpageindex"], row["palette"]))
 
             if have is None:
                 problems.append("set %d is not in the bank's palette, so its "
@@ -1143,6 +1145,17 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
     return problems
 
 
+def _paints_of(bank):
+    """{set: {"paints", "body", "protect"}} for every page that declares paints."""
+    out = {}
+    for car in bank.cars.values():
+        for t in car.textures:
+            if getattr(t, "paints", None):
+                out[t.set] = {"paints": t.paints, "body": t.paint_body,
+                              "protect": list(t.protect or [])}
+    return out
+
+
 def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
     """pallet.bin (and palette.json) from the pages' own row 0."""
     import carbank_palette
@@ -1151,7 +1164,7 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
     # page for a set this bank no longer carries must not add a palette row
     sets = {texture.set for car in bank.cars.values()
             for texture in car.textures}
-    rows = carbank_palette.rows_from_pages(bank_dir, sets)
+    rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank))
 
     if not rows:
         warnings.append("palette_from_pages: no pages to take a palette from")
