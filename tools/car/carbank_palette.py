@@ -174,7 +174,57 @@ def embedded_palette_body(path, sets):
     return exportd2.filter_palette(pal, sets)[0], len(pal["records"])
 
 
-def rows_from_pages(bank_dir, sets=None):
+def _is_body(rgb):
+    """Default body test for paints: a mid/light blue-ish entry."""
+    import colorsys
+    h, l, s = colorsys.rgb_to_hls(*(c / 255.0 for c in rgb))
+    return 0.40 <= h <= 0.75 and s >= 0.12 and l >= 0.30
+
+
+def paint_row(row, target, body=None, protect=(), tolerance=8):
+    """`row` (32 CLUT bytes) with its BODY entries recoloured toward `target`.
+
+    Hue and saturation come from the target; lightness keeps the source's
+    shading, scaled so the brightest body entry lands on the target's own
+    lightness. 0x0000 (transparent), protected colours and non-body entries are
+    copied verbatim, and every entry keeps its STP bit.
+    """
+    import colorsys
+
+    def near(a, b):
+        return all(abs(x - y) <= tolerance for x, y in zip(a, b))
+
+    rgb = fourbpp.clut_rgb(row)
+    raw = [int.from_bytes(row[i * 2:i * 2 + 2], "little") for i in range(16)]
+    pick = []
+    for i, c in enumerate(rgb):
+        if raw[i] == 0 or any(near(c, p) for p in protect):
+            continue
+        if body is not None:
+            if any(near(c, b) for b in body):
+                pick.append(i)
+        elif _is_body(c):
+            pick.append(i)
+    if not pick:
+        return bytes(row), 0
+
+    th, tl, ts = colorsys.rgb_to_hls(*(v / 255.0 for v in target))
+    top_l = max(colorsys.rgb_to_hls(*(v / 255.0 for v in rgb[i]))[1] for i in pick) or 1.0
+    top_s = max(colorsys.rgb_to_hls(*(v / 255.0 for v in rgb[i]))[2] for i in pick) or 1.0
+    out = bytearray(row)
+    for i in pick:
+        _h, l, s = colorsys.rgb_to_hls(*(v / 255.0 for v in rgb[i]))
+        nl = min(1.0, l * tl / top_l)
+        ns = min(1.0, ts * (s / top_s)) if ts > 0 else 0.0
+        r, g, b = (int(round(v * 255)) for v in colorsys.hls_to_rgb(th, nl, ns))
+        v = fourbpp.rgb555((r, g, b)) | (raw[i] & 0x8000)
+        if v == 0:
+            v = 1 << 10                    # never mint the transparent key
+        out[i * 2:i * 2 + 2] = v.to_bytes(2, "little")
+    return bytes(out), len(pick)
+
+
+def rows_from_pages(bank_dir, sets=None, paints=None):
     """Palette rows built from the PAGES themselves: page row 0 of each set.
 
     The bank's LUMP_PALLET is what paints a car's texel indices, and a page is
@@ -204,8 +254,20 @@ def rows_from_pages(bank_dir, sets=None):
         if not rows:
             continue
 
-        out.append({"palette": 0, "texnum": 0, "tpageindex": page_set,
-                    "clut_number": -1, "clut": rows[0]})
+        spec = (paints or {}).get(page_set)
+
+        if not spec or not spec.get("paints"):
+            out.append({"palette": 0, "texnum": 0, "tpageindex": page_set,
+                        "clut_number": -1, "clut": rows[0]})
+            continue
+
+        # Paint variants: lump palette p fills civ_clut column p+1, column 0 is
+        # the page's own CLUT (the original colours), so variant k -> palette k.
+        for k, (name, colour) in enumerate(spec["paints"]):
+            row, _n = paint_row(rows[0], colour, spec.get("body"),
+                                spec.get("protect") or ())
+            out.append({"palette": k, "texnum": 0, "tpageindex": page_set,
+                        "clut_number": -1, "clut": row, "paint": name})
 
     return out
 
