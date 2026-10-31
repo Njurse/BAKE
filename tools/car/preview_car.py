@@ -201,7 +201,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=0)
     ap.add_argument("--stop-file")
     ap.add_argument("--mute", action="store_true")
-    ap.add_argument("--bake-scale", type=float, default=265, help="rebake --scale (OBJ->engine units)")
+    ap.add_argument("--bake-scale", type=float, help="rebake --scale (OBJ->engine units); default: 1 if the OBJ is already engine-sized, else 265")
     ap.add_argument("--ride", type=float, default=30, help="rest susCompression in engine units (handling.c seeds 14; bigger = wheels hang lower, body rides higher)")
     ap.add_argument("--yaw", type=float, help="fixed yaw in degrees (no spin) - for checking shots")
     ap.add_argument("--size", default="640x400")
@@ -214,7 +214,25 @@ def main():
     if not cars:
         print("preview_car: no declare.cars in bank.json"); return 0
     key = a.car or next(iter(cars))
-    car = cars[key]
+    bank_root = root
+
+    def resolve(entry):
+        # a car may be a path to its own file (cars/<car>/handling.json),
+        # whose paths are relative to that file - as bankjson reads it
+        if isinstance(entry, str):
+            f = os.path.normpath(os.path.join(bank_root, entry))
+            with open(f, encoding="utf-8") as fh:
+                return os.path.dirname(f), json.load(fh)
+        return bank_root, entry or {}
+
+    root, car = resolve(cars[key])
+    wroot, wcar = root, car
+    if not car.get("wheels"):   # the bank's one wheel set lives on one car
+        for other in cars.values():
+            r, c = resolve(other)
+            if c.get("wheels"):
+                wroot, wcar = r, c
+                break
     objp = os.path.join(root, car.get("clean", ""))
     if not os.path.exists(objp):
         print("preview_car: no clean model %s" % objp); return 0
@@ -250,8 +268,8 @@ def main():
     flip_up = 1.0 if up == 1 else 1.0
 
     wheels = {}
-    for k, w in (car.get("wheels") or {}).items():
-        p = os.path.join(root, w.get("png", "")) if isinstance(w, dict) else ""
+    for k, w in (wcar.get("wheels") or {}).items():
+        p = os.path.join(wroot, w.get("png", "")) if isinstance(w, dict) else ""
         if p and os.path.exists(p):
             wheels[k] = gl_texture(p)
 
@@ -311,9 +329,14 @@ def main():
 
     # wheel layout: donor cosmetics wheelDisp/wheelSize (engine units, Y-down,
     # = OBJ * bake --scale), else a guess from the bounding box
-    disp, wsize = None, None
+    disp, wsize, cog = None, None, None
+    hd = car.get("handling") or {}            # the car's own handling.json wins
+    if hd.get("wheelDisp") and hd.get("wheelSize"):
+        disp, wsize, cog = hd["wheelDisp"], hd["wheelSize"], hd.get("cog")
     try:
-        dd = os.path.join(root, bank.get("donor_dir") or ".")
+        if disp:
+            raise StopIteration
+        dd = os.path.join(bank_root, bank.get("donor_dir") or ".")
         model = (bank.get("declare", {}).get("donor") or {}).get("model", 1)
         for fn in ("BETACARS.cosmetics.json", "cosmetics.json"):
             fp = os.path.join(dd, fn)
@@ -322,33 +345,39 @@ def main():
             for r in json.load(open(fp, encoding="utf-8")).get("records", []):
                 f = r.get("fields", {})
                 if r.get("model") == model and "wheelDisp" in f:
-                    disp, wsize = f["wheelDisp"], f["wheelSize"]; break
+                    disp, wsize, cog = f["wheelDisp"], f["wheelSize"], f.get("cog"); break
             if disp:
                 break
+    except StopIteration:
+        pass
     except Exception as e:
         print("preview_car: no cosmetics wheels (%s)" % e)
-    S = a.bake_scale
+    S = a.bake_scale or (1.0 if max(ext) > 50 else 265.0)
     if disp:
         rad = wsize / S
-        # 1) hub in D2 ENGINE body space (-Y up, +Y down), as cars.c
-        #    DrawCarWheels builds sWheelPos:
-        #      x = +-17 - disp.x      (17 inboard, mirrored)
-        #      y = -wheelSize - disp.y - susCompression + 14 ... negated with
-        #          the rest of the vector -> hub sits below the origin by
-        #          wheelSize + disp.y + susCompression - 14  (+ = down)
-        #      z = -disp.z            (front/rear swap vs the raw table)
-        #    susCompression is seeded at 14 (handling.c) and settles deeper
-        #    under gravity -> --ride (30 fits the Firebird arches).
-        def engine_hub(d):
-            return (d[0] - math.copysign(17, d[0]),
-                    wsize + d[1] + a.ride - 14,
-                    -d[2])
+        # 1) hub relative to the BODY MODEL ORIGIN, D2 engine space (Y-down),
+        #    exactly as cars.c draws them in one frame (same matrix, same pos):
+        #      body  (DrawCarObject): model origin = pos + cog
+        #      wheel (DrawCarWheels): hub = pos + (17 - disp.x  [wheels 0,1]
+        #                                          -17 - disp.x  [wheels 2,3],
+        #                                          -wheelSize - disp.y - susCompression + 14,
+        #                                          -disp.z)
+        #    so hub - body = that vector - cog. (FixCarCos moves disp.z and
+        #    cog.z by the same delta, so it cancels here.) susCompression is
+        #    the settled rest value -> --ride.
+        cg = cog or (0, 0, 0)
+        def engine_hub(i, d):
+            return ((17 if (i & 2) == 0 else -17) - d[0] - cg[0],
+                    -wsize - d[1] - a.ride + 14 - cg[1],
+                    -d[2] - cg[2])
         # 2) ONE conversion into preview/OBJ space (+Y up): the bake's
         #    --flip-y only negates Y, so (x, y, z) -> (x, -y, z). Ride and
         #    suspension therefore only ever move the hub vertically.
         def engine_to_preview(e):
-            return (e[0] / S, -e[1] / S, e[2] / S)
-        wpos = [engine_to_preview(engine_hub(d)) for d in disp]
+            # --flip-y art is already Y-down engine space and the draw
+            # flips it with the body, so don't negate twice
+            return (e[0] / S, (e[1] if a.flip_y else -e[1]) / S, e[2] / S)
+        wpos = [engine_to_preview(engine_hub(i, d)) for i, d in enumerate(disp)]
     else:
         rad = ext[1] * 0.3
         wpos = [(sx * ext[0] * 0.45 + center[0], lo[1] + rad, sz * ext[2] * 0.32 + center[2])
@@ -406,9 +435,9 @@ def main():
         elif phase == "coast":
             mix(max(0.0, min(1.0, 1.0 - (pitch - PITCH_IDLE) / 0.3)), pitch); wk = "damaged"
         else:
-            mix(0.0, pitch); wk = "fast" if speed > 0.4 else "clean"
+            mix(0.0, pitch); wk = "fast" if speed > 0.15 else "clean"
         tex = wheels.get(wk) or wheels.get("clean")
-        spin -= speed * 25.0
+        spin -= speed * 60.0
         title = "BAKE preview  %s  |  %s  |  wheel: %s  |  Esc closes" % (key, phase, wk)
         if title != last_title:
             pygame.display.set_caption(title); last_title = title

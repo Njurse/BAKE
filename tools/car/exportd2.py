@@ -53,6 +53,7 @@ import cosmetics1          # noqa: E402  (LCF read/write)
 import lev1                # noqa: E402  (the shared MODEL/poly decoder)
 import pages1              # noqa: E402  (page RLE + CLUT decode)
 import scalemodels         # noqa: E402  (the D2 car lump locator)
+import bankjson            # noqa: E402  (compact JSON writer)
 
 TOOL = "exportd2"
 VERSION = 1
@@ -135,8 +136,7 @@ def _rel(path, root):
 
 def _write_json(path, obj):
     with open(path, "w") as f:
-        json.dump(obj, f, indent=1, sort_keys=False)
-        f.write("\n")
+        f.write(bankjson.dumps_compact(obj) + "\n")
 
 
 def _read_json(path):
@@ -535,7 +535,7 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
-def page_png(path, rows, idx, transparent=None):
+def page_png(path, rows, idx, transparent=None, regions=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
     It is passed in rather than guessed: a 0x0000 entry on a BODY page can just
@@ -554,6 +554,22 @@ def page_png(path, rows, idx, transparent=None):
             r = g = b = 0
 
         pix[i * 4:i * 4 + 4] = bytes((r, g, b, 0 if v in transparent else 255))
+
+    # A Driver 2 page carries one CLUT row PER TEXTURE (detail i draws with row
+    # i); painting the whole page with row 0 is what garbled every sprite but
+    # the first. `regions` = [(x, y, w, h, row_index)] repaints each sprite
+    # with its own row.
+    for x0, y0, w, h, ri in regions or ():
+        if not (0 <= ri < len(rows)):
+            continue
+        rp = pages1.clut_rgb(rows[ri])
+        for y in range(max(0, y0), min(256, y0 + h)):
+            for x in range(max(0, x0), min(256, x0 + w)):
+                i = y * 256 + x
+                v = idx[i]
+                r, g, b = rp[v] if v < len(rp) else (0, 0, 0)
+                pix[i * 4:i * 4 + 4] = bytes(
+                    (r, g, b, 0 if v in transparent else 255))
 
     write_png_rgba(path, 256, 256, pix)
 
@@ -766,6 +782,26 @@ def cosmetics_fields(rec):
     return out
 
 
+def handling_record(h):
+    """cosmetics_fields() the other way round: handling dict -> 236 bytes."""
+    out = bytearray(RECORD_SIZE)
+    anchors = ["headLight", "frontInd", "backInd", "brakeLight", "revLight",
+               "policeLight", "exhaust", "smoke", "fire"]
+    pos = [h[n] for n in anchors] + list(h["cPoints"]) + [h["colBox"], h["cog"]]
+    for o, v in zip(cosmetics1.POS_OFFSETS, pos):
+        struct.pack_into("<3h", out, o, *[int(x) for x in v])
+    for i, v in enumerate(h["wheelDisp"]):
+        struct.pack_into("<3h", out, cosmetics1.OFF_WHEELDISP + i * 8,
+                         *[int(x) for x in v])
+    struct.pack_into("<6h", out, cosmetics1.OFF_SCALARS_A,
+                     *[int(h[n]) for n in ("extraInfo", "powerRatio", "cbYoffset",
+                                           "susCoeff", "traction", "wheelSize")])
+    struct.pack_into("<4h", out, cosmetics1.OFF_SCALARS_B,
+                     *[int(h[n]) for n in ("twistRateX", "twistRateY",
+                                           "twistRateZ", "mass")])
+    return bytes(out)
+
+
 def find_lcf(lev_path):
     stem = os.path.splitext(lev_path)[0]
     for ext in (".LCF", ".lcf", ".Lcf"):
@@ -778,7 +814,127 @@ def find_lcf(lev_path):
 # ---------------------------------------------------------------------------
 # one city
 # ---------------------------------------------------------------------------
-def export_one(lev_path, out_root, models_filter, variants, make_bank):
+def _strip_donor(rel):
+    if isinstance(rel, str) and rel.startswith("donor/"):
+        return rel[len("donor/"):]
+    return rel
+
+
+def write_donor_manifest(city_dir, city, manifest, lev_path):
+    """donor/<CITY>.json + donor/<CITY>.donor.LEV: the inputs carbank_bake
+    starts from (the shape basebank.py writes for banks/firebird)."""
+    import copy
+    import shutil
+    m = copy.deepcopy(manifest)
+    for car in m.get("models", []):
+        for spec in car.get("variants", {}).values():
+            for k in ("raw", "geom"):
+                spec[k] = _strip_donor(spec.get(k))
+            spec["obj"] = "../" + spec["obj"]
+    m["raw"] = {k: _strip_donor(v) for k, v in m.get("raw", {}).items()}
+    for k in ("textures", "cosmetics", "lcf"):
+        m[k] = _strip_donor(m.get(k))
+    donor_dir = os.path.join(city_dir, "donor")
+    _write_json(os.path.join(donor_dir, "%s.json" % city), m)
+    shutil.copyfile(lev_path, os.path.join(donor_dir, "%s.donor.LEV" % city))
+
+
+def write_rebake(city_dir, name, donor_city="CHICAGO"):
+    """rebake.bat next to bank.json, only if missing - rendered from the
+    canonical tools/car/rebake_template.bat (see rebake_install.py)."""
+    import rebake_install
+    # exportd2 OBJs are in engine units: bake at 1:1 (the bake's default
+    # 0.68267 is the D1->D2 cell ratio and shrinks the car)
+    return rebake_install.write(city_dir, name, donor_city, args="--scale 1")
+
+
+def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
+                    extras=None, name=None):
+    """bank.json with a `declare` block shaped like banks/firebird/bank.json:
+    every car points at its OBJs, PNG pages (+ recovered paints/protect),
+    WAVs, and the first car in order owns the bank's one wheel set."""
+    decl_cars = {}
+    for c in cars:
+        entry = {}
+        for v in ("clean", "damaged", "low"):
+            if v in c["variants"]:
+                entry[v] = c["variants"][v]["obj"]
+        tex = {}
+        for s in c.get("sets", []):
+            if s in included_sets:
+                tex[str(s)] = {"png": extras["page_rel"][s] if extras
+                               else "art/textures/PAGE_%d.png" % s}
+                paint = extras["paints"].get(s) if extras else None
+                if paint and paint["paints"]:
+                    tex[str(s)]["paints"] = paint["paints"]
+                    tex[str(s)]["protect"] = paint["protect"]
+        if tex:
+            entry["textures"] = tex
+        if extras and extras["sounds"].get(c["id"]):
+            entry["sounds"] = dict(extras["sounds"][c["id"]])
+            # model 0 is the D2 police car: its third sample is the siren
+            # (bake -> LUMP_CAR_SIRENS, so an imported bank plays its own)
+            if c["model"] == 0 and extras.get("siren"):
+                sr = extras["siren"]
+                entry["sounds"]["cop"] = True
+                entry["sounds"].pop("horn", None)   # cop: third sample = siren
+                entry["sounds"]["siren"] = {"wav": sr["wav"], "rate": sr["rate"],
+                                            "normalise": False, "loop": True}
+        if extras and extras["wheels"] and not decl_cars:
+            entry["wheels"] = extras["wheels"]   # first car owns the bank's set
+        entry = json.loads(json.dumps(entry))    # no shared dicts between cars
+        # the car's whole declaration lives in its own folder, next to its
+        # handling numbers; bank.json only maps slot -> car file
+        car_dir = os.path.join(city_dir, "cars", c["id"])
+        hpath = os.path.join(car_dir, "handling.json")
+        rel = lambda p: os.path.relpath(os.path.join(city_dir, p),
+                                        car_dir).replace("\\", "/")
+        for v in ("clean", "damaged", "low"):
+            if v in entry:
+                entry[v] = rel(entry[v])
+        for t in entry.get("textures", {}).values():
+            t["png"] = rel(t["png"])
+        for w in entry.get("wheels", {}).values():
+            if isinstance(w, dict) and w.get("png"):
+                w["png"] = rel(w["png"])
+        for snd in [v for v in entry.get("sounds", {}).values()]:
+            if isinstance(snd, dict) and snd.get("wav"):
+                snd["wav"] = rel(snd["wav"])
+        old = _read_json(hpath) if os.path.exists(hpath) else {}
+        doc_car = {"model": c["model"]}
+        doc_car.update(entry)
+        if "fields" in old or "handling" in old:
+            doc_car["handling"] = old.get("handling", old.get("fields"))
+        for k in ("note", "raw"):
+            if k in old:
+                doc_car[k] = old[k]
+        _write_json(hpath, doc_car)
+        decl_cars[c["id"]] = "cars/%s/handling.json" % c["id"]
+    name = (name or city).upper()
+    doc = {
+        "city": name,
+        "lev": "build/%s.LEV" % name,
+        "lcf": "build/%s.LCF" % name,
+        "donor_dir": "donor",
+        "build_dir": "build",
+        "manifest": "%s.json" % name,
+        "declare": {
+            "schema": 1,
+            "name": name,
+            "donor": {"city": city, "lev": "donor/%s.donor.LEV" % name},
+            "order": bank_order,
+            # pages are re-baked to ONE CLUT each, so the bank's palette rows
+            # must come from those pages (as banks/firebird does); the donor's
+            # per-detail rows no longer match and the car draws untextured
+            "palette_from_pages": True,
+            "cars": decl_cars,
+        },
+    }
+    _write_json(os.path.join(city_dir, "bank.json"), doc)
+
+
+def export_one(lev_path, out_root, models_filter, variants, make_bank,
+               dir_name=None, bank_name=None):
     with open(lev_path, "rb") as f:
         blob = f.read()
     kind = level_game(blob)
@@ -791,15 +947,25 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
                          "LUMP_CAR_MODELS" % lev_path)
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
-    city_dir = os.path.join(out_root, city)
-    models_dir = os.path.join(city_dir, "models")
-    textures_dir = os.path.join(city_dir, "textures")
-    raw_dir = os.path.join(city_dir, "raw")
-    bank_dir = os.path.join(city_dir, "bank")
+    # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
+    # the donor copy, declare.name and rebake/cities.ini all use it. `city`
+    # stays the SOURCE (donor.city, sound banks, raw dumps).
+    name = (bank_name or city).upper()
+    city_dir = os.path.join(out_root, dir_name or (bank_name.lower()
+                                                   if bank_name else city))
+    # The export IS a bank folder, laid out like banks/firebird: editable art
+    # (OBJ/MTL, PNG pages, wheel PNGs) under art/, WAVs under sounds/, the
+    # untouched source lumps under donor/, and what the bake makes under build/.
+    models_dir = os.path.join(city_dir, "art")
+    textures_dir = os.path.join(models_dir, "textures")
+    raw_dir = os.path.join(city_dir, "donor")
+    bank_dir = os.path.join(city_dir, "build")
     dirs = [models_dir, textures_dir, raw_dir,
             os.path.join(raw_dir, "models"),
+            os.path.join(raw_dir, "geom"),
             os.path.join(raw_dir, "pages"),
-            os.path.join(raw_dir, "cosmetics")]
+            os.path.join(raw_dir, "cosmetics"),
+            os.path.join(city_dir, "sounds")]
     if make_bank:
         dirs.append(bank_dir)
     for d in dirs:
@@ -841,15 +1007,18 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
             if not model.vertices:
                 warnings.append("%s %s has no vertices" % (car_id, variant))
                 continue
-            obj_rel = "models/%s_%s.obj" % (car_id, variant)
-            geom_rel = "models/%s_%s.geom.json" % (car_id, variant)
-            raw_rel = "raw/models/%s_%s.bin" % (car_id, variant)
+            # each car's editable assets live in its own folder; the city's
+            # ONE bank.json maps folder -> slot
+            os.makedirs(os.path.join(city_dir, "cars", car_id), exist_ok=True)
+            obj_rel = "cars/%s/%s_%s.obj" % (car_id, car_id, variant)
+            geom_rel = "donor/geom/%s_%s.geom.json" % (car_id, variant)
+            raw_rel = "donor/models/%s_%s.bin" % (car_id, variant)
             obj_path = os.path.join(city_dir, obj_rel)
             geom_path = os.path.join(city_dir, geom_rel)
             raw_path = os.path.join(city_dir, raw_rel)
 
             write_obj(obj_path, model, "%s_%s" % (car_id, variant),
-                      "%s.mtl" % city)
+                      "%s.mtl" % car_id)
             rec = geom_record(city, m, variant, car_id, source, model)
             _write_json(geom_path, rec)
             if variant in blocks:
@@ -882,8 +1051,18 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
         else:
             warnings.append("%s has no exportable variants" % car_id)
 
-    write_mtl(os.path.join(models_dir, "%s.mtl" % city), materials,
-              os.path.relpath(textures_dir, models_dir).replace("\\", "/"))
+    # a page one car uses lives in that car's folder; a page several cars
+    # share (and the wheel/effects pages) lives in shared/textures
+    users = {}
+    for c in cars:
+        for s_ in c["sets"]:
+            users.setdefault(s_, []).append(c["id"])
+    page_rel = {}
+
+    def _page_rel(s_):
+        u = users.get(s_, [])
+        return ("cars/%s/textures/PAGE_%d.png" % (u[0], s_) if len(u) == 1
+                else "shared/textures/PAGE_%d.png" % s_)
 
     # --- pages ------------------------------------------------------------
     wheel_sets = set()
@@ -902,8 +1081,13 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
         off, size, kind = page_entries[s]
         rows, page = pages1.read_page(blob, off, size)
         idx = page_indexes(page)
-        png_rel = "textures/PAGE_%d.png" % s
-        page_png(os.path.join(city_dir, png_rel), rows, idx)
+        png_rel = page_rel[s] = _page_rel(s)
+        os.makedirs(os.path.dirname(os.path.join(city_dir, png_rel)),
+                    exist_ok=True)
+        page_dets = [d for pi, d in details if pi == s]
+        page_png(os.path.join(city_dir, png_rel), rows, idx,
+                 regions=[(d["x"], d["y"], d["width"], d["height"], i)
+                          for i, d in enumerate(page_dets)])
         with open(os.path.join(raw_dir, "pages", "PAGE_%d.bin" % s), "wb") as f:
             f.write(blob[off:off + size])
         page_json.append({
@@ -920,14 +1104,14 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
             warnings.append("page set %d has no CLUT rows" % s)
 
     pal_sets = sorted({r["tpageindex"] for r in pal["records"]})
-    palette_png(os.path.join(city_dir, "%s_palettes.png" % city),
+    palette_png(os.path.join(raw_dir, "palette.png"),
                 pal["records"], set(included_sets))
 
     # --- raw lump bodies --------------------------------------------------
-    raw_files = {"textureinfo": "raw/textureinfo.bin",
-                 "pallet": "raw/pallet.bin",
-                 "texturenames": "raw/texturenames.bin",
-                 "modelnames": "raw/modelnames.bin"}
+    raw_files = {"textureinfo": "donor/textureinfo.bin",
+                 "pallet": "donor/pallet.bin",
+                 "texturenames": "donor/texturenames.bin",
+                 "modelnames": "donor/modelnames.bin"}
     with open(os.path.join(city_dir, raw_files["textureinfo"]), "wb") as f:
         f.write(ti_bytes)
     if pal["size"]:
@@ -944,7 +1128,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
     # --- cosmetics --------------------------------------------------------
     lcf_path = find_lcf(lev_path)
     cos_records = []
-    cos_json_path = os.path.join(city_dir, "%s.cosmetics.json" % city)
+    cos_json_path = os.path.join(raw_dir, "%s.cosmetics.json" % city)
     if lcf_path:
         with open(lcf_path, "rb") as f:
             lcf_blob = f.read()
@@ -954,7 +1138,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
             warnings.append("could not parse %s: %s" % (lcf_path, e))
             cos_records = []
         if cos_records:
-            with open(os.path.join(city_dir, "%s.LCF" % city), "wb") as f:
+            with open(os.path.join(raw_dir, "%s.donor.LCF" % city), "wb") as f:
                 f.write(lcf_blob)
             for i, rec in enumerate(cos_records):
                 with open(os.path.join(raw_dir, "cosmetics",
@@ -990,7 +1174,8 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
         },
         "details": [{"page": pi, **d} for pi, d in details],
     }
-    _write_json(os.path.join(city_dir, "%s.textures.json" % city),
+    _write_json(os.path.join(raw_dir, "palette.json"), textures_json["palette"])
+    _write_json(os.path.join(raw_dir, "%s.textures.json" % city),
                 textures_json)
 
     # --- master manifest --------------------------------------------------
@@ -1006,9 +1191,9 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
         "texture_sets": included_sets,
         "wheel_sets": sorted(wheel_sets),
         "palette_sets": pal_sets,
-        "textures": "%s.textures.json" % city,
-        "cosmetics": ("%s.cosmetics.json" % city) if cos_records else None,
-        "lcf": ("%s.LCF" % city) if cos_records else None,
+        "textures": "donor/%s.textures.json" % city,
+        "cosmetics": ("donor/%s.cosmetics.json" % city) if cos_records else None,
+        "lcf": ("donor/%s.donor.LCF" % city) if cos_records else None,
         "raw": raw_files,
         "bank_order": bank_order,
         "warnings": warnings,
@@ -1016,10 +1201,62 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
     manifest_path = os.path.join(city_dir, "%s.export.json" % city)
     _write_json(manifest_path, manifest)
 
+    # --- the rest of the vehicle package: wheels, sounds, paints, handling
+    import exportd2_assets as assets
+    extras = {"wheels": {}, "sounds": {}, "paints": {}, "page_rel": page_rel}
+    try:
+        assets.write_car_mtls(city_dir, cars, materials, page_rel)
+        for _d in ("art/textures", "art", "sounds"):     # old layout leftovers
+            _p = os.path.join(city_dir, _d)
+            if os.path.isdir(_p) and not os.listdir(_p):
+                os.rmdir(_p)
+        extras["wheels"] = assets.export_wheels(city_dir, page_rel, details,
+                                                set(included_sets), warnings)
+    except Exception as e:
+        warnings.append("wheels not exported: %s" % e)
+    sound_report = {}
+    cache = {}
+    for c in cars:
+        try:
+            got = assets.export_sounds(city_dir, city, c["id"], c["model"],
+                                       lev_path, warnings, cache)
+        except Exception as e:
+            warnings.append("%s: sounds not exported: %s" % (c["id"], e))
+            got = None
+        if got:
+            extras["sounds"][c["id"]], sound_report[c["id"]] = got
+    extras["paints"] = assets.recover_paints(textures_json["palette"]["records"],
+                                             included_sets)
+    _write_json(os.path.join(raw_dir, "paints.json"),
+                {"note": "best effort: dominant colour per civ palette column; "
+                         "the exact retail rows stay in pallet.bin/palette.json",
+                 "sets": {str(k): v for k, v in extras["paints"].items()}})
+    try:
+        siren = assets.export_siren(city_dir, city, lev_path, warnings)
+    except Exception as e:
+        warnings.append("siren not exported: %s" % e)
+        siren = None
+    if siren:
+        sound_report["siren"] = siren
+        extras["siren"] = siren
+    _write_json(os.path.join(raw_dir, "sounds.json"), sound_report)
+    if cos_records:
+        assets.write_handling(city_dir, cars, cos_records, cosmetics_fields)
+    _write_json(manifest_path, manifest)   # warnings may have grown
+
+    write_rebake(city_dir, name, city)
+    write_bank_json(city_dir, city, cars, included_sets, bank_order,
+                    os.path.basename(lev_path), extras, name=name)
+    write_donor_manifest(city_dir, name, manifest, lev_path)
+
     if make_bank:
-        bank_dir = os.path.join(city_dir, "bank")
         report = build_bank(manifest, manifest_path, bank_dir, None)
         manifest["bank"] = report
+        if name != city:   # the quick build is named after the bank too
+            for ext in (".LEV", ".LCF"):
+                src = os.path.join(bank_dir, city + ext)
+                if os.path.exists(src):
+                    os.replace(src, os.path.join(bank_dir, name + ext))
 
     # Print a compact, useful summary.
     covered = {c["id"]: sorted(c["sets"]) for c in cars}
@@ -1036,11 +1273,11 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank):
 
     return {
         "city": city,
-        "dir": city,
+        "dir": dir_name or city,
         "manifest": _rel(manifest_path, out_root),
-        "bank": (_rel(os.path.join(city_dir, "bank", "%s.LEV" % city), out_root)
+        "bank": (_rel(os.path.join(city_dir, "build", "%s.LEV" % name), out_root)
                  if make_bank else None),
-        "lcf": (_rel(os.path.join(city_dir, "bank", "%s.LCF" % city), out_root)
+        "lcf": (_rel(os.path.join(city_dir, "build", "%s.LCF" % name), out_root)
                 if make_bank else None),
         "cars": [{"id": c["id"], "model": c["model"],
                   "variants": sorted(c["variants"])} for c in cars],
@@ -1109,6 +1346,71 @@ def build_wheel_body(specs):
     return bake.build_wheel_lump(geoms)
 
 
+SOUND_RATE_LADDER = (44100, 32000, 22050, 16000, 11025, 8000)
+
+
+def _choose_rate(samples, source_rate, spec, label, warnings, budget):
+    """Which rate to store this sample at, and why.
+
+    An explicit `rate` is a frequency and is taken as given. `rate_pct` is the
+    Driver 1 beta knob and only ever scaled the declared rate (a pitch), so it is
+    taken as given too. Otherwise the choice is made for the author:
+
+        the highest rate at or below `max_rate` whose encoded size still fits
+        `sample_bytes` for this sample's length
+
+    because bytes are the only cost and 4-bit ADPCM noise is roughly flat across
+    the band: doubling the rate halves the noise density under the signal, which
+    measured +10 dB of in-band SNR from 16 kHz to 32 kHz on the engine loop.
+    """
+    wanted = spec.get("rate")
+    max_rate = int(spec.get("max_rate") or SOUND_MAX_RATE)
+    pct = spec.get("rate_pct") or 100
+
+    if wanted:
+        rate, clamped = vag.fit_rate(int(wanted))
+        return rate, True, False
+
+    if pct != 100:
+        rate, clamped = vag.fit_rate(int(source_rate * pct / 100.0))
+        return rate, True, False
+
+    seconds = len(samples) / float(source_rate or 1)
+    best = None
+    fits = None
+
+    for candidate in SOUND_RATE_LADDER:
+        if candidate > max_rate:
+            continue
+
+        encoded = int(round(len(samples) * (candidate / float(source_rate)))) * 0.5
+
+        if encoded <= budget:
+            best = candidate
+            break
+
+    if best is None:
+        # nothing fits whole: take the lowest rate the ceiling allows and let the
+        # byte budget trim it, which at least keeps the pitch and the timbre
+        best = min([r for r in SOUND_RATE_LADDER if r <= max_rate] or [8000])
+        warnings.append("sound %s: %.2fs does not fit %d bytes at any rate up to "
+                        "%d Hz; using %d Hz and trimming to the budget"
+                        % (label, seconds, budget, max_rate, best))
+    else:
+        fits = best
+
+    rate, clamped = vag.fit_rate(best)
+
+    if rate != source_rate:
+        delta = 3.01 * math.log(rate / float(source_rate), 2)
+        warnings.append("sound %s: %d Hz (auto, source %d Hz) - %.2fs of %d B "
+                        "budget, about %+.1f dB of noise floor against the "
+                        "source rate"
+                        % (label, rate, source_rate, seconds, budget, delta))
+
+    return rate, False, True
+
+
 def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     """One sample: the WAV encoded to VAG blocks, with its bank header fields.
 
@@ -1141,31 +1443,9 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
 
     samples, rate = vag.read_wav(path)
     source_rate = rate
-    wanted = spec.get("rate")
 
-    if wanted:
-        rate = int(wanted)
-    else:
-        pct = spec.get("rate_pct") or 100
-
-        if pct != 100:
-            rate = int(rate * pct / 100)
-
-    max_rate = int(spec.get("max_rate") or SOUND_MAX_RATE)
-
-    if rate > max_rate:
-        samples = vag.resample(samples, source_rate, max_rate)
-        rate = max_rate
-
-    rate, clamped = vag.fit_rate(rate)
-
-    if clamped:
-        samples = vag.resample(samples, source_rate, clamped)
-        source_rate = clamped
-        rate = clamped
-        warnings.append("sound %s: %d Hz is outside the SPU range; resampled to "
-                        "%d" % (label, clamped, rate))
-
+    # Trim and fade come first, at the SOURCE rate: they are defined in seconds,
+    # and the rate the sample ends up at depends on how long it turned out to be.
     trim = spec.get("trim")
 
     if trim:
@@ -1187,6 +1467,13 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     if gain:
         samples = vag.gain_db(samples, gain)
         warnings.append("sound %s: %+.1f dB applied" % (label, gain))
+
+    rate, wanted_rate, auto_rate = _choose_rate(
+        samples, source_rate, spec, label, warnings,
+        int(spec.get("sample_bytes") or budget))
+
+    if rate != source_rate:
+        samples = vag.resample(samples, source_rate, rate)
 
     # A bank sample has no gain of its own: the engine's channel volume is the
     # same for every car, so an un-normalised WAV plays quietly next to retail's.
@@ -1684,6 +1971,11 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         # shape no longer matches what basebank writes.
         p = os.path.join(manifest_dir, "pages", "PAGE_%d.bin" % s)
         if not os.path.isfile(p):
+            # exportd2's own layout keeps the source page bytes with the donor
+            donor_p = os.path.join(manifest_dir, "donor", "pages", "PAGE_%d.bin" % s)
+            if os.path.isfile(donor_p):
+                p = donor_p
+        if not os.path.isfile(p):
             legacy = os.path.join(manifest_dir, "raw", "pages",
                                   "PAGE_%d.bin" % s)
             if os.path.isfile(legacy):
@@ -1818,9 +2110,15 @@ def _lcf_records(manifest, manifest_dir, cars, order):
     fallback = source[0] if source else b"\x00" * RECORD_SIZE
     for slot, car_id in order:
         car = cars.get(car_id)
+        if car and car.get("handling"):
+            # the car's own handling.json is the source of truth
+            records[slot] = handling_record(car["handling"])
+            continue
         src_model = car.get("model") if car else None
         if src_model is not None and 0 <= src_model < len(source):
             records[slot] = source[src_model]
+    if not source:
+        fallback = next((r for r in records if r), fallback)
     for i in range(MAX_CAR_MODELS):
         if records[i] is None:
             records[i] = source[i] if i < len(source) else fallback
@@ -2219,6 +2517,11 @@ def main(argv=None):
     ap.add_argument("--city", help="city to use when rebuilding from index.json")
     ap.add_argument("--order", metavar="JSON",
                     help="bank_order override (list or {\"bank_order\": [...]})")
+    ap.add_argument("--name", help="bank name, e.g. NICE: folder <out>/nice, "
+                    "build/NICE.LEV/.LCF, cities.ini row (default: the city)")
+    ap.add_argument("--bank-per-car", action="store_true",
+                    help="build a separate bank per car (default: ONE city "
+                         "bank, each car's assets in cars/<car>/)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 
@@ -2246,13 +2549,31 @@ def main(argv=None):
 
     entries = []
     for path in paths:
-        try:
-            entry = export_one(path, out_root, models_filter, variants,
-                               not args.no_bank)
-        except SystemExit as e:
-            print("skip %s: %s" % (os.path.basename(path), e))
+        if not args.bank_per_car:
+            try:
+                entry = export_one(path, out_root, models_filter, variants,
+                                   not args.no_bank, bank_name=args.name)
+            except SystemExit as e:
+                print("skip %s: %s" % (os.path.basename(path), e))
+                continue
+            entries.append(entry)
             continue
-        entries.append(entry)
+        # one bank folder per car: <out>/<CITY>_model<N>/{art,sounds,donor,build}
+        city = os.path.splitext(os.path.basename(path))[0].upper()
+        for m in sorted(models_filter if models_filter is not None
+                        else range(MAX_CAR_MODELS)):
+            name = "%s_model%d" % (city, m)
+            try:
+                entry = export_one(path, out_root, {m}, variants,
+                                   not args.no_bank, dir_name=name)
+            except SystemExit as e:
+                print("skip %s model %d: %s" % (os.path.basename(path), m, e))
+                entry = None
+            if not entry or not entry["cars"]:
+                import shutil
+                shutil.rmtree(os.path.join(out_root, name), ignore_errors=True)
+                continue
+            entries.append(entry)
 
     if not entries:
         raise SystemExit("no Driver 2 car levels processed")

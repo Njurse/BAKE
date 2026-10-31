@@ -93,8 +93,7 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
 
     if flip_winding:
         faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
-        mats = list(reversed(mats)) if mats else mats
-        kinds = list(reversed(kinds)) if kinds else kinds
+        # mats/kinds are per-FACE lists and face order is unchanged: leave them.
     # point normals: average of face normals meeting at each vertex
     acc = [[0.0, 0.0, 0.0] for _ in verts]
     face_n = []

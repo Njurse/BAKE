@@ -93,18 +93,22 @@ def stats(samples):
 
     if not n:
         return {"n": 0, "peak": 0, "rms": 0.0, "crest": 0.0, "dc": 0.0,
-                "clipped": 0, "longest_run": 0}
+                "clipped": 0, "over": 0, "longest_run": 0}
 
     total = sum(samples)
     dc = total / float(n)
     peak = max(abs(v) for v in samples)
     rms = (sum(float(v) * v for v in samples) / n) ** 0.5
-    pinned = 32700
-    clipped = sum(1 for v in samples if abs(v) >= pinned)
+
+    # `clipped` means PINNED at the int16 edge - a flat top, which is what real
+    # clipping looks like in a source. A float signal mid-chain can exceed full
+    # scale instead (the clamp is in encode), which is `over` and is not damage.
+    clipped = sum(1 for v in samples if v in (32767, -32767, -32768))
+    over = sum(1 for v in samples if abs(v) > 32767)
     longest = run = 0
 
     for v in samples:
-        if abs(v) >= pinned:
+        if v in (32767, -32767, -32768):
             run += 1
             longest = max(longest, run)
         else:
@@ -112,7 +116,7 @@ def stats(samples):
 
     return {"n": n, "peak": peak, "rms": rms, "dc": dc,
             "crest": (peak / rms) if rms else 0.0,
-            "clipped": clipped, "longest_run": longest}
+            "clipped": clipped, "over": over, "longest_run": longest}
 
 
 def remove_dc(samples):
@@ -130,7 +134,7 @@ def remove_dc(samples):
     if dc == 0:
         return list(samples)
 
-    return [max(-32768, min(32767, v - dc)) for v in samples]
+    return [v - dc for v in samples]
 
 
 def level(samples, peak=DEFAULT_PEAK, rms=None, tolerance=0.06, force=False):
@@ -184,7 +188,7 @@ def level(samples, peak=DEFAULT_PEAK, rms=None, tolerance=0.06, force=False):
     if not force and abs(gain - 1.0) <= tolerance:
         return list(samples), before, 1.0
 
-    return scale(samples, gain), before, gain
+    return scale(samples, gain, clamp=False), before, gain
 
 
 def normalise(samples, peak=DEFAULT_PEAK, tolerance=0.06, force=False):
@@ -194,10 +198,22 @@ def normalise(samples, peak=DEFAULT_PEAK, tolerance=0.06, force=False):
     return out, _before["peak"], gain
 
 
-def scale(samples, gain):
-    """Multiply every sample by `gain`, saturating at int16 bounds."""
+def scale(samples, gain, clamp=False):
+    """Multiply every sample by `gain`.
+
+    `clamp=False` is the default on purpose: the chain trims, fades, gains and
+    levels BEFORE the encoder sees a sample, and clamping anywhere in the middle
+    turns a gain into a distortion - the flat tops survive the level stage that
+    follows. Rounding stays, so a sample is still an integer count at each step;
+    `encode` is the one place that clamps to int16.
+    """
     if gain == 1.0:
         return list(samples)
+
+    if not clamp:
+        # float, unrounded: rounding here is a second quantisation, and it makes
+        # "+12 dB then level" differ from "level" by a couple of counts
+        return [s * gain for s in samples]
 
     return [max(-32768, min(32767, int(round(s * gain)))) for s in samples]
 
@@ -459,7 +475,8 @@ def encode(samples, loop=False, loop_from=0, loop_end=None):
     stream a D2 sound bank embeds: no VAGp header, no per-sample directory.
     """
     flags_loop = bool(loop)
-    padded = list(samples)
+    # the single int16 clamp of the whole chain
+    padded = [max(-32768, min(32767, int(round(s)))) for s in samples]
 
     # The loop END is the end of the block stream (the marker rides the last
     # block), so a chosen loop end is applied by cutting the tail off here. See
@@ -536,12 +553,22 @@ def read_wav(path):
         rate = w.getframerate()
         frames = w.readframes(w.getnframes())
 
-    if width != 2:
-        raise SystemExit("%s is %d-bit; export it as 16-bit PCM"
+    # 8-bit WAV is unsigned (128 = silence); 24/32-bit are signed little
+    # endian. All are widened/narrowed to 16-bit so old rips and 8 kHz/8-bit
+    # exports bake without a manual re-export.
+    if width == 2:
+        count = len(frames) // 2
+        values = list(struct.unpack("<%dh" % count, frames[:count * 2]))
+    elif width == 1:
+        values = [(b - 128) << 8 for b in frames]
+    elif width in (3, 4):
+        values = []
+        for i in range(0, len(frames) - width + 1, width):
+            v = int.from_bytes(frames[i:i + width], "little", signed=True)
+            values.append(max(-32768, min(32767, v >> (8 * width - 16))))
+    else:
+        raise SystemExit("%s is %d-bit PCM; use 8, 16, 24 or 32-bit"
                          % (path, width * 8))
-
-    count = len(frames) // 2
-    values = list(struct.unpack("<%dh" % count, frames[:count * 2]))
 
     if channels > 1:
         mono = [int(round(sum(values[i:i + channels]) / float(channels)))

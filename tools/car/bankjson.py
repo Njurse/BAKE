@@ -678,6 +678,20 @@ class Bank(object):
             _fail(where, "declare.cars", "must be an object")
 
         for name, data in cars.items():
+            base = self.base
+            if isinstance(data, str):
+                # a car may live in its own file (cars/<car>/handling.json):
+                # its paths are relative to that file, and keys the bake does
+                # not read (handling, raw, notes) are ignored here
+                carfile = os.path.normpath(os.path.join(self.base, data))
+                try:
+                    with open(carfile, "r", encoding="utf-8") as f:
+                        filed = json.load(f)
+                except (OSError, ValueError) as e:
+                    _fail(where, "declare.cars.%s" % name,
+                          "cannot read %s (%s)" % (data, e))
+                data = {k: v for k, v in filed.items() if k in CAR_KEYS}
+                base = os.path.dirname(carfile)
             if not isinstance(data, dict):
                 _fail(where, "declare.cars.%s" % name, "must be an object")
 
@@ -693,7 +707,7 @@ class Bank(object):
                       "input - re-baking from it is generation loss.")
 
             _check_keys(where, label, data, CAR_KEYS, "car")
-            self.cars[name] = Car(label, path, data, self.base, where)
+            self.cars[name] = Car(label, path, data, base, where)
 
         seen = set()
 
@@ -719,6 +733,22 @@ class Bank(object):
                       % (carname, ", ".join(sorted(self.cars)) or "none"))
 
             self.order.append((slot, carname))
+
+
+def dumps_compact(obj, width=100, _ind=0):
+    """JSON that stays readable: a value that fits on one line (<= width) is
+    written on one line; only bigger objects/lists are broken up, 2 spaces."""
+    one = json.dumps(obj)
+    if len(one) + _ind <= width or not isinstance(obj, (dict, list)) or not obj:
+        return one
+    pad = " " * (_ind + 2)
+    if isinstance(obj, dict):
+        items = ["%s%s: %s" % (pad, json.dumps(k),
+                               dumps_compact(v, width, _ind + 2))
+                 for k, v in obj.items()]
+        return "{\n" + ",\n".join(items) + "\n" + " " * _ind + "}"
+    items = [pad + dumps_compact(v, width, _ind + 2) for v in obj]
+    return "[\n" + ",\n".join(items) + "\n" + " " * _ind + "]"
 
 
 def load(path):
@@ -752,5 +782,4 @@ def write_declare(path, declare):
     raw["declare"] = declare
 
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(raw, f, indent=1)
-        f.write("\n")
+        f.write(dumps_compact(raw) + "\n")
