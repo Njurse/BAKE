@@ -130,7 +130,9 @@ class RateFieldTests(unittest.TestCase):
 
         self.assertEqual(top, 1000)
         self.assertAlmostEqual(gain, 0.9 * 32767 / 1000.0, places=3)
-        self.assertEqual(max(abs(s) for s in samples), int(0.9 * 32767))
+        # levelling leaves a FLOAT: the chain clamps once, in encode (see scale)
+        self.assertAlmostEqual(max(abs(s) for s in samples), 0.9 * 32767,
+                               places=3)
 
     def test_stats_read_crest_and_dc(self):
         # a limited square-ish wave: peak at full scale, rms close behind it
@@ -183,6 +185,60 @@ class RateFieldTests(unittest.TestCase):
         samples, top, gain = vag.normalise([0, 0, 0])
 
         self.assertEqual((samples, top, gain), ([0, 0, 0], 0, 1.0))
+
+
+class NoClipTests(unittest.TestCase):
+    """The chain must gain without distorting: encode is the only clamp."""
+
+    def hot_take(self, peak=31231, n=4000):
+        import math
+        return [int(peak * math.sin(2 * math.pi * 148.0 * i / 16000.0))
+                for i in range(n)]
+
+    def test_a_positive_gain_does_not_clamp(self):
+        hot = self.hot_take()
+        for db in (3, 6, 12):
+            gained = vag.gain_db(hot, db)
+            self.assertGreater(max(abs(s) for s in gained), 32767,
+                               "a %+d dB gain was clamped to int16" % db)
+            self.assertEqual(vag.stats(gained)["clipped"], 0,
+                             "a %+d dB gain pinned samples mid-chain" % db)
+
+    def test_amplifying_then_levelling_is_identical_to_levelling(self):
+        hot = self.hot_take()
+        base, _b, _g = vag.level(hot, peak=0.79, rms=0.24)
+        want, _n, _e = vag.encode(base, loop=True, loop_from=56)
+
+        for db in (3, 6, 12):
+            lv, _b2, _g2 = vag.level(vag.gain_db(hot, db), peak=0.79, rms=0.24)
+            got, _n2, _e2 = vag.encode(lv, loop=True, loop_from=56)
+            self.assertEqual(got, want,
+                             "a %+d dB take baked differently after levelling" % db)
+
+    def test_the_peak_ceiling_holds_whatever_rms_asks_for(self):
+        # the loudspeaker-tone case: rms 0.9 would need a gain that blows the peak
+        loud = [int(30000 * (1 if i % 2 else -1)) for i in range(2000)]
+        ceiling = 0.79 * 32767
+
+        for rms in (0.34, 0.6, 0.9):
+            out, before, gain = vag.level(loud, peak=0.79, rms=rms)
+            peak = max(abs(v) for v in out)
+            self.assertLessEqual(peak, ceiling + 1,
+                                 "rms %.2f pushed past the peak ceiling" % rms)
+            self.assertEqual(vag.stats(out)["over"], 0)
+
+    def test_no_level_leaves_a_sample_over_the_ceiling(self):
+        hot = self.hot_take()
+        for peak in (0.5, 0.79, 0.999):
+            out, _b, _g = vag.level(hot, peak=peak, rms=0.24)
+            self.assertLessEqual(max(abs(v) for v in out), peak * 32767 + 1)
+
+    def test_encode_is_where_the_clamp_happens(self):
+        loud = [40000, -40000] * 200
+        data, n, _e = vag.encode(loud)
+        decoded = vag.decode(data, n)
+        self.assertLessEqual(max(decoded), 32767)
+        self.assertGreaterEqual(min(decoded), -32768)
 
 
 class LoopPointTests(unittest.TestCase):

@@ -143,6 +143,18 @@ def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
 
+    # A page the car declares is re-baked with ONE CLUT row (row 0), and the
+    # palette rows are taken from that row with texnum 0. A poly keeps the
+    # source id (set36_id17) from its material, but the id picks the CLUT row
+    # (texture_cluts[set][id]) - row 17 of a one-row page does not exist, so the
+    # car drew white/garbage. Point those polys at row 0.
+    rebaked = {t.set for t in car.textures}
+
+    for geom in geoms.values():
+        for poly in geom["polys"]:
+            if poly.get("set") in rebaked:
+                poly["id"] = 0
+
     warnings = []
     blocks = {}
     blocks["clean"] = _block_for("clean", geoms["clean"], None, scale,
@@ -361,8 +373,11 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
         geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding, None, flip_z)
+        # an untextured flat poly (F3) samples no page; obj2geom parks it on
+        # set 1, which a Driver 2 export does not carry
         model["sets"] = sorted({p["set"] for p in geom["polys"]
-                                if p["set"] not in (0, 255)})
+                                if p["set"] not in (0, 255)
+                                and p.get("kind") != "F3"})
 
     # A page the DECLARATION adds but no rebuilt body model samples is a wheel
     # page. This has to run HERE, after the loop above fills model["sets"]:
@@ -409,6 +424,25 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
         manifest["wheel_sets"] = sorted(wheel_sets)
     else:
         manifest.pop("wheel_sets", None)
+
+    # Each car's handling.json "handling" block IS its cosmetics record (LCF):
+    # wheelDisp, cPoints, colBox, mass... The donor LCF is reference only.
+    decl_cars = (bank.raw.get("declare") or {}).get("cars") or {}
+    for model in manifest["models"]:
+        ref = decl_cars.get(model["id"])
+        handling = None
+        if isinstance(ref, str):
+            with open(os.path.join(bank_dir, ref), encoding="utf-8") as f:
+                handling = json.load(f).get("handling")
+        elif isinstance(ref, dict):
+            handling = ref.get("handling")
+        if handling:
+            model["handling"] = handling
+        else:
+            warnings.append("%s: no \"handling\" block - its LCF record is "
+                            "zeroed (the donor is not read)" % model["id"])
+    manifest.pop("lcf", None)
+    manifest.pop("cosmetics", None)
 
     return manifest, warnings
 
@@ -717,6 +751,14 @@ def _default_island(path, carname, variant, warnings):
     return (0, 0, wheels_w, wheels_h)
 
 
+def _file_sha256(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def _page_source_hash(page, setid, sprites=None):
     """The (image hash, bake options, wheel sprites) a page was baked from.
 
@@ -732,6 +774,7 @@ def _page_source_hash(page, setid, sprites=None):
     if sprites:
         record["wheels"] = [{"variant": variant,
                              "image": os.path.basename(path),
+                             "sha256": _file_sha256(path),
                              "island": [int(v) for v in island]}
                             for variant, path, island in sprites]
 
@@ -775,6 +818,11 @@ def wheel_islands(bank):
 
         for variant, wheel in declared:
             if wheel.set is None or wheel.island is None or not wheel.path:
+                continue
+
+            # one island, one sprite: clean wins over fast on a shared rect
+            if any(list(i) == list(wheel.island)
+                   for _v, _p, i in islands.get(wheel.set, [])):
                 continue
 
             islands.setdefault(wheel.set, []).append(
@@ -1242,7 +1290,13 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
     # a page the declaration adds is not in textureinfo yet, and fix() can only
     # restate the size of one that is: append it, with the size of the file on
     # disk, or the assembler has no length to carve
-    listed = {setid for setid, _ in perms}
+    # perms past the 16-slot region spill into specs on the next read, so a set
+    # already in EITHER list is listed - else every bake re-appends (and heals)
+    seen = {setid for setid, _ in perms}
+    kept = [e for e in specs if not (e[0] in seen or seen.add(e[0]))]
+    changed = changed or len(kept) != len(specs)
+    specs = kept
+    listed = {setid for setid, _ in perms} | {setid for setid, _ in specs}
     for page in manifest.get("pages") or []:
         setid = page.get("set")
         if setid in listed:
@@ -1485,6 +1539,8 @@ def complete_declaration(js, out=None, dry_run=False):
     added = []
 
     for carname, car in cars.items():
+        if not isinstance(car, dict):   # car in its own file: not completed
+            continue
         sounds = car.get("sounds")
 
         if not isinstance(sounds, dict):
