@@ -138,7 +138,9 @@ def map_page_sets(record: dict, mapping: dict[int, int]) -> dict:
             crop["page_set"] = m(crop["page_set"])
     for crop in record.get("texture_crops", []):
         crop["page_set"] = m(crop["page_set"])
-    page_map = {str(k): int(v) for k, v in
+    # Compose: an existing source->target entry must follow its target to the
+    # new set, or a re-allocated character keeps pointing at the old sets.
+    page_map = {str(k): m(v) for k, v in
                 (record.get("texture_page_map") or {}).items()}
     for old, new in mapping.items():
         page_map[str(int(old))] = int(new)

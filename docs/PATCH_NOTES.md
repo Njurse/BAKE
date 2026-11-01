@@ -80,3 +80,9 @@
 
 - jmpped_player: `--characters DIR` imports every character folder in DIR (e.g. MODS/mp/peds/jerichod3, tannerd3) after the stock Tanner + Jericho rip from HAVANA.LEV, so first-launch BAKE_D1_CARS ships the MP ped pack. Failed imports warn and skip.
 
+
+- JMPPED v5: entries may carry a 15th trailing slot, HIPS. The bake copies Tanner's HIPS from the source level onto each entry's legs page set, so a JMPPED character has its own hips (drawn on LHIP, tinted with the body) instead of borrowing resident Tanner's. 14-model entries still load. Engine side ships in the superproject 0.12.
+- JMPPED toes now cross over like stock Tanner (LTOE draws FOOT_RIGHT, RTOE draws FOOT_LEFT); JERICHO_BINDINGS / skeleton export match the engine.
+- jmpped_entries.map_page_sets composes an existing texture_page_map when a character is re-allocated to other page sets (an imported character colliding with an existing slot kept pointing at its old legs set).
+- New jmpped_make_tannerd3.py: builds the tannerd3 character folder (Tanner's TORSO/HEAD/arms from HAVANA.LEV in the JERI slots of a Jericho clone).
+- tools/ped/JMPPED.LEV rebaked (only change: the HIPS slot per entry).

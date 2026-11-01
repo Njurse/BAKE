@@ -200,9 +200,10 @@ def _parse_v5(data: bytes) -> Archive:
 
         model_count = _u32(data, off)
         off += 4
-        if model_count != len(MODEL_NAMES):
-            raise JMPPEDError("entry %r has %d models; expected %d"
-                              % (name, model_count, len(MODEL_NAMES)))
+        if model_count not in (len(MODEL_NAMES), len(MODEL_NAMES) + 1):
+            raise JMPPEDError("entry %r has %d models; expected %d or %d (+HIPS)"
+                              % (name, model_count, len(MODEL_NAMES),
+                                 len(MODEL_NAMES) + 1))
 
         raw_models: list[bytes] = []
         models: list[Model] = []
@@ -313,9 +314,10 @@ def _archive_v5_bytes(entries: list[Entry]) -> bytes:
             raise JMPPEDError("duplicate entry name %r" % entry.name)
         names.add(entry.name)
 
-        if len(entry.models) != len(MODEL_NAMES):
-            raise JMPPEDError("entry %r has %d models; expected %d"
-                              % (entry.name, len(entry.models), len(MODEL_NAMES)))
+        if len(entry.models) not in (len(MODEL_NAMES), len(MODEL_NAMES) + 1):
+            raise JMPPEDError("entry %r has %d models; expected %d or %d (+HIPS)"
+                              % (entry.name, len(entry.models), len(MODEL_NAMES),
+                                 len(MODEL_NAMES) + 1))
 
         out += struct.pack("<I", len(name))
         out += name
