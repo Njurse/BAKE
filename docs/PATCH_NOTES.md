@@ -2,6 +2,18 @@
 
 ## 0.12 (JERICHO v0.12.0)
 
+### Ped bake (`tools/ped/jmpped_player.py`)
+
+- **JMPPED.LEV is built from the player's own game.** The auto re-bake
+  (`BAKE_D1_CARS.bat/.sh`, BAKE_VERSION 10) now runs `jmpped_player.py`
+  first: it extracts the stock Jericho parts and Tanner's limbs from
+  `DRIVER2/LEVELS/HAVANA.LEV` and writes `DRIVER2/LEVELS/JMPPED.LEV`, so
+  the Jericho model does not need to be distributed. Driv3r Jericho is not
+  part of it. Missing `HAVANA.LEV` fails with a clear message (exit 2).
+- It works in a throwaway project, so the authoring `project.json`,
+  `characters/` and last-used state are never touched. The ped step needs no
+  Driver 1 data; without `DRIVER/LEVELS` the cars are skipped, not failed.
+
 ### Car bake (`carbank_bake.py`, `bankjson.py`, `obj2geom.py`)
 
 - **Wheel texture islands use your overrides.** Islands are keyed by a
