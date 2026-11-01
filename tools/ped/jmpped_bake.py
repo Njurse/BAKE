@@ -476,6 +476,55 @@ def _apply_character_crops(character: dict, states: dict[int, dict],
     return changed
 
 
+TANNER_PAGE_SET = 2
+
+
+def _hips_blob(manifest: dict, project: str) -> bytes | None:
+    """Tanner's HIPS from the source level, for the optional v5 HIPS slot.
+
+    A JMPPED character no longer borrows the resident Tanner HIPS (it sat on
+    Tanner's page, so it tinted and drew apart from the body). Every entry gets
+    its own copy on its own legs page instead. Missing source = no HIPS slot."""
+    level_path = (manifest.get("source") or {}).get("level")
+    if not level_path or not os.path.isfile(level_path):
+        print("note: source level not found; baking without the HIPS slot")
+        return None
+    import jmpped_level as src
+    blob = src.model_blob(src.read_level(level_path), jc.HIPS_MODEL)
+    if blob is None:
+        print("note: %s has no HIPS model; baking without the HIPS slot"
+              % level_path)
+        return None
+    if jm.parse_model(blob).instance_number >= 0:
+        raise jc.JMPPEDError("HIPS in %s shares geometry with another model"
+                             % level_path)
+    return blob
+
+
+def _legs_set(character: dict, index: int) -> int:
+    sets = [int(s) for s in character.get("texture_page_sets") or []]
+    return sets[2] if len(sets) == 3 else jc.entry_page_sets(index)[2]
+
+
+def _retarget_hips(blob: bytes, legs_set: int) -> bytes:
+    """Move HIPS polys from Tanner's page set onto the entry's legs page set.
+
+    Custom legs pages are copies of Tanner's page with crops pasted at the same
+    rects, so the HIPS UVs keep landing on the hips texels."""
+    out = bytearray(blob)
+    m = jm.parse_model(blob)
+    p = m.poly_offset
+    for _ in range(m.num_polys):
+        kind = out[p] & 0x1F
+        step = jc.POLY_SIZES[kind] if kind < len(jc.POLY_SIZES) else 0
+        if step <= 0 or p + step > len(out):
+            break
+        if kind in jc.TEXTURED_KINDS and out[p + 1] == TANNER_PAGE_SET:
+            out[p + 1] = legs_set & 0xFF
+        p += step
+    return bytes(out)
+
+
 def build_v5(project: str, manifest: dict, dest: str | None,
              dry_run: bool, use: str, character: str | None,
              copy: bool) -> int:
@@ -528,6 +577,13 @@ def build_v5(project: str, manifest: dict, dest: str | None,
                 raw_pages.append(st["raw"] or b"")
         out_entries.append(ja.Entry(c["name"], models, pages, raw_models,
                                     raw_pages))
+
+    hips = _hips_blob(manifest, project)
+    if hips is not None:
+        for index, (c, entry) in enumerate(zip(characters, out_entries)):
+            blob = _retarget_hips(hips, _legs_set(c, index))
+            entry.models = list(entry.models) + [jm.parse_model(blob)]
+            entry.raw_models = list(entry.raw_models) + [blob]
 
     arch5 = ja.Archive(version=jc.VERSION_V5, model_names=jc.MODEL_NAMES,
                        models=out_entries[0].models, pages=out_entries[0].pages,

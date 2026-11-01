@@ -101,10 +101,12 @@ JERICHO_BINDINGS = {
     "LHIP": "HIPS",
     "LKNEE": "THIGH_LEFT",
     "LFOOT": "CALF_LEFT",
-    "LTOE": "FOOT_LEFT",
+    # Crossed exactly like TANNER_BINDINGS (the engine binds JMPPED toes the
+    # same way since 0.12): FOOT_LEFT is the mesh drawn on the right toe.
+    "LTOE": "FOOT_RIGHT",
     "RKNEE": "THIGH_RIGHT",
     "RFOOT": "CALF_RIGHT",
-    "RTOE": "FOOT_RIGHT",
+    "RTOE": "FOOT_LEFT",
     "LFINGERS": "HAND_LEFT",
     "RFINGERS": "HAND_RIGHT",
 }

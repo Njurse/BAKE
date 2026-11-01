@@ -19,7 +19,7 @@ VERSION_V5 = 5
 #   u32 entry_count                           4
 #   per entry:
 #     u32 name_len, name bytes
-#     u32 model_count (14)
+#     u32 model_count (14, or 15 with the trailing HIPS slot)
 #     model_count * (u32 size, MODEL blob)
 #     u32 page_count
 #     page_count * (u32 set, u32 npalettes, u32 clut_len, u32 image_len,
@@ -72,6 +72,11 @@ MODEL_NAMES = [
     "THIGH_RIGHT", "CALF_RIGHT", "FOOT_RIGHT",
     "HAND_LEFT", "HAND_RIGHT",
 ]
+# v5 entries may carry one optional trailing slot: the character's own HIPS,
+# a copy of Tanner's HIPS retargeted onto the entry's legs page set.
+HIPS_MODEL = "HIPS"
+HIPS_SLOT = len(MODEL_NAMES)
+V5_HIPS_MODEL_NAMES = MODEL_NAMES + [HIPS_MODEL]
 PED_HEAD_MODEL = "PEDHEAD1"
 V4_MODEL_NAMES = MODEL_NAMES + [PED_HEAD_MODEL]
 PED_TEXTURE_NAMES = ["CHEST1", "ARM1", "FOREARM1", "JEANS1", "LOWHEAD", "HEAD1"]
