@@ -90,8 +90,10 @@ class ArchiveV5Tests(unittest.TestCase):
             ja.archive_bytes(self._archive([self.entry, second]))
 
     def test_missing_slot_is_refused(self):
-        short = ja.Entry("Short", list(self.entry.models[:-1]),
-                         list(self.entry.pages), list(self.entry.raw_models[:-1]))
+        # 14 (no HIPS) and 15 (+HIPS) are both valid; 13 is not.
+        n = len(jc.MODEL_NAMES) - 1
+        short = ja.Entry("Short", list(self.entry.models[:n]),
+                         list(self.entry.pages), list(self.entry.raw_models[:n]))
         with self.assertRaises(jc.JMPPEDError):
             ja.archive_bytes(self._archive([short]))
 
