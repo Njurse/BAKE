@@ -77,3 +77,6 @@
   full scale mid-chain are reported separately as `over` (the clamp happens
   at encode). `remove_dc` no longer clamps. New `scale()` helper. Tests
   updated in `test_vag.py`.
+
+- jmpped_player: `--characters DIR` imports every character folder in DIR (e.g. MODS/mp/peds/jerichod3, tannerd3) after the stock Tanner + Jericho rip from HAVANA.LEV, so first-launch BAKE_D1_CARS ships the MP ped pack. Failed imports warn and skip.
+
