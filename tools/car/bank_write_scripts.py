@@ -1,6 +1,6 @@
-"""rebake_install.py <bank.json>  (writes rebake.bat + playtest.bat) [--force] [--mode M] [--args "..."] [--preview "..."]
+"""bank_write_scripts.py <bank.json>  (writes rebake.bat, playtest.bat, preview.bat, wizard.bat) [--force] [--mode M] [--args "..."] [--preview "..."]
 
-Writes rebake.bat next to bank.json from rebake_template.bat (the one
+Writes rebake.bat next to bank.json from template_rebake.bat (the one
 canonical rebake). exportd2 calls write() on export; run this to refresh an
 existing bank's copy after the template changes.
 """
@@ -10,9 +10,11 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE = os.path.join(HERE, "rebake_template.bat")
+TEMPLATE = os.path.join(HERE, "template_rebake.bat")
 SIDECARS = {"rebake.bat": TEMPLATE,
-            "playtest.bat": os.path.join(HERE, "playtest_template.bat")}
+            "playtest.bat": os.path.join(HERE, "template_playtest.bat"),
+            "preview.bat": os.path.join(HERE, "template_preview.bat"),
+            "wizard.bat": os.path.join(HERE, "template_wizard.bat")}
 CITY_KEYS = {"CHICAGO": "0", "HAVANA": "1", "VEGAS": "2", "RIO": "3"}
 
 
@@ -38,7 +40,7 @@ def write(bank_dir, name, donor_city="CHICAGO", mode="plain", args="",
                  "@PREVIEW@": preview,
                  "@DEFCITY@": CITY_KEYS.get(str(donor_city).upper(), "0")}
     written = None
-    for out, tpl in SIDECARS.items():   # rebake.bat + playtest.bat
+    for out, tpl in SIDECARS.items():   # rebake / playtest / preview / wizard
         path = os.path.join(bank_dir, out)
         if os.path.exists(path) and not force:
             continue

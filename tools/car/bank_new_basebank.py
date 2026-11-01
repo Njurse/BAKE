@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""basebank.py - scaffold a one-car car-data bank for a mod.
+"""bank_new_basebank.py - scaffold a one-car car-data bank for a mod.
 
 A bank is a .LEV + optional .LCF registered from JERICHO/CONFIG/cities.ini.
 This tool builds the smallest useful one: ONE donor car from a Driver 2 city,
@@ -26,9 +26,9 @@ The bank folder IS the workspace: those files sit beside NAME.LEV, not
 under a raw/ subdirectory.
 
 Usage:
-    python basebank.py --city CHICAGO --model 1 --name FIREBIRD \
+    python bank_new_basebank.py --city CHICAGO --model 1 --name FIREBIRD \
         --out JERICHO/MODS/betacars/banks/firebird
-    python basebank.py --lev LEVELS/CHICAGO.LEV --model 1 --name BASE
+    python bank_new_basebank.py --lev LEVELS/CHICAGO.LEV --model 1 --name BASE
 
 Driver 2 only; Driver 1 banks are the bake.py/d1pool.py path. Rebuild after
 editing the raw blocks with:
@@ -294,6 +294,11 @@ def build_base(args):
     manifest["bank"] = report
     _write_json(manifest_path, manifest)
 
+    # the bank's own stage scripts: rebake / playtest / preview (by slot) / wizard
+    import bank_write_scripts
+    bank_write_scripts.write(out, name, manifest["source_city"], args="--scale 1",
+                             force=args.force)
+
     # --- install snippet and README --------------------------------------
     game_data = os.path.abspath(args.game_data) if args.game_data else os.path.join(
         _repo_root(), "src_rebuild", "bin", "Release_dev", "DRIVER2")
@@ -333,6 +338,11 @@ def build_base(args):
         "     JERICHO/CONFIG/cities.ini.\n"
         "  3. Import it with import = <resident slot>:<city index>:<model>.\n"
         "     city_N has city index %d (11 + N).\n\n"
+        "Stage scripts (written beside this file):\n"
+        "  wizard.bat    hub for every stage below\n"
+        "  rebake.bat    bake + install + register, then preview / ride\n"
+        "  preview.bat   pick a slot, endless preview until you quit\n"
+        "  playtest.bat  Take a Ride with a car, no bake\n\n"
         "Rebuild after editing the raw blocks:\n"
         "  python exportd2.py --rebuild-bank %s.json -o .\n"
         % (name, manifest["source_city"], args.model, args.slot,

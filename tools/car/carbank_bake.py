@@ -182,7 +182,7 @@ def bank_layout(bank):
     A bank.json may name two folders at its top level, both relative to the
     bank folder:
 
-      "donor_dir": "donor"   the donor-derived INPUTS basebank.py wrote: the
+      "donor_dir": "donor"   the donor-derived INPUTS bank_new_basebank.py wrote: the
                              source manifest (<CITY>.json), source.LCF,
                              cosmetics.json, textureinfo/texturenames/
                              modelnames/pallet.bin, <CITY>.donor.LEV

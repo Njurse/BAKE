@@ -2,9 +2,9 @@
 rem ============================================================================
 rem  rebake.bat [plain^|flipy^|full^|winding^|normals^|flipfull]  -  @NAME@ bank
 rem
-rem  GENERATED from bake\tools\car\rebake_template.bat by rebake_install.py
+rem  GENERATED from bake\tools\car\template_rebake.bat by bank_write_scripts.py
 rem  (exportd2 writes it on export). Edit the template, then re-run:
-rem    python bake\tools\car\rebake_install.py <bank folder>\bank.json --force
+rem    python bake\tools\car\bank_write_scripts.py <bank folder>\bank.json --force
 rem
 rem  @NAME@ is a CAR BANK, not a level: Take a Ride runs in a real city
 rem  (-level chicago/havana/lasvegas/rio) and carhacks.ini's
@@ -67,11 +67,11 @@ if "!PCAR!"=="" (set "PCAR=!ID1!" & set "PSLOT=!SLOT1!")
 echo   test car: !PCAR! ^(bank slot !PSLOT!^)
 set "STOPF=%OUT%\preview.stop"
 if exist "%STOPF%" del /q "%STOPF%"
-if not "%NOPREVIEW%"=="1" if exist "%CAR%\preview_car.py" start "" /b python "%CAR%\preview_car.py" "%BANK%\bank.json" --car !PCAR! --timeout 12 --stop-file "%STOPF%" @PREVIEW@
+if not "%NOPREVIEW%"=="1" if exist "%CAR%\preview_car.py" start "" /b python "%CAR%\preview_car.py" "%BANK%\bank.json" --car !PCAR! --timeout 32 --stop-file "%STOPF%" @PREVIEW@
 echo.
 echo   Take a Ride with !PCAR! - in which city?  (@NAME@ is a car bank, not a level)
 echo     0  Chicago      1  Havana      2  Las Vegas      3  Rio      4  exit
-choice /c 01234 /n /t 10 /d 4 /m "  select 0-4 (exits after 10s): "
+choice /c 01234 /n /t 30 /d 4 /m "  select 0-4 (exits after 30s): "
 set "PICKC=%ERRORLEVEL%"
 type nul > "%STOPF%"
 set "CITY="

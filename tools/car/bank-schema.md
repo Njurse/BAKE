@@ -10,7 +10,7 @@ What the bank turned out to be - size, included sets, pages, palette records,
 checks, warnings - goes to `<CITY>.report.json` beside the built manifest.
 (Older banks still carry that computed half at the top level of `bank.json`;
 it is ignored and can be deleted.) A bank with no `declare` block is a
-donor-derived bank (what `basebank.py` builds) and is used as it stands.
+donor-derived bank (what `bank_new_basebank.py` builds) and is used as it stands.
 
 ## Folder layout
 
@@ -26,7 +26,7 @@ from outputs:
 | --- | --- | --- |
 | bank folder | the author (+ the installed LEV/LCF) | `bank.json`, `FIREBIRD.LEV/.LCF`, `cities.ini`, scripts, README |
 | `art/`, `sounds/` (any path the declare names) | the author | OBJ/MTL, page and wheel PNGs, the three WAVs |
-| `donor_dir` | `basebank.py`, once | `<CITY>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<CITY>.donor.LEV` |
+| `donor_dir` | `bank_new_basebank.py`, once | `<CITY>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<CITY>.donor.LEV` |
 | `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin` (palette_from_pages), `textureinfo.bin` (when page sizes change), the built `<CITY>.json`, `<CITY>.report.json`, and the LEV/LCF when `-o` is not given |
 
 The bake starts from the built manifest when `build_dir` has one (it remembers
