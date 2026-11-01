@@ -2,7 +2,7 @@
 rem ============================================================================
 rem  preview.bat  -  endless preview of one @NAME@ car, picked by SLOT (no bake)
 rem
-rem  GENERATED from bake\tools\car\template_preview.bat by bank_write_scripts.py.
+rem  GENERATED from bake\tools\car\template_preview.bat by make_write_scripts.py.
 rem  Lists the bank's slots, asks which one to load, then opens preview_car.py
 rem  with no timeout: it spins until you press Esc / Q or close the window, then
 rem  asks again (Enter quits). Previews the authoring art - run rebake.bat to

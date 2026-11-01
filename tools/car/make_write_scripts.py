@@ -1,4 +1,4 @@
-"""bank_write_scripts.py <bank.json>  (writes rebake.bat, playtest.bat, preview.bat, wizard.bat) [--force] [--mode M] [--args "..."] [--preview "..."]
+"""make_write_scripts.py <bank.json>  (writes rebake.bat, playtest.bat, preview.bat, wizard.bat) [--force] [--mode M] [--args "..."] [--preview "..."]
 
 Writes rebake.bat next to bank.json from template_rebake.bat (the one
 canonical rebake). exportd2 calls write() on export; run this to refresh an

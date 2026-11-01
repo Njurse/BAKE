@@ -2,7 +2,7 @@
 rem ============================================================================
 rem  playtest.bat  -  Take a Ride with a car from the @NAME@ bank (no bake)
 rem
-rem  GENERATED from bake\tools\car\template_playtest.bat by bank_write_scripts.py.
+rem  GENERATED from bake\tools\car\template_playtest.bat by make_write_scripts.py.
 rem  Asks which car and which city, points carhacks.ini's
 rem  "import = 5:<bank city>:<car slot>" at it and launches. @NAME@ is a car
 rem  bank, not a level: the ride runs in a real city. Run rebake.bat first

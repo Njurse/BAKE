@@ -822,7 +822,7 @@ def _strip_donor(rel):
 
 def write_donor_manifest(city_dir, city, manifest, lev_path):
     """donor/<CITY>.json + donor/<CITY>.donor.LEV: the inputs carbank_bake
-    starts from (the shape bank_new_basebank.py writes for banks/firebird)."""
+    starts from (the shape make_new_bank.py writes for banks/firebird)."""
     import copy
     import shutil
     m = copy.deepcopy(manifest)
@@ -841,11 +841,11 @@ def write_donor_manifest(city_dir, city, manifest, lev_path):
 
 def write_rebake(city_dir, name, donor_city="CHICAGO"):
     """rebake.bat next to bank.json, only if missing - rendered from the
-    canonical tools/car/template_rebake.bat (see bank_write_scripts.py)."""
-    import bank_write_scripts
+    canonical tools/car/template_rebake.bat (see make_write_scripts.py)."""
+    import make_write_scripts
     # exportd2 OBJs are in engine units: bake at 1:1 (the bake's default
     # 0.68267 is the D1->D2 cell ratio and shrinks the car)
-    return bank_write_scripts.write(city_dir, name, donor_city, args="--scale 1")
+    return make_write_scripts.write(city_dir, name, donor_city, args="--scale 1")
 
 
 def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,

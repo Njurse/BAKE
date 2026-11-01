@@ -2,26 +2,27 @@
 
 ## 0.12 (JERICHO v0.12.0)
 
-### Car bank scripts renamed + wizard (`tools/car/`)
+### Car bank tools: `make_*` naming + wizard (`tools/car/`)
 
-- Clearer names (callers, README and bank-schema updated; no shims - nothing
+- Bank-creating tools all start with `make_` (callers, README and bank-schema updated; no shims - nothing
   outside BAKE called the old names):
-  `basebank.py` -> `bank_new_basebank.py`,
-  `rebake_install.py` -> `bank_write_scripts.py`,
+  `basebank.py` -> `make_new_bank.py`,
+  `rebake_install.py` -> `make_write_scripts.py`,
   `rebake_template.bat` -> `template_rebake.bat`,
   `playtest_template.bat` -> `template_playtest.bat`.
-  Generated per-bank names are unchanged (`rebake.bat`, `playtest.bat`).
+  Templates stay `template_*.bat`; per-bank outputs stay `rebake` /
+  `playtest` / `preview` / `wizard`.
 - New `template_preview.bat` -> each bank's `preview.bat`: lists the bank's
   slots, asks which to load and opens an endless `preview_car.py` spin until
   Esc / Q / window close, then asks again (Enter quits). No bake, no game.
 - New `template_wizard.bat` -> each bank's `wizard.bat`: one menu for every
   stage (export, import an OBJ, bake, preview by slot, playtest, register
   city, refresh scripts, open folder).
-- New `tools/car/BANK_WIZARD.bat`: create a bank from a donor car, manage an
+- New `tools/car/make_wizard.bat` (hub): create a bank from a donor car, manage an
   existing bank (opens its wizard), or export a Driver 2 city's cars.
-- `bank_new_basebank.py` now writes rebake / playtest / preview / wizard beside
+- `make_new_bank.py` now writes rebake / playtest / preview / wizard beside
   the new bank. Existing banks get the new ones with
-  `python bank_write_scripts.py <bank>/bank.json` (missing files only).
+  `python make_write_scripts.py <bank>/bank.json` (missing files only).
 
 ### Ped bake (`tools/ped/jmpped_player.py`)
 

@@ -2,9 +2,9 @@
 rem ============================================================================
 rem  rebake.bat [plain^|flipy^|full^|winding^|normals^|flipfull]  -  @NAME@ bank
 rem
-rem  GENERATED from bake\tools\car\template_rebake.bat by bank_write_scripts.py
+rem  GENERATED from bake\tools\car\template_rebake.bat by make_write_scripts.py
 rem  (exportd2 writes it on export). Edit the template, then re-run:
-rem    python bake\tools\car\bank_write_scripts.py <bank folder>\bank.json --force
+rem    python bake\tools\car\make_write_scripts.py <bank folder>\bank.json --force
 rem
 rem  @NAME@ is a CAR BANK, not a level: Take a Ride runs in a real city
 rem  (-level chicago/havana/lasvegas/rio) and carhacks.ini's
