@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bank_new_basebank.py - scaffold a one-car car-data bank for a mod.
+"""make_new_bank.py - scaffold a one-car car-data bank for a mod.
 
 A bank is a .LEV + optional .LCF registered from JERICHO/CONFIG/cities.ini.
 This tool builds the smallest useful one: ONE donor car from a Driver 2 city,
@@ -26,9 +26,9 @@ The bank folder IS the workspace: those files sit beside NAME.LEV, not
 under a raw/ subdirectory.
 
 Usage:
-    python bank_new_basebank.py --city CHICAGO --model 1 --name FIREBIRD \
+    python make_new_bank.py --city CHICAGO --model 1 --name FIREBIRD \
         --out JERICHO/MODS/betacars/banks/firebird
-    python bank_new_basebank.py --lev LEVELS/CHICAGO.LEV --model 1 --name BASE
+    python make_new_bank.py --lev LEVELS/CHICAGO.LEV --model 1 --name BASE
 
 Driver 2 only; Driver 1 banks are the bake.py/d1pool.py path. Rebuild after
 editing the raw blocks with:
@@ -295,8 +295,8 @@ def build_base(args):
     _write_json(manifest_path, manifest)
 
     # the bank's own stage scripts: rebake / playtest / preview (by slot) / wizard
-    import bank_write_scripts
-    bank_write_scripts.write(out, name, manifest["source_city"], args="--scale 1",
+    import make_write_scripts
+    make_write_scripts.write(out, name, manifest["source_city"], args="--scale 1",
                              force=args.force)
 
     # --- install snippet and README --------------------------------------

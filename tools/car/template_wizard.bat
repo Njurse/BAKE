@@ -2,7 +2,7 @@
 rem ============================================================================
 rem  wizard.bat  -  hub for every stage of the @NAME@ car bank
 rem
-rem  GENERATED from bake\tools\car\template_wizard.bat by bank_write_scripts.py.
+rem  GENERATED from bake\tools\car\template_wizard.bat by make_write_scripts.py.
 rem  Each entry runs one stage; the scripts it calls sit beside this file.
 rem ============================================================================
 setlocal EnableDelayedExpansion
@@ -20,7 +20,7 @@ echo    3  Bake + install + register        (rebake.bat)
 echo    4  Preview a car by slot, endless   (preview.bat)
 echo    5  Playtest a car in a city         (playtest.bat, no bake)
 echo    6  Register city only               (register_city.py -^> cities.ini)
-echo    7  Refresh this bank's scripts      (bank_write_scripts.py --force)
+echo    7  Refresh this bank's scripts      (make_write_scripts.py --force)
 echo    8  Open the bank folder
 echo    0  Quit
 choice /c 123456780 /n /m "  select: "
@@ -40,7 +40,7 @@ if "%C%"=="5" call "%BANK%\playtest.bat"
 if "%C%"=="6" (
     if "%EXEDIR%"=="" (echo   no game tree found for this bank) else python "%CAR%\register_city.py" @NAME@ "%MIRROR%\@NAME@.LEV" "%EXEDIR%"
 )
-if "%C%"=="7" python "%CAR%\bank_write_scripts.py" "%BANK%\bank.json" --force
+if "%C%"=="7" python "%CAR%\make_write_scripts.py" "%BANK%\bank.json" --force
 if "%C%"=="8" start "" explorer "%BANK%"
 if "%C%"=="9" exit /b 0
 goto menu
