@@ -182,6 +182,25 @@ def read_d1_voices(voices_path):
     return {"entries": entries, "vag": vag, "kind": "sbk"}
 
 
+# Every model's bank re-uses the same few samples, and encode_vag is a
+# brute-force search in pure Python, so re-encoding per model made the sound
+# step take ~13x longer than needed. Cache the gain-scaled VAG per sample.
+_VAG_CACHE = {}
+
+
+def _scaled_vag(src, index, gain):
+    key = (id(src["vag"]), index, gain)
+    vag = _VAG_CACHE.get(key)
+    if vag is None:
+        addr, length = src["entries"][index][:2]
+        pcm = decode_vag(src["vag"][addr:addr + length])
+        peak = max((abs(s) for s in pcm), default=0) or 1
+        scale = gain * 32767.0 / peak
+        vag = encode_vag([max(-32768, min(32767, int(s * scale))) for s in pcm])
+        _VAG_CACHE[key] = vag
+    return vag
+
+
 def build_bank(voices, engine_index, horn_index, idle_index=None,
                horn_voices=None, engine_rate=None, idle_rate=None):
     payload = bytearray()
@@ -193,14 +212,7 @@ def build_bank(voices, engine_index, horn_index, idle_index=None,
         if rate is not None:
             samplerate = rate
 
-        raw = src["vag"][addr:addr + length]
-        pcm = decode_vag(raw)
-
-        peak = max(abs(s) for s in pcm) or 1
-        scale = gain * 32767.0 / peak
-        scaled = [max(-32768, min(32767, int(s * scale))) for s in pcm]
-
-        vag = encode_vag(scaled)
+        vag = _scaled_vag(src, index, gain)
         entries.append((len(payload), len(vag), loop, samplerate))
         payload.extend(vag)
 
