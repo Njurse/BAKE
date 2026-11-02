@@ -108,10 +108,11 @@ with no car stay `-1`, and the `.LCF` is rebuilt in the same slot order.
 `--no-bank` stops after the source package. Generated output lives under the
 gitignored `tools/car/out/`.
 
-## One-car base banks: `make_new_bank.py`
+## One-car banks: `make_new_bank.py`
 
-`make_new_bank.py` is the smaller scaffold for a mod that only wants one car in a
-bank, rather than a whole city's roster:
+`make_new_bank.py` is the one-car front end for the same export path
+`exportd2.py` uses. It decodes one donor car's three variants to OBJ and writes
+the declared bank shape (a full exporter bank's layout), at the requested slot:
 
 ```sh
 T=JERICHO/MODS/bake/tools/car
@@ -119,21 +120,16 @@ python $T/make_new_bank.py --city CHICAGO --model 1 --name FIREBIRD \
     --slot 1 --out JERICHO/MODS/betacars/banks/firebird
 ```
 
-It copies one donor car's three variants and only the texture sets that car
-names, then writes:
-
 ```
 firebird/
-  FIREBIRD.LEV / FIREBIRD.LCF   the loadable one-car bank
-  FIREBIRD.json                 manifest + bank report
-  cities.ini                    the [cities] line to paste into CONFIG
-  README.txt                    install/import instructions
-  raw/models/                   model1_clean/damaged/low.bin
-  raw/pages/                    PAGE_<set>.bin and .png for the car's sets
-  raw/pallet.bin                source palette lump
-  raw/palette.png / .json       resolved colours for those sets
-  raw/source.LCF                source cosmetics
-  raw/cosmetics/model1.cos      donor 236-byte record
+  bank.json                     the declaration (donor, order, cars)
+  FIREBIRD.LEV / FIREBIRD.LCF   installed copies of build/...
+  cars/<city>_model<slot>/       editable OBJ/MTL, page PNGs, sounds
+  donor/                        the donor manifest and untouched lumps
+  build/                        NAME.LEV/.LCF, NAME.json, NAME.report.json,
+                                pages/, models/
+  cities.ini / README.txt       install/import instructions
+  rebake.bat / playtest.bat ... the stage scripts
 ```
 
 Only the destination slot is populated; every other model slot is `-1`. The
@@ -141,11 +137,15 @@ default slot is **1** because carhacks treats model 0 as "no car". The
 `cities.ini` snippet uses `city_0` by default, which the engine exposes as city
 index **11**; use `--city-index N` for another bank row.
 
-Rebuild after editing the raw blocks with the normal exportd2 path:
+Rebuild after editing the car's OBJ or the declaration with the generated
+`rebake.bat`; it runs `carbank_bake` and refreshes the root and mirror copies:
 
 ```sh
-python $T/exportd2.py --rebuild-bank firebird/FIREBIRD.json -o firebird
+firebird/rebake.bat
 ```
+
+`bank.json` is input only: the bake writes `build/NAME.report.json`, never the
+declaration.
 
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.

@@ -637,6 +637,10 @@ class Bank(object):
         self.declared = "declare" in raw
         self.cars = {}
         self.order = []
+        # A donor-derived bank has no declaration to read this from, but
+        # build_manifest asks every bank: without the default the bake died
+        # with AttributeError before it could reproduce the bank unchanged.
+        self.palette_from_pages = False
 
         if not self.declared:
             return

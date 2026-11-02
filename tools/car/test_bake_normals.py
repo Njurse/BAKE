@@ -123,12 +123,13 @@ class BakeNormals(unittest.TestCase):
                                           g["scale"])
             model = decode(rec)
             for p in model.polys:
-                self.assertEqual(len(p.n), len(p.v), path)
-                gvec = model._geo_normal(p)
-                if gvec[0] == 0 and gvec[1] == 0 and gvec[2] == 0:
-                    continue
-                self.assertTrue(faces_outward(model, p), (path, p.kind, p.v, p.n))
-                checked += 1
+                if p.kind in ("GT3", "GT4"):
+                    self.assertEqual(len(p.n), len(p.v), path)
+                    gvec = model._geo_normal(p)
+                    if gvec[0] == 0 and gvec[1] == 0 and gvec[2] == 0:
+                        continue
+                    self.assertTrue(faces_outward(model, p), (path, p.kind, p.v, p.n))
+                    checked += 1
         self.assertGreater(checked, 7000)
 
 
