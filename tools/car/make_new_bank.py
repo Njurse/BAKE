@@ -142,12 +142,13 @@ def build_base(args):
             os.remove(stray)
 
     # --- install snippet and README --------------------------------------
-    game_data = os.path.abspath(args.game_data) if args.game_data else os.path.join(
-        _repo_root(), "src_rebuild", "bin", "Release_dev", "DRIVER2")
-    rel_lev = os.path.relpath(os.path.join(out, name + ".LEV"),
-                              game_data).replace("\\", "/")
-    rel_lcf = os.path.relpath(os.path.join(out, name + ".LCF"),
-                              game_data).replace("\\", "/")
+    # cities.ini paths are relative to the INSTALLED game's DRIVER2 folder, so
+    # they must name where the bank lives in an install - JERICHO/MODS/<mod>/
+    # banks/<dir>/ - not where this tree happens to sit next to a Release_dev
+    # build (a relpath from here broke every hand install).
+    rel_dir = _install_rel_dir(out, args.mod_id, name)
+    rel_lev = rel_dir + "\\" + name + ".LEV"
+    rel_lcf = rel_dir + "\\" + name + ".LCF"
     donor_city = entry.get("city") or os.path.splitext(
         os.path.basename(lev))[0].upper()
 
@@ -177,6 +178,8 @@ def build_base(args):
         "  build/             the bake output: NAME.LEV/.LCF, NAME.json,\n"
         "                     NAME.report.json, pages/, models/\n\n"
         "Install:\n"
+        "  Shipped as a mod (JERICHO/MODS/<id>/banks/<dir>/), carhacks 0.2.7+\n"
+        "  registers it on its own when the mod is enabled. By hand:\n"
         "  1. Put this folder where cities.ini can reach it.\n"
         "  2. Add the line from cities.ini under [cities] in\n"
         "     JERICHO/CONFIG/cities.ini.\n"
@@ -202,6 +205,20 @@ def build_base(args):
     return 0
 
 
+def _install_rel_dir(out, mod_id, name):
+    """The bank folder as a DRIVER2-relative install path,
+    ..\\JERICHO\\MODS\\<mod>\\banks\\<dir>.  When `out` already sits inside a
+    JERICHO/MODS tree that tail is used as-is; otherwise the bank is assumed to
+    ship as MODS/<mod-id or name lowercased>/banks/<out folder name>."""
+    parts = os.path.abspath(out).replace("\\", "/").split("/")
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i].upper() == "MODS" and parts[i - 1].upper() == "JERICHO" \
+                and i + 1 < len(parts):
+            return "..\\JERICHO\\MODS\\" + "\\".join(parts[i + 1:])
+    mod = mod_id or name.lower()
+    return "..\\JERICHO\\MODS\\%s\\banks\\%s" % (mod, parts[-1])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Scaffold a one-car Driver 2 car-data bank.",
@@ -219,6 +236,9 @@ def main(argv=None):
     ap.add_argument("--city-index", type=int, default=0,
                     help="cities.ini city_N index (default 0 -> engine city 11)")
     ap.add_argument("--game-data", help="DRIVER2 folder for resolving --city")
+    ap.add_argument("--mod-id", help="mod id the bank ships in, for the cities.ini "
+                    "paths (..\\JERICHO\\MODS\\<mod-id>\\banks\\<dir>; default: "
+                    "taken from --out when it is inside JERICHO/MODS, else NAME lowercased)")
     ap.add_argument("--force", action="store_true",
                     help="write into a non-empty output folder")
     args = ap.parse_args(argv)
