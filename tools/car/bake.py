@@ -1404,9 +1404,13 @@ def verify_beta_miami_cars(blob, items, baked, perms, specs):
         if model is None:
             problems.append("model %d: no non-empty clean record" % dst)
             continue
+        # Only textured records name a page. F3/F4 are emitted untextured
+        # (F3 code 0 carries no set byte, so it decodes as set 0) and the
+        # engine draws them flat in the B3 pass, so they are not unloadable.
         bad = [p for p in model.polys
-               if p.texture_set == 0 or p.texture_set == 255
-               or p.texture_set not in allowed]
+               if p.kind in lev1.TEXTURED and (
+                   p.texture_set == 0 or p.texture_set == 255
+               or p.texture_set not in allowed)]
         if bad:
             problems.append("model %d: %d car poly(s) name set 0/255 or a missing page"
                             % (dst, len(bad)))
