@@ -189,14 +189,28 @@ _VAG_CACHE = {}
 
 
 def _scaled_vag(src, index, gain):
-    key = (id(src["vag"]), index, gain)
+    addr, length = src["entries"][index][:2]
+    raw = bytes(src["vag"][addr:addr + length])
+    # Key on the bytes themselves: id() of a freed source can be reused by the
+    # next city's, which would hand that city another city's sample.
+    key = (raw, gain)
     vag = _VAG_CACHE.get(key)
     if vag is None:
-        addr, length = src["entries"][index][:2]
-        pcm = decode_vag(src["vag"][addr:addr + length])
+        pcm = decode_vag(raw)
         peak = max((abs(s) for s in pcm), default=0) or 1
         scale = gain * 32767.0 / peak
-        vag = encode_vag([max(-32768, min(32767, int(s * scale))) for s in pcm])
+        out = bytearray(encode_vag([max(-32768, min(32767, int(s * scale))) for s in pcm]))
+        # encode_vag writes flag 0 in every block. Carry the source's ADPCM
+        # flags (loop start 0x04, loop end 0x03, one-shot end 0x01) across
+        # block for block, as the pre-gain bake did by copying the bytes.
+        # Without them the engine note never loops and the SPU decoder runs
+        # off the sample's end (BETAMIAMI's bank, last in SPU RAM, overran
+        # decodeSound's buffer and crashed).
+        for b in range(min(len(raw), len(out)) // 16):
+            out[b * 16 + 1] = raw[b * 16 + 1]
+        if len(out) >= 16 and not any(out[b * 16 + 1] & 0x01 for b in range(len(out) // 16)):
+            out[len(out) - 16 + 1] |= 0x01
+        vag = bytes(out)
         _VAG_CACHE[key] = vag
     return vag
 
