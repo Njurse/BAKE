@@ -50,6 +50,95 @@ HORN8_MODELS = {
 SMALL_MODELS = {"FRISCO": (3,), "BETAMIAMI": (1,)}
 SIREN_SAMPLE_RETAIL = 4
 
+# Attenuation applied to imported samples so they sit in the same headroom
+# as retail D1 loops. 0.45 ≈ -7 dB. Raise toward 0.55–0.6 if too quiet,
+# drop toward 0.35 if still crushing.
+SAMPLE_GAIN = 0.45
+
+
+def decode_vag(data):
+    """PSX VAG/ADPCM -> list of signed 16-bit samples."""
+    coef = ((0, 0), (60, 0), (115, -52), (98, -55), (122, -60))
+    nframes = len(data) // 16
+    out = []
+    hist1 = hist2 = 0
+    for f in range(nframes):
+        off = f * 16
+        hdr = data[off]
+        pred = (hdr >> 4) & 0x0F
+        shift = hdr & 0x0F
+        f0, f1 = coef[pred] if pred < len(coef) else (0, 0)
+        for i in range(28):
+            b = data[off + 2 + (i >> 1)]
+            nib = (b >> 4) if (i & 1) else (b & 0x0F)
+            if nib >= 8:
+                nib -= 16
+            s = (nib << 12) >> shift
+            s += (hist1 * f0 + hist2 * f1 + 32) >> 6
+            if s > 32767:
+                s = 32767
+            elif s < -32768:
+                s = -32768
+            hist2 = hist1
+            hist1 = s
+            out.append(s)
+    return out
+
+
+def encode_vag(samples):
+    """Minimal VAG encoder. Predictor coefficients match decode_vag."""
+    coef = ((0, 0), (60, 0), (115, -52), (98, -55), (122, -60))
+    out = bytearray()
+    hist1 = hist2 = 0
+    i = 0
+    while i < len(samples):
+        block = samples[i:i + 28]
+        if len(block) < 28:
+            block += [0] * (28 - len(block))
+
+        best_err = float("inf")
+        best_pred = 0
+        best_shift = 0
+        best_nibbles = None
+
+        for pred in range(len(coef)):
+            f0, f1 = coef[pred]
+            for shift in range(0, 13):
+                err = 0
+                h1, h2 = hist1, hist2
+                nibbles = []
+                for s in block:
+                    pred_s = (h1 * f0 + h2 * f1 + 32) >> 6
+                    diff = s - pred_s
+                    q = diff >> (12 - shift) if shift < 12 else diff >> (shift - 12)
+                    q = max(-8, min(7, q))
+                    nibbles.append(q & 0xF)
+                    recon = (q << 12) >> shift
+                    recon += pred_s
+                    recon = max(-32768, min(32767, recon))
+                    h2, h1 = h1, recon
+                    err += abs(s - recon)
+                if err < best_err:
+                    best_err = err
+                    best_pred = pred
+                    best_shift = shift
+                    best_nibbles = nibbles
+
+        out.append((best_pred << 4) | best_shift)
+        out.append(0)
+        for n in range(0, 28, 2):
+            out.append((best_nibbles[n] & 0xF) | ((best_nibbles[n + 1] & 0xF) << 4))
+
+        f0, f1 = coef[best_pred]
+        for q in best_nibbles:
+            recon = ((q if q < 8 else q - 16) << 12) >> best_shift
+            recon += (hist1 * f0 + hist2 * f1 + 32) >> 6
+            recon = max(-32768, min(32767, recon))
+            hist2, hist1 = hist1, recon
+
+        i += 28
+    return bytes(out)
+
 
 def read_d1_voices(voices_path):
     blob = open(voices_path, "rb").read()
@@ -98,13 +187,22 @@ def build_bank(voices, engine_index, horn_index, idle_index=None,
     payload = bytearray()
     entries = []
 
-    def append(index, src=None, rate=None):
+    def append(index, src=None, rate=None, gain=SAMPLE_GAIN):
         src = voices if src is None else src
         addr, length, loop, samplerate = src["entries"][index]
         if rate is not None:
             samplerate = rate
-        entries.append((len(payload), length, loop, samplerate))
-        payload.extend(src["vag"][addr:addr + length])
+
+        raw = src["vag"][addr:addr + length]
+        pcm = decode_vag(raw)
+
+        peak = max(abs(s) for s in pcm) or 1
+        scale = gain * 32767.0 / peak
+        scaled = [max(-32768, min(32767, int(s * scale))) for s in pcm]
+
+        vag = encode_vag(scaled)
+        entries.append((len(payload), len(vag), loop, samplerate))
+        payload.extend(vag)
 
     append(engine_index, rate=engine_rate)
     if idle_index is None:
@@ -161,9 +259,6 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
     horn8 = set(HORN8_MODELS.get(city, ()))
     small = set(SMALL_MODELS.get(city, ()))
     if voices.get("kind") == "sbk":
-        # Every imported model gets its OWN 3-sample bank: engine, idle, horn.
-        # The engine loads these per model, so the third sample is the actual
-        # per-slot horn (or the cop siren), not one city-wide sample.
         if horn_voices is None:
             raise SystemExit("the beta SOUND.SBK needs a retail horn bank")
         for model in sorted(models):
@@ -173,7 +268,7 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
             idle_rate = voices["entries"][idle][3] * BETA_IDLE_PITCH // 100
             if model in police:
                 horn = SIREN_SAMPLE_RETAIL
-                horn_src = horn_voices   # the retail siren, like every other D1 cop
+                horn_src = horn_voices
             else:
                 horn = 8 if model in horn8 else (9 if model in small else 7)
                 horn_src = horn_voices
@@ -183,9 +278,6 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
                                idle_rate=idle_rate)
             rows.append((model, engine, horn, idle))
     else:
-        # Keep the city-wide engine/idle pair the old generic composer used:
-        # engine = the first model's engine loop, idle = the next model's engine
-        # loop (a different loop length). Only the horn is per model now.
         engine = D1_ENGINE_SAMPLE[0]
         idle = D1_ENGINE_SAMPLE[1]
         for model in sorted(models):
@@ -248,9 +340,6 @@ def main(argv=None):
 
     voices_path = args.voices
     if voices_path is None:
-        # <install>/JERICHO/MODS/carhacks/D1CARS/<CITY>.LEV ->
-        # <install>/DRIVER/SOUND/VOICES.BLK. The second spelling is the old
-        # DRIVER/D1CARS location, still accepted for a legacy bake.
         base = os.path.dirname(os.path.abspath(args.lev))
         voices_path = os.path.join(base, "..", "..", "..", "..",
                                    "DRIVER", "SOUND", "VOICES.BLK")
@@ -265,8 +354,6 @@ def main(argv=None):
     if voices.get("kind") == "sbk":
         horns_path = args.horns
         if horns_path is None:
-            # Same layout as --voices: the retail horns come from the player's
-            # own Driver 1 disc, not from beside the baked blob.
             base = os.path.dirname(os.path.abspath(args.lev))
             horns_path = os.path.join(base, "..", "..", "..", "..",
                                       "DRIVER", "SOUND", "VOICES.BLK")

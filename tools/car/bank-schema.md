@@ -7,10 +7,12 @@ pair, installed by the bake), the author's sources, and `bank.json`.
 called), the optional layout keys below, and `declare` (what the author wants:
 sources, layout, sounds). The bake reads and validates it and never writes it.
 What the bank turned out to be - size, included sets, pages, palette records,
-checks, warnings - goes to `<CITY>.report.json` beside the built manifest.
+checks, warnings - goes to `<NAME>.report.json` (the bank's name, e.g.
+`<NAME>.report.json`) beside the built manifest.
 (Older banks still carry that computed half at the top level of `bank.json`;
 it is ignored and can be deleted.) A bank with no `declare` block is a
-donor-derived bank (what `make_new_bank.py` builds) and is used as it stands.
+donor-derived bank: its manifest is used as it stands, which is how the old
+flat/base banks keep rebaking unchanged.
 
 ## Folder layout
 
@@ -26,8 +28,8 @@ from outputs:
 | --- | --- | --- |
 | bank folder | the author (+ the installed LEV/LCF) | `bank.json`, `FIREBIRD.LEV/.LCF`, `cities.ini`, scripts, README |
 | `art/`, `sounds/` (any path the declare names) | the author | OBJ/MTL, page and wheel PNGs, the three WAVs |
-| `donor_dir` | `make_new_bank.py`, once | `<CITY>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<CITY>.donor.LEV` |
-| `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin` (palette_from_pages), `textureinfo.bin` (when page sizes change), the built `<CITY>.json`, `<CITY>.report.json`, and the LEV/LCF when `-o` is not given |
+| `donor_dir` | the exporter (`exportd2.py`, or `make_new_bank.py` for one car), once | `<NAME>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<NAME>.donor.LEV` |
+| `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin` (palette_from_pages), `textureinfo.bin` (when page sizes change), the built `<NAME>.json`, `<NAME>.report.json`, and the LEV/LCF when `-o` is not given |
 
 The bake starts from the built manifest when `build_dir` has one (it remembers
 which pages are current) and from the donor manifest otherwise, so deleting
@@ -35,8 +37,13 @@ which pages are current) and from the donor manifest otherwise, so deleting
 comes from the donor's `source.LCF`.
 
 Leave either key out and it is the bank folder itself: the flat layout every
-bank used before, which still bakes exactly as it did (except that `bank.json`
-is no longer rewritten).
+bank used before. A flat bank with a `declare` block bakes the same way; one
+without a declaration is reproduced from its manifest as it stands, and
+`bank.json` is never rewritten either way.
+
+`make_new_bank.py` is a one-car wrapper over `exportd2`'s export: it writes this
+same declared shape (`bank.json` with `declare`, `cars/<id>/`, `donor/`,
+`build/`) for a single donor model, at the requested destination slot.
 
 ## Schema
 

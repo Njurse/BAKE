@@ -1206,32 +1206,36 @@ def verify(blob):
             return "model %d ships no point_normals table" % m, {}
         table = model.normals
         for p in model.polys:
-            # A baked poly is always GT, so it MUST carry one normal index per
-            # vertex and every index must resolve. The old check skipped an empty
-            # list, which is exactly how the index-0 fallback hid: an empty list
-            # decoded to nothing and the loop moved on.
-            if not p.n or len(p.n) != len(p.v):
-                return ("model %d: a %s poly carries %d normal index(es) for %d vertices"
-                        % (m, p.kind, len(p.n), len(p.v))), {}
-            if any(i >= len(table) for i in p.n):
-                return "model %d: a GT normal index is outside the table" % m, {}
-            g = model._geo_normal(p)
-            if g[0] == 0 and g[1] == 0 and g[2] == 0:
-                continue                    # zero-area poly: no face normal to test
-            ngt += 1
-            ns = model.poly_normals(p)
-            tx = sum(x[0] for x in ns) / len(ns)
-            ty = sum(x[1] for x in ns) / len(ns)
-            tz = sum(x[2] for x in ns) / len(ns)
-            tl = math.sqrt(tx * tx + ty * ty + tz * tz) or 1.0
-            if (tx * g[0] + ty * g[1] + tz * g[2]) / tl > 0:
-                same += 1
+            # Only GT3/GT4 carry per-vertex normal indices. FT3/FT4/F3/F4
+            # are written without them (cars.c:2743 sorts codes 0/20/22 into
+            # its own F3/FT3/GT3 lists). A non-GT poly must carry none; a GT
+            # poly must carry one per vertex, inside the table, facing the
+            # geometry.
+            is_gt = p.kind in ("GT3", "GT4")
+            if is_gt:
+                if not p.n or len(p.n) != len(p.v):
+                    return ("model %d: a %s poly carries %d normal index(es) for %d vertices"
+                            % (m, p.kind, len(p.n), len(p.v))), {}
+                if any(i >= len(table) for i in p.n):
+                    return "model %d: a GT normal index is outside the table" % m, {}
+                g = model._geo_normal(p)
+                if g[0] == 0 and g[1] == 0 and g[2] == 0:
+                    continue                    # zero-area poly: no face normal to test
+                ngt += 1
+                ns = model.poly_normals(p)
+                tx = sum(x[0] for x in ns) / len(ns)
+                ty = sum(x[1] for x in ns) / len(ns)
+                tz = sum(x[2] for x in ns) / len(ns)
+                tl = math.sqrt(tx * tx + ty * ty + tz * tz) or 1.0
+                if (tx * g[0] + ty * g[1] + tz * g[2]) / tl > 0:
+                    same += 1
+                else:
+                    return ("model %d: a %s poly's normals face into its geometry "
+                            "(indices %s)" % (m, p.kind, p.n)), {}
             else:
-                # The black-flank defect: one side's polys lit from inside the
-                # car. build_model_record's flip pass exists to make this
-                # unreachable, so a blob that trips it must fail loudly.
-                return ("model %d: a %s poly's normals face into its geometry "
-                        "(indices %s)" % (m, p.kind, p.n)), {}
+                if p.n:
+                    return ("model %d: a %s poly carries %d normal index(es); "
+                            "non-GT polys must carry none" % (m, p.kind, len(p.n))), {}
     if not n:
         return "no models decoded", {}
 

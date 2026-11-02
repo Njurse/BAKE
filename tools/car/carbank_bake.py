@@ -303,6 +303,17 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
                             page["png"] if os.path.isabs(str(page["png"]))
                             else os.path.join(manifest_base, str(page["png"]))))
             for page in manifest["pages"]]
+
+    if not bank.declared:
+        # A donor-derived bank (make_new_bank's original flat/base shape) has no
+        # declaration to derive models, order or pages from: its manifest IS the
+        # description, so reproduce it as it stands. The declaration filters
+        # below run over bank.cars, which is empty here, and used to wipe every
+        # page and model the manifest named.
+        warnings = []
+        _sync_page_sizes(manifest, gen_dir, out_dir)
+        return manifest, warnings
+
     # Every DECLARED page has to exist in the manifest: the assembler carves a
     # page only when something names it, so a declared-but-unlisted set is baked
     # to disk and pruned straight back out ("1 sets"). The wheel art lives on

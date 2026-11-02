@@ -49,6 +49,15 @@ MANIFEST = next((p for p in (os.path.join(BANK, "build", "FIREBIRD.json"),
                              os.path.join(BANK, "FIREBIRD.json"))
                  if os.path.isfile(p)), os.path.join(BANK, "FIREBIRD.json"))
 
+# A bank that is present in the dev tree even when the Firebird submodule is not.
+HALL = os.path.abspath(os.path.join(HERE, "..", "..", "..",
+                                    "hallgarthcars", "banks", "hallchcg"))
+HALL_LEV = os.path.join(HALL, "HALLCHCG.LEV")
+HALL_MANIFEST = next((p for p in (os.path.join(HALL, "build", "HALLCHCG.json"),
+                                  os.path.join(HALL, "HALLCHCG.json"))
+                      if os.path.isfile(p)), "")
+HALL_BANK_JSON = os.path.join(HALL, "bank.json")
+
 
 def _sha256(path):
     h = hashlib.sha256()
@@ -333,6 +342,51 @@ class ExportImportTests(unittest.TestCase):
         self.assertLessEqual(sum(extra.values()), untextured,
                              "%d polys landed on grey but only %d had no page"
                              % (sum(extra.values()), untextured))
+
+
+class BankJsonIsInputOnlyTests(unittest.TestCase):
+    """bank.json is the author's file; a bake must never overwrite it.
+
+    The failure this pins: `exportd2 --rebuild-bank <manifest> -o <bank folder>`
+    used to write the computed report to bank.json, replacing the declaration
+    with numbers. A rebuild must leave that byte-identical and put its report
+    in <NAME>.report.json instead.
+    """
+
+    def test_rebuilding_into_the_bank_folder_leaves_bank_json_alone(self):
+        if not (os.path.isfile(HALL_LEV) and HALL_MANIFEST
+                and os.path.isfile(HALL_BANK_JSON)):
+            self.skipTest("no hallchcg bank on this machine")
+
+        with open(HALL_BANK_JSON, "r", encoding="utf-8") as f:
+            try:
+                raw = json.load(f)
+            except ValueError:
+                raw = {}
+
+        if "declare" not in raw:
+            self.skipTest("hallchcg is still the old flat/report bank")
+
+        tmp = tempfile.mkdtemp(prefix="bankjson-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = os.path.join(tmp, "hallchcg")
+        shutil.copytree(HALL, root)
+
+        bank_json = os.path.join(root, "bank.json")
+        before = _sha256(bank_json)
+        manifest = os.path.join(root, os.path.relpath(HALL_MANIFEST, HALL))
+        cmd = [sys.executable, os.path.join(HERE, "exportd2.py"),
+               "--rebuild-bank", manifest, "-o", root]
+
+        done = subprocess.run(cmd, capture_output=True, text=True)
+
+        self.assertEqual(done.returncode, 0,
+                         "rebuild failed:\n%s\n%s" % (done.stdout, done.stderr))
+        self.assertEqual(_sha256(bank_json), before,
+                         "the rebuild rewrote the declaration in bank.json")
+        self.assertTrue(os.path.isfile(os.path.join(root,
+                                                    "HALLCHCG.report.json")),
+                        "the rebuild wrote no HALLCHCG.report.json")
 
 
 if __name__ == "__main__":

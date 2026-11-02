@@ -868,6 +868,19 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
                 if paint and paint["paints"]:
                     tex[str(s)]["paints"] = paint["paints"]
                     tex[str(s)]["protect"] = paint["protect"]
+        if extras and extras["wheels"] and not decl_cars:
+            entry["wheels"] = extras["wheels"]   # first car owns the bank's set
+            # A wheel's page is a page the bank carries, so it must be a
+            # declared texture too: the bake only bakes pages the declaration
+            # names, and a wheel-only set (one no body poly samples) otherwise
+            # stays listed in LUMP_TEXTUREINFO with no PAGE_<set>.bin in build/.
+            for wheel in entry["wheels"].values():
+                if not isinstance(wheel, dict):
+                    continue
+                setid = wheel.get("set")
+                if setid is None or setid not in included_sets:
+                    continue
+                tex.setdefault(str(setid), {"png": extras["page_rel"][setid]})
         if tex:
             entry["textures"] = tex
         if extras and extras["sounds"].get(c["id"]):
@@ -880,8 +893,6 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
                 entry["sounds"].pop("horn", None)   # cop: third sample = siren
                 entry["sounds"]["siren"] = {"wav": sr["wav"], "rate": sr["rate"],
                                             "normalise": False, "loop": True}
-        if extras and extras["wheels"] and not decl_cars:
-            entry["wheels"] = extras["wheels"]   # first car owns the bank's set
         entry = json.loads(json.dumps(entry))    # no shared dicts between cars
         # the car's whole declaration lives in its own folder, next to its
         # handling numbers; bank.json only maps slot -> car file
@@ -934,7 +945,7 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
 
 
 def export_one(lev_path, out_root, models_filter, variants, make_bank,
-               dir_name=None, bank_name=None):
+               dir_name=None, bank_name=None, slot_override=None):
     with open(lev_path, "rb") as f:
         blob = f.read()
     kind = level_game(blob)
@@ -945,6 +956,18 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
     if kind != "d2":
         raise SystemExit("%s does not look like a Driver 2 level with "
                          "LUMP_CAR_MODELS" % lev_path)
+
+    # A one-car wrapper (make_new_bank) may put the donor car in a DIFFERENT
+    # resident slot than the donor model. The donor model still decides the
+    # cosmetics, sounds and raw blocks; only the destination changes.
+    dest_slot = None
+    if slot_override is not None:
+        if models_filter is None or len(models_filter) != 1:
+            raise SystemExit("slot_override needs exactly one --models entry")
+        dest_slot = int(slot_override)
+        if not 0 <= dest_slot < MAX_CAR_MODELS:
+            raise SystemExit("slot %d is outside 0..%d"
+                             % (dest_slot, MAX_CAR_MODELS - 1))
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
     # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
@@ -991,9 +1014,11 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         c, d, l = table["offsets"][m]
         if c < 0:
             continue
-        car_id = "%s_model%d" % (city, m)
+        car_id = "%s_model%d" % (city, dest_slot if dest_slot is not None else m)
         car = {"id": car_id, "model": m, "variants": {}, "sets": [],
                "cosmetics": m}
+        if dest_slot is not None:
+            car["slot"] = dest_slot
         variants_decoded = decode_variants(blob, table, m)
         blocks = model_blocks(blob, table, m)
         for variant in variants:
@@ -1179,12 +1204,14 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                 textures_json)
 
     # --- master manifest --------------------------------------------------
-    bank_order = [{"slot": c["model"], "car": c["id"]} for c in cars]
+    bank_order = [{"slot": c.get("slot", c["model"]), "car": c["id"]}
+                  for c in cars]
     manifest = {
         "version": VERSION,
         "tool": TOOL,
         "game": GAME,
         "city": city,
+        "bank_name": name,
         "cell_size": scalemodels.D2_CELL_SIZE,
         "source": source,
         "models": cars,
@@ -2042,7 +2069,12 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
                                    sound_specs)
-    _write_json(os.path.join(out_dir, "bank.json"), report)
+    # bank.json is the AUTHOR'S input (the declaration) and the bake must never
+    # write it: when out_dir is the bank folder itself, the old name overwrote
+    # a hand-written declaration with this computed report. Everything the bake
+    # computed goes beside the built manifest under the city's own name.
+    _write_json(os.path.join(out_dir, "%s.report.json"
+                             % (manifest.get("bank_name") or city)), report)
     for w in warnings:
         print("  warning: %s" % w)
     print("  bank ok: %s (%d bytes, %d cars, %d sets)"
@@ -2397,7 +2429,9 @@ def rebuild_cli(index_or_manifest, out_dir, city, order_path):
         _write_json(manifest_path, manifest)
     if not report["checks"].get("ok"):
         raise SystemExit("bank verification failed; see %s"
-                         % os.path.join(out_dir, "bank.json"))
+                         % os.path.join(out_dir, "%s.report.json"
+                                        % (manifest.get("bank_name")
+                                           or manifest.get("city", "bank"))))
     return 0
 
 
@@ -2517,8 +2551,8 @@ def main(argv=None):
     ap.add_argument("--city", help="city to use when rebuilding from index.json")
     ap.add_argument("--order", metavar="JSON",
                     help="bank_order override (list or {\"bank_order\": [...]})")
-    ap.add_argument("--name", help="bank name, e.g. NICE: folder <out>/nice, "
-                    "build/NICE.LEV/.LCF, cities.ini row (default: the city)")
+    ap.add_argument("--name", help="bank name, e.g. MYCAR: folder <out>/mycar, "
+                    "build/MYCAR.LEV/.LCF, cities.ini row (default: the city)")
     ap.add_argument("--bank-per-car", action="store_true",
                     help="build a separate bank per car (default: ONE city "
                          "bank, each car's assets in cars/<car>/)")
