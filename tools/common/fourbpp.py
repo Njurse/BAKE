@@ -12,8 +12,10 @@ implementation of that conversion:
 
 The two copies agreed byte for byte -- the same `>> 3` scaling in both
 directions -- which is exactly why they were merged rather than one of them
-being kept. Nothing here is allowed to change the bytes: the moment a conversion
-rounds differently, every existing bank and pedestrian page shifts colour.
+being kept. `rgb555`/`clut_rgb` must not change bytes: the moment they round differently,
+every existing bank and pedestrian page shifts colour. Re-quantising a page
+(`paletteize`) snaps with `snap555` (round-to-nearest) first, then hands
+`rgb555` values that are already exact.
 
 PSX RGB555 layout: R in bits 0-4, G in 5-9, B in 10-14, bit 15 = STP
 ("semi-transparent", clear for opaque). Reading back with `<< 3` loses the low
@@ -177,8 +179,43 @@ def reindex_to_clut(pixels: Sequence[Sequence[int]],
     return bytes(nearest_clut_index(tuple(p), clut) for p in pixels)
 
 
-def paletteize(pixels: Sequence[Sequence[int]], width: int, height: int):
-    """RGB texels -> (16 colours, one index byte per texel).
+def snap555(rgb8: Sequence[int]) -> tuple[int, int, int]:
+    """8-bit (r, g, b) -> the 8-bit colour the engine will actually show.
+
+    Rounds each channel to the NEAREST 5-bit step (not `>> 3` truncation) and
+    returns it as `v5 << 3`, so `rgb555` of the result is exact. Only a source
+    that is truly (0, 0, 0) may land on black: black is 0x0000, the engine's
+    transparent (STP) marker, so a near-black texel is bumped to the darkest
+    opaque shade, (8, 8, 8) -> 0x0421.
+    """
+    r, g, b = int(rgb8[0]), int(rgb8[1]), int(rgb8[2])
+    out = tuple(min(31, (c + 4) >> 3) << 3 for c in (r, g, b))
+
+    if out == (0, 0, 0) and (r, g, b) != (0, 0, 0):
+        return (8, 8, 8)
+
+    return out
+
+
+def _pad(colors: list) -> list:
+    """Fill a short palette to 16 with copies of a real entry, never black.
+
+    Unused slots are never indexed, but a padding of pure black writes 0x0000
+    entries - transparent - that a stray UV can sample as holes.
+    """
+    colors = list(colors)
+
+    if not colors:
+        return [(8, 8, 8)] * CLUT_ROW_ENTRIES
+
+    filler = next((c for c in colors if c != (0, 0, 0)), (8, 8, 8))
+    return colors + [filler] * (CLUT_ROW_ENTRIES - len(colors))
+
+
+def paletteize_legacy(pixels: Sequence[Sequence[int]], width: int, height: int):
+    """Pre-snap555 paletteize, kept byte-identical for the pedestrian bake.
+
+    RGB texels -> (16 colours, one index byte per texel).
 
     Used when a crop brings colours the existing palette cannot express. Sixteen
     or fewer distinct colours are taken verbatim (no quantiser can do better);
@@ -224,6 +261,78 @@ def paletteize(pixels: Sequence[Sequence[int]], width: int, height: int):
 
             if colors[patch[i]] == (0, 0, 0):
                 fixed[i] = nearest_clut_index(tuple(p), colors)
+
+        patch = bytes(fixed)
+
+    return colors, patch
+
+
+def paletteize(pixels: Sequence[Sequence[int]], width: int, height: int):
+    """RGB texels -> (16 colours, one index byte per texel).
+
+    Every texel is first snapped to what RGB555 can show (`snap555`), so the
+    distinct-colour count is the count the engine sees: a 256-colour PNG that
+    really uses 16 shades takes them verbatim instead of going through the
+    quantiser. Beyond 16, Pillow's median cut picks the palette (on snapped
+    colours) and its entries are snapped again. Black stays reserved for texels
+    that were truly black in the source.
+    """
+    if len(pixels) != width * height:
+        raise ValueError("crop has %d pixels, expected %d"
+                         % (len(pixels), width * height))
+
+    snapped = [snap555(p) for p in pixels]
+    exact = list(dict.fromkeys(snapped))
+
+    if len(exact) <= CLUT_ROW_ENTRIES:
+        index = {c: i for i, c in enumerate(exact)}
+        return _pad(exact), bytes(index[c] for c in snapped)
+
+    from PIL import Image
+
+    data = bytes(c for p in snapped for c in p)
+    img = Image.frombytes("RGB", (width, height), data)
+
+    try:
+        q = img.quantize(colors=CLUT_ROW_ENTRIES,
+                         method=Image.Quantize.MEDIANCUT,
+                         dither=Image.Dither.NONE)
+    except AttributeError:
+        q = img.quantize(colors=CLUT_ROW_ENTRIES)
+
+    pal = q.getpalette()[:48]
+    raw = [(pal[i], pal[i + 1], pal[i + 2]) for i in range(0, len(pal) - 2, 3)]
+    patch = bytes(q.getdata())
+    used = set(patch)
+    # an entry is black only if a truly black texel is what it stands for
+    has_black = any(c == (0, 0, 0) for c in snapped)
+    colors = []
+
+    for i, c in enumerate(raw):
+        s5 = snap555(c)
+
+        if tuple(c) == (0, 0, 0) or (s5 == (8, 8, 8) and max(c) < 4):
+            s5 = (0, 0, 0) if has_black else (8, 8, 8)
+
+        colors.append(s5)
+
+    colors = colors[:CLUT_ROW_ENTRIES]
+    # entries the quantiser never used are padding: never black
+    filler = next((c for k, c in enumerate(colors) if k in used and c != (0, 0, 0)),
+                  (8, 8, 8))
+    colors = [c if (k in used or c != (0, 0, 0)) else filler
+              for k, c in enumerate(colors)]
+    colors = _pad(colors)
+
+    if any(c == (0, 0, 0) for c in colors):
+        fixed = bytearray(patch)
+
+        for i, p in enumerate(snapped):
+            if p == (0, 0, 0):
+                continue
+
+            if colors[patch[i]] == (0, 0, 0):
+                fixed[i] = nearest_clut_index(p, colors)
 
         patch = bytes(fixed)
 

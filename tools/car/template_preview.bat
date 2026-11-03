@@ -11,7 +11,7 @@ rem ============================================================================
 setlocal EnableDelayedExpansion
 set "BANK=%~dp0"
 set "BANK=%BANK:~0,-1%"
-set "CAR=%BANK%\@TOOLS@"
+set "CAR=@TOOLS@"
 if not exist "%CAR%\preview_car.py" (echo FAILED: no preview_car.py at %CAR% & exit /b 1)
 :pick
 set /a N=0

@@ -11,7 +11,7 @@ rem ============================================================================
 setlocal EnableDelayedExpansion
 set "BANK=%~dp0"
 set "BANK=%BANK:~0,-1%"
-set "CAR=%BANK%\@TOOLS@"
+set "CAR=@TOOLS@"
 set "EXEDIR=@EXEDIR@"
 set "MIRROR=@MIRROR@"
 if not exist "%EXEDIR%\JERICHO_dev.exe" (echo FAILED: no game at %EXEDIR% & exit /b 1)

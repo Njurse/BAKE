@@ -111,7 +111,7 @@ gitignored `tools/car/out/`.
 ## One-car banks: `make_new_bank.py`
 
 `make_new_bank.py` is the one-car front end for the same export path
-`exportd2.py` uses. It decodes one donor car's three variants to OBJ and writes
+`exportd2.py` uses. It decodes one source car's three variants to OBJ and writes
 the declared bank shape (a full exporter bank's layout), at the requested slot:
 
 ```sh
@@ -122,12 +122,11 @@ python $T/make_new_bank.py --city CHICAGO --model 1 --name FIREBIRD \
 
 ```
 firebird/
-  bank.json                     the declaration (donor, order, cars)
+  bank.json                     the declaration (order, cars)
   FIREBIRD.LEV / FIREBIRD.LCF   installed copies of build/...
   cars/<city>_model<slot>/       editable OBJ/MTL, page PNGs, sounds
-  donor/                        the donor manifest and untouched lumps
-  build/                        NAME.LEV/.LCF, NAME.json, NAME.report.json,
-                                pages/, models/
+  build/                        bake output only: NAME.LEV/.LCF, NAME.json,
+                                NAME.report.json, pages/, models/, *.bin lumps
   cities.ini / README.txt       install/import instructions
   rebake.bat / playtest.bat ... the stage scripts
 ```

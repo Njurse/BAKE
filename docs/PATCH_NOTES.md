@@ -1,5 +1,25 @@
 # BAKE patch notes
 
+## Unreleased
+
+### Car banks are generated: no `donor/` (`carbank_bake.py`, `exportd2.py`, `make_new_bank.py`)
+
+- A declared bank bakes from `bank.json` + `cars/` (+ `shared/`) alone. The
+  working manifest starts empty; no donor or previous build manifest is read.
+- `build/` now always gets generated `textureinfo.bin` (from the baked page
+  sizes, wheel islands named WHLCLEAN/WHLBOTH), `texturenames.bin`,
+  `modelnames.bin` (car id per slot) and `pallet.bin` (from the pages).
+- `palette_from_pages` defaults to on for declared banks; `false` is refused.
+- Poly tints are no longer read back from a donor LEV (that lookup never
+  matched an exported bank's file names anyway).
+- `bank_layout()` returns `(bank_dir, build_dir)`; `donor_dir` and
+  `declare.donor.lev` are ignored. `declare.donor` is a label.
+- Export / `make_new_bank` decode into a temp scratch folder and leave no
+  `donor/` or `*.export.json` in the bank; `--rebuild-bank` on a `bank.json`
+  bakes it generatively.
+- `preview_car.py` takes wheels from `handling.json` only (else bbox guess).
+- New `test_generated_lumps.py`.
+
 ## 0.12 (JERICHO v0.12.0)
 
 ### Car bank tools: `make_*` naming + wizard (`tools/car/`)

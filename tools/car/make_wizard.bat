@@ -2,7 +2,7 @@
 rem ============================================================================
 rem  make_wizard.bat  -  set up a new car bank, or manage an existing one
 rem
-rem  New bank: make_new_bank.py scaffolds a one-car bank from a donor D2
+rem  New bank: make_new_bank.py scaffolds a one-car bank from a source D2
 rem  car and writes its rebake / playtest / preview / wizard scripts.
 rem  Manage: opens that bank's wizard.bat (export, import, bake, preview by slot,
 rem  playtest, register city, refresh scripts).
@@ -13,7 +13,7 @@ set "CAR=%CAR:~0,-1%"
 :menu
 echo.
 echo  ==== BAKE car bank wizard ====
-echo    1  New bank from a donor car        (make_new_bank.py)
+echo    1  New bank from a Driver 2 car     (make_new_bank.py)
 echo    2  Manage an existing bank          (its wizard.bat)
 echo    3  Export a Driver 2 city's cars    (exportd2.py)
 echo    0  Quit
@@ -27,8 +27,8 @@ exit /b 0
 set "NAME=" & set "CITY=CHICAGO" & set "MODEL=1" & set "SLOT=1" & set "OUT="
 set /p "NAME=  bank name (e.g. FIREBIRD): "
 if "!NAME!"=="" goto menu
-set /p "CITY=  donor city CHICAGO/HAVANA/VEGAS/RIO [CHICAGO]: "
-set /p "MODEL=  donor car model [1]: "
+set /p "CITY=  source city CHICAGO/HAVANA/VEGAS/RIO [CHICAGO]: "
+set /p "MODEL=  source car model [1]: "
 set /p "SLOT=  destination slot [1]: "
 set /p "OUT=  bank folder (Enter = tools\car\out\basebank\!NAME!): "
 set "OUTARG="

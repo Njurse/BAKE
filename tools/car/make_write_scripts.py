@@ -18,23 +18,52 @@ SIDECARS = {"rebake.bat": TEMPLATE,
 CITY_KEYS = {"CHICAGO": "0", "HAVANA": "1", "VEGAS": "2", "RIO": "3"}
 
 
+def _from_bank(path, bank):
+    """%BANK%-relative when on the same drive, else absolute - never both."""
+    try:
+        return "%BANK%\\" + os.path.relpath(path, bank)
+    except ValueError:
+        return os.path.abspath(path)
+
+
+def _game_root(start):
+    root = os.path.abspath(start)
+    while os.path.dirname(root) != root:
+        if os.path.isdir(os.path.join(root, "src_rebuild")):
+            return root
+        root = os.path.dirname(root)
+    return None
+
+
+def _bank_name(bank):
+    """Bank name from bank.json (lev, then city) - never the donor city."""
+    try:
+        raw = json.load(open(os.path.join(bank, "bank.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return os.path.splitext(os.path.basename(raw.get("lev") or ""))[0] \
+        or raw.get("city")
+
+
 def write(bank_dir, name, donor_city="CHICAGO", mode="plain", args="",
           preview="--flip-y", force=False):
     bank = os.path.abspath(bank_dir)
-    try:
-        tools = os.path.relpath(HERE, bank)
-    except ValueError:
-        tools = HERE
-    root, mirror, exedir = bank, "", ""
-    while os.path.dirname(root) != root:
-        if os.path.isdir(os.path.join(root, "src_rebuild")):
-            # relative to %BANK%, so the bat stays valid in any checkout
-            up = os.path.relpath(root, bank)
-            exedir = "%BANK%\\" + os.path.join(up, "src_rebuild", "bin",
-                                                "Release_dev")
-            mirror = exedir + "\\" + os.path.relpath(bank, root)
-            break
-        root = os.path.dirname(root)
+    name = _bank_name(bank) or name
+    tools = _from_bank(HERE, bank)          # full value for set "CAR=..."
+    mirror, exedir = "", ""
+    # game tree = the REDRIVER2 checkout holding src_rebuild; look above the
+    # bank first, then above the bake tools (a bank may live outside the tree)
+    root = _game_root(bank) or _game_root(HERE)
+    if root:
+        exedir = _from_bank(os.path.join(root, "src_rebuild", "bin",
+                                         "Release_dev"), bank)
+        try:
+            rel = os.path.relpath(bank, root)
+        except ValueError:
+            rel = ".."
+        if rel.startswith(".."):            # bank outside the tree
+            rel = os.path.join("JERICHO", "MODS", os.path.basename(bank))
+        mirror = exedir + "\\" + rel
     subs = {"@NAME@": name.upper(), "@TOOLS@": tools, "@MIRROR@": mirror,
                  "@EXEDIR@": exedir, "@MODE@": mode, "@ARGS@": args,
                  "@PREVIEW@": preview,

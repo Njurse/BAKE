@@ -327,31 +327,12 @@ def main():
     def axis_vec(i, val):
         v = [0.0, 0.0, 0.0]; v[i] = val; return v
 
-    # wheel layout: donor cosmetics wheelDisp/wheelSize (engine units, Y-down,
-    # = OBJ * bake --scale), else a guess from the bounding box
+    # wheel layout: the car's own handling.json wheelDisp/wheelSize (engine
+    # units, Y-down, = OBJ * bake --scale), else a guess from the bounding box
     disp, wsize, cog = None, None, None
-    hd = car.get("handling") or {}            # the car's own handling.json wins
+    hd = car.get("handling") or {}
     if hd.get("wheelDisp") and hd.get("wheelSize"):
         disp, wsize, cog = hd["wheelDisp"], hd["wheelSize"], hd.get("cog")
-    try:
-        if disp:
-            raise StopIteration
-        dd = os.path.join(bank_root, bank.get("donor_dir") or ".")
-        model = (bank.get("declare", {}).get("donor") or {}).get("model", 1)
-        for fn in ("BETACARS.cosmetics.json", "cosmetics.json"):
-            fp = os.path.join(dd, fn)
-            if not os.path.exists(fp):
-                continue
-            for r in json.load(open(fp, encoding="utf-8")).get("records", []):
-                f = r.get("fields", {})
-                if r.get("model") == model and "wheelDisp" in f:
-                    disp, wsize, cog = f["wheelDisp"], f["wheelSize"], f.get("cog"); break
-            if disp:
-                break
-    except StopIteration:
-        pass
-    except Exception as e:
-        print("preview_car: no cosmetics wheels (%s)" % e)
     S = a.bake_scale or (1.0 if max(ext) > 50 else 265.0)
     if disp:
         rad = wsize / S

@@ -3,8 +3,8 @@
 
 The schema is documented in bank-schema.md next to this file. This module is the
 only reader: it fails hard, naming the file and the field, rather than warning
-and guessing. A bank with no `declare` block is a donor-derived bank and loads
-as "nothing declared".
+and guessing. A bank with no `declare` block is a legacy (pre-generative) bank
+and loads as "nothing declared".
 
     import bankjson
     bank = bankjson.load("banks/firebird/bank.json")
@@ -127,7 +127,7 @@ def _check_keys(where, field, obj, allowed, what):
 
 
 class Car(object):
-    """One car's declared sources. Unset entries fall back to the donor."""
+    """One car's declared sources (cars/<id>/handling.json)."""
 
     def __init__(self, label, path, data, base, where):
         self.label = label
@@ -169,6 +169,8 @@ class Car(object):
                 _fail(where, "textures.%s" % key, "is not a set id 0..255")
 
             self.textures.append(Texture(where, setid, value, self._file))
+
+        self._wire_author_pages(where)
 
         if not self.atlas and not self.textures:
             _fail(where, "atlas", "a car needs an atlas or a textures map")
@@ -224,6 +226,46 @@ class Car(object):
                 except (TypeError, ValueError):
                     _fail(where, "remap.%s" % kind,
                           "%r -> %r is not a pair of integers" % (src, dst))
+
+    def _wire_author_pages(self, where):
+        """Declare textures{N} for every PAGE_N material the car's OBJs use.
+
+        An author names a Blender material PAGE_N after its image; the bake
+        takes that as the whole of page N (obj2geom.material_to_page). When
+        textures{} already has N, that entry wins. Otherwise textures/PAGE_N.png
+        (or PAGE_N.png beside the OBJ) is wired in; with neither it is an error
+        that says what to add.
+        """
+        import obj2geom
+
+        have = {t.set for t in self.textures}
+        used = set()
+
+        for obj in (self.clean, self.damaged, self.low):
+            if not obj:
+                continue
+            with open(obj, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("usemtl"):
+                        page = obj2geom.page_of_author_material(
+                            line[6:].strip())
+                        if page is not None:
+                            used.add(page)
+
+        for page in sorted(used - have):
+            for rel in ("textures/PAGE_%d.png" % page, "PAGE_%d.png" % page):
+                if os.path.isfile(os.path.join(self.base, rel)):
+                    self.textures.append(Texture(where, page, {"png": rel},
+                                                 self._file))
+                    break
+            else:
+                _fail(where, "textures.%d" % page,
+                      "a material is named PAGE_%d but there is no "
+                      "textures/PAGE_%d.png and no textures.%d entry - add "
+                      "\"textures\": {\"%d\": \"textures/<your png>\"}"
+                      % (page, page, page, page))
+
+        self.textures.sort(key=lambda t: t.set)
 
     def _file(self, where, field, rel, required=False):
         if rel is None or rel == "":
@@ -637,7 +679,7 @@ class Bank(object):
         self.declared = "declare" in raw
         self.cars = {}
         self.order = []
-        # A donor-derived bank has no declaration to read this from, but
+        # A legacy bank has no declaration to read this from, but
         # build_manifest asks every bank: without the default the bake died
         # with AttributeError before it could reproduce the bank unchanged.
         self.palette_from_pages = False
@@ -656,8 +698,10 @@ class Bank(object):
                      "palette_from_pages"}, "declare")
 
         # the bank's palette rows come from the pages themselves, so a page
-        # re-bake cannot leave them disagreeing
-        self.palette_from_pages = bool(decl.get("palette_from_pages"))
+        # re-bake cannot leave them disagreeing. A declared bank is generated
+        # from its pages, so this is on unless the bank says otherwise (and the
+        # bake refuses "false": there is no other palette to take).
+        self.palette_from_pages = bool(decl.get("palette_from_pages", True))
         schema = decl.get("schema", SCHEMA)
 
         if schema != SCHEMA:
@@ -672,6 +716,8 @@ class Bank(object):
         if not isinstance(donor, dict):
             _fail(where, "declare.donor", "must be an object")
 
+        # a LABEL for people (where the car came from); the bake reads no file
+        # of it. "lev" is accepted from older banks and ignored.
         _check_keys(where, "declare.donor", donor,
                     {"city", "model", "slot", "lev"}, "donor")
         self.donor = donor

@@ -11,7 +11,7 @@ carry, so a car can be edited and rebaked from obj/png/wav/json alone:
             (gamesnd.c car_banks / MapCarModelToBank), decoded to WAV
   paints    best effort from LUMP_PALLET: the dominant colour of each civ
             palette column per page, colours shared by every column = protect
-  handling  donor/cosmetics/<car>.json - the LCF record's named fields
+  handling  cars/<car>/handling.json - the LCF record's named fields
 """
 import collections
 import json
@@ -194,7 +194,7 @@ def write_handling(city_dir, cars, cos_records, fields_fn):
                 json.dump({"model": m, "fields": fields_fn(cos_records[m]),
                            "raw": cos_records[m].hex(),
                            "note": "4096 = 1.0 for mass/traction/susCoeff/"
-                                   "powerRatio; edit donor/<CITY>.donor.LCF "
+                                   "powerRatio; edit cars/<car>/handling.json "
                                    "(or this record) and rebake"},
                           f, indent=1)
 

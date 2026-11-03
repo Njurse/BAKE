@@ -284,8 +284,11 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
                        and abs((cleared[2] - cleared[1]) - (key[2] - key[1]))
                        <= chroma)
         else:
-            matched = key is None or max(
-                abs(cleared[c] - key[c]) for c in range(3)) <= tolerance
+            # the palette is in 5-bit steps, so compare the key as the engine shows it
+            key5 = None if key is None else fourbpp.snap555(key)
+            matched = key is None or min(
+                max(abs(cleared[c] - k[c]) for c in range(3))
+                for k in (key, key5)) <= max(tolerance, 0)
 
         if not matched and key is not None:
             raise SystemExit(

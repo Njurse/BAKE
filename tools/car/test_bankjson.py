@@ -56,7 +56,7 @@ class BankFixture(unittest.TestCase):
 
 
 class LoadTests(BankFixture):
-    def test_a_donor_bank_has_nothing_declared(self):
+    def test_a_legacy_bank_has_nothing_declared(self):
         bank = bankjson.load(self.write(None))
 
         self.assertFalse(bank.declared)
