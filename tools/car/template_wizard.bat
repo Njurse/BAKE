@@ -8,7 +8,7 @@ rem ============================================================================
 setlocal EnableDelayedExpansion
 set "BANK=%~dp0"
 set "BANK=%BANK:~0,-1%"
-set "CAR=%BANK%\@TOOLS@"
+set "CAR=@TOOLS@"
 set "EXEDIR=@EXEDIR@"
 set "MIRROR=@MIRROR@"
 :menu

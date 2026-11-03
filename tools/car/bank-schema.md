@@ -10,40 +10,51 @@ What the bank turned out to be - size, included sets, pages, palette records,
 checks, warnings - goes to `<NAME>.report.json` (the bank's name, e.g.
 `<NAME>.report.json`) beside the built manifest.
 (Older banks still carry that computed half at the top level of `bank.json`;
-it is ignored and can be deleted.) A bank with no `declare` block is a
-donor-derived bank: its manifest is used as it stands, which is how the old
-flat/base banks keep rebaking unchanged.
+it is ignored and can be deleted.) A bank with no `declare` block is a legacy
+bank: its manifest is reproduced as it stands (migration only).
 
-## Folder layout
+## Folder layout: inputs vs outputs
 
-Two optional top-level keys, both relative to the bank folder, split inputs
-from outputs:
+A declared bank is **generated**. Every file has one job:
 
 ```json
-{ "city": "FIREBIRD", "lev": "FIREBIRD.LEV", "lcf": "FIREBIRD.LCF",
-  "donor_dir": "donor", "build_dir": "build", "declare": { ... } }
+{ "city": "FIREBIRD", "lev": "build/FIREBIRD.LEV", "lcf": "build/FIREBIRD.LCF",
+  "build_dir": "build", "manifest": "FIREBIRD.json", "declare": { ... } }
 ```
 
-| folder | who writes it | holds |
+| path | who writes it | holds |
 | --- | --- | --- |
-| bank folder | the author (+ the installed LEV/LCF) | `bank.json`, `FIREBIRD.LEV/.LCF`, `cities.ini`, scripts, README |
-| `art/`, `sounds/` (any path the declare names) | the author | OBJ/MTL, page and wheel PNGs, the three WAVs |
-| `donor_dir` | the exporter (`exportd2.py`, or `make_new_bank.py` for one car), once | `<NAME>.json` (the donor manifest, paths relative to it), `source.LCF`, `cosmetics.json`, `textureinfo/texturenames/modelnames/pallet.bin`, `palette.json`, `<NAME>.donor.LEV` |
-| `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin` (palette_from_pages), `textureinfo.bin` (when page sizes change), the built `<NAME>.json`, `<NAME>.report.json`, and the LEV/LCF when `-o` is not given |
+| `bank.json` | the author | the declaration: name, slot order, cars |
+| `cars/<id>/` | the author | `handling.json` (OBJ paths, `textures`, wheels, sounds, the `handling` LCF record), OBJ/MTL, page images |
+| `shared/` | the author | page images / sounds more than one car names |
+| `build_dir` | the bake, every time | `pages/`, `models/`, `pallet.bin`, `textureinfo.bin`, `texturenames.bin`, `modelnames.bin`, the built `<NAME>.json`, `<NAME>.report.json`, the LEV/LCF |
+| bank root `<NAME>.LEV/.LCF` | `rebake.bat` | an install copy of the build pair - never edited |
 
-The bake starts from the built manifest when `build_dir` has one (it remembers
-which pages are current) and from the donor manifest otherwise, so deleting
-`build_dir` is always safe - the next bake re-derives everything. Handling still
-comes from the donor's `source.LCF`.
+**There is no donor folder.** The bake reads `bank.json` + `cars/` (+ any
+`shared/` file they name) and nothing else:
 
-Leave either key out and it is the bank folder itself: the flat layout every
-bank used before. A flat bank with a `declare` block bakes the same way; one
-without a declaration is reproduced from its manifest as it stands, and
-`bank.json` is never rewritten either way.
+- pages: baked from each car's `textures` map; the declared sets are the page list
+- palette: always from the pages (`palette_from_pages`, default and required)
+- `textureinfo`: generated from the baked page sizes (+ named wheel islands)
+- `texturenames` / `modelnames`: generated from the wheel islands / slot order
+- models: the declared OBJs; poly tints come from the OBJ/MTL, not a source LEV
+- handling / LCF: each car's `handling.json` `handling` block
 
-`make_new_bank.py` is a one-car wrapper over `exportd2`'s export: it writes this
-same declared shape (`bank.json` with `declare`, `cars/<id>/`, `donor/`,
-`build/`) for a single donor model, at the requested destination slot.
+`build/<NAME>.json` is a record of what was assembled, never read back as an
+input, so deleting `build_dir` is always safe. Left out, `build_dir` is the bank
+folder itself (the old flat layout). An old `donor_dir` key is ignored.
+
+`make_new_bank.py` / `exportd2.py` decode the source level into a scratch
+folder outside the bank, write `bank.json` + `cars/` + `shared/`, bake, and
+delete the scratch: the bank they leave behind is already donor-free.
+
+### Migrating a bank that has `donor/`
+
+1. In `bank.json` delete `donor_dir`, and `declare.donor.lev` (keep
+   `declare.donor.city` as a label if you like).
+2. Make sure every page the car samples is declared in its `textures` map
+   (the donor no longer supplies undeclared ones).
+3. Rebake. When `bank ok` prints, `donor/` can go.
 
 ## Schema
 
@@ -57,7 +68,7 @@ same declared shape (`bank.json` with `declare`, `cars/<id>/`, `donor/`,
     "schema": 1,
     "name": "FIREBIRD",
 
-    "donor": { "city": "CHICAGO", "model": 1, "slot": 1, "lev": null },
+    "donor": { "city": "CHICAGO", "model": 1 },
 
     "order": [
       { "slot": 1, "car": "FIREBIRD_model1" }
@@ -99,7 +110,7 @@ Every path is relative to the folder holding `bank.json`.
 ### `order[]`
 
 The bank's model slots, in engine order: `slot` is 0..12 and unique, `car` names
-an entry in `cars`. A slot with no entry in `cars` keeps the donor's blocks.
+an entry in `cars`.
 Slots the bank does not carry must be left out rather than set to `null` — the
 bake writes `-1` for them.
 
@@ -108,15 +119,15 @@ bake writes `-1` for them.
 | key | required | meaning |
 | --- | --- | --- |
 | `clean` | yes | the undamaged body, OBJ |
-| `damaged` | no | the crumpled body; absent means the donor's |
-| `low` | no | the low-detail body (LOD); absent means the donor's |
+| `damaged` | no | the crumpled body; absent means the clean body |
+| `low` | no | the low-detail body (LOD); absent means the clean body |
 | `atlas` | one of | a single atlas PNG covering every page, in page order |
 | `textures` | one of | `{set id: image}` per texture page. Use this instead of `atlas` when the pages are separate images |
 | `wheels.clean` | no | the road wheel: `{png, set, island}` — see below |
 | `wheels.damaged` | no | the buckled wheel — **omit it cleanly** when the car has none; the bank writes `-1` and the engine keeps the host wheel texture for that variant (`models.c:2743`) |
 | `wheels.fast` | no | the high-speed blur wheel |
 | `sounds` | no | see below |
-| `palette` | no | a CLUT source for a car whose colours are not the donor's |
+| `palette` | no | a CLUT source for a car whose colours are not its pages' own |
 | `remap` | no | `set` / `id` maps applied to every poly as it is read |
 
 ### `textures`
@@ -340,11 +351,20 @@ field — never a warning and never a guess. It checks the schema version, the
 slot range and uniqueness, that every named file exists, that `atlas` and
 `pages` are not both absent, that a cop car declares `siren` and not `horn`,
 that a non-cop car declares `horn`, and that no unknown key appears (a typo in a
-key would otherwise silently mean "use the donor's").
+key would otherwise silently be ignored).
+`declare.donor` is a label only (`city`, `model`, `slot`); an old `lev` is
+accepted and ignored.
 
 `tools/car/test_bankjson.py` holds the cases.
 
 ## Preview
 
 `preview_car.py <bank.json|dir>` renders `declare.cars.<car>` authoring art (clean OBJ+MTL, wheel PNGs, engine/idle WAVs) with a slow yaw and an idle -> gears -> damaged-wheel coast loop. Options: `--car`, `--timeout`, `--stop-file`, `--mute`, `--flip-y` (Y-down art), `--shot DIR`. Copy the Firebird `rebake.bat` preview block (`STOPF` + `start /b python preview_car.py`) into other banks' rebake scripts.
+
+
+## Material names
+
+Name each Blender material after the texture page it paints on: `PAGE_10` (also `PAGE_10.png`, `PAGE_10.001`) means the **whole** of page 10, baked as set 10 id 0. You never write set/id yourself. If `textures` has no `10` entry, the bake wires in `textures/PAGE_10.png` from the car folder; with no such file it stops and tells you to add `textures.10`.
+
+Stock Driver 2 exports keep `set<S>_id<T>` (optional `_ft` for flat-textured) and `flat` (untextured). `--default-page set:id` still maps any other name.
 

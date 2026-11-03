@@ -39,8 +39,10 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import struct
 import sys
+import tempfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -814,31 +816,6 @@ def find_lcf(lev_path):
 # ---------------------------------------------------------------------------
 # one city
 # ---------------------------------------------------------------------------
-def _strip_donor(rel):
-    if isinstance(rel, str) and rel.startswith("donor/"):
-        return rel[len("donor/"):]
-    return rel
-
-
-def write_donor_manifest(city_dir, city, manifest, lev_path):
-    """donor/<CITY>.json + donor/<CITY>.donor.LEV: the inputs carbank_bake
-    starts from (the shape make_new_bank.py writes for banks/firebird)."""
-    import copy
-    import shutil
-    m = copy.deepcopy(manifest)
-    for car in m.get("models", []):
-        for spec in car.get("variants", {}).values():
-            for k in ("raw", "geom"):
-                spec[k] = _strip_donor(spec.get(k))
-            spec["obj"] = "../" + spec["obj"]
-    m["raw"] = {k: _strip_donor(v) for k, v in m.get("raw", {}).items()}
-    for k in ("textures", "cosmetics", "lcf"):
-        m[k] = _strip_donor(m.get(k))
-    donor_dir = os.path.join(city_dir, "donor")
-    _write_json(os.path.join(donor_dir, "%s.json" % city), m)
-    shutil.copyfile(lev_path, os.path.join(donor_dir, "%s.donor.LEV" % city))
-
-
 def write_rebake(city_dir, name, donor_city="CHICAGO"):
     """rebake.bat next to bank.json, only if missing - rendered from the
     canonical tools/car/template_rebake.bat (see make_write_scripts.py)."""
@@ -926,16 +903,17 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
         "city": name,
         "lev": "build/%s.LEV" % name,
         "lcf": "build/%s.LCF" % name,
-        "donor_dir": "donor",
         "build_dir": "build",
         "manifest": "%s.json" % name,
         "declare": {
             "schema": 1,
             "name": name,
-            "donor": {"city": city, "lev": "donor/%s.donor.LEV" % name},
+            # a label for people: which city the car came from. The bake
+            # reads no file of it.
+            "donor": {"city": city},
             "order": bank_order,
             # pages are re-baked to ONE CLUT each, so the bank's palette rows
-            # must come from those pages (as banks/firebird does); the donor's
+            # must come from those pages (as banks/firebird does); the source's
             # per-detail rows no longer match and the car draws untextured
             "palette_from_pages": True,
             "cars": decl_cars,
@@ -971,17 +949,19 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
     # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
-    # the donor copy, declare.name and rebake/cities.ini all use it. `city`
+    # declare.name and rebake/cities.ini all use it. `city`
     # stays the SOURCE (donor.city, sound banks, raw dumps).
     name = (bank_name or city).upper()
     city_dir = os.path.join(out_root, dir_name or (bank_name.lower()
                                                    if bank_name else city))
-    # The export IS a bank folder, laid out like banks/firebird: editable art
-    # (OBJ/MTL, PNG pages, wheel PNGs) under art/, WAVs under sounds/, the
-    # untouched source lumps under donor/, and what the bake makes under build/.
+    # The export IS a bank folder: bank.json + cars/<id>/ (OBJ/MTL, page PNGs,
+    # handling.json, sounds) + shared/ - the author's inputs - and build/, what
+    # the bake makes. The source level's raw lumps are decoded into a SCRATCH
+    # folder outside the bank and deleted at the end: nothing in the bank is a
+    # copy of the source level, and the bake reads none of it.
     models_dir = os.path.join(city_dir, "art")
     textures_dir = os.path.join(models_dir, "textures")
-    raw_dir = os.path.join(city_dir, "donor")
+    raw_dir = tempfile.mkdtemp(prefix="exportd2_%s_" % name)
     bank_dir = os.path.join(city_dir, "build")
     dirs = [models_dir, textures_dir, raw_dir,
             os.path.join(raw_dir, "models"),
@@ -1036,8 +1016,10 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
             # ONE bank.json maps folder -> slot
             os.makedirs(os.path.join(city_dir, "cars", car_id), exist_ok=True)
             obj_rel = "cars/%s/%s_%s.obj" % (car_id, car_id, variant)
-            geom_rel = "donor/geom/%s_%s.geom.json" % (car_id, variant)
-            raw_rel = "donor/models/%s_%s.bin" % (car_id, variant)
+            geom_rel = os.path.join(raw_dir, "geom", "%s_%s.geom.json"
+                                    % (car_id, variant))
+            raw_rel = os.path.join(raw_dir, "models", "%s_%s.bin"
+                                   % (car_id, variant))
             obj_path = os.path.join(city_dir, obj_rel)
             geom_path = os.path.join(city_dir, geom_rel)
             raw_path = os.path.join(city_dir, raw_rel)
@@ -1133,10 +1115,8 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                 pal["records"], set(included_sets))
 
     # --- raw lump bodies --------------------------------------------------
-    raw_files = {"textureinfo": "donor/textureinfo.bin",
-                 "pallet": "donor/pallet.bin",
-                 "texturenames": "donor/texturenames.bin",
-                 "modelnames": "donor/modelnames.bin"}
+    raw_files = {k: os.path.join(raw_dir, k + ".bin")
+                 for k in ("textureinfo", "pallet", "texturenames", "modelnames")}
     with open(os.path.join(city_dir, raw_files["textureinfo"]), "wb") as f:
         f.write(ti_bytes)
     if pal["size"]:
@@ -1218,14 +1198,15 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         "texture_sets": included_sets,
         "wheel_sets": sorted(wheel_sets),
         "palette_sets": pal_sets,
-        "textures": "donor/%s.textures.json" % city,
-        "cosmetics": ("donor/%s.cosmetics.json" % city) if cos_records else None,
-        "lcf": ("donor/%s.donor.LCF" % city) if cos_records else None,
+        "textures": os.path.join(raw_dir, "%s.textures.json" % city),
+        "cosmetics": cos_json_path if cos_records else None,
+        "lcf": (os.path.join(raw_dir, "%s.donor.LCF" % city)
+                if cos_records else None),
         "raw": raw_files,
         "bank_order": bank_order,
         "warnings": warnings,
     }
-    manifest_path = os.path.join(city_dir, "%s.export.json" % city)
+    manifest_path = os.path.join(raw_dir, "%s.export.json" % city)
     _write_json(manifest_path, manifest)
 
     # --- the rest of the vehicle package: wheels, sounds, paints, handling
@@ -1274,16 +1255,19 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
     write_rebake(city_dir, name, city)
     write_bank_json(city_dir, city, cars, included_sets, bank_order,
                     os.path.basename(lev_path), extras, name=name)
-    write_donor_manifest(city_dir, name, manifest, lev_path)
 
+    # The bank is baked the way every rebake bakes it: generatively, from
+    # bank.json + cars/ alone (carbank_bake). Then the scratch goes.
     if make_bank:
-        report = build_bank(manifest, manifest_path, bank_dir, None)
-        manifest["bank"] = report
-        if name != city:   # the quick build is named after the bank too
-            for ext in (".LEV", ".LCF"):
-                src = os.path.join(bank_dir, city + ext)
-                if os.path.exists(src):
-                    os.replace(src, os.path.join(bank_dir, name + ext))
+        import carbank_bake
+        ok, _bake_warnings = carbank_bake.bake_bank(
+            os.path.join(city_dir, "bank.json"), bank_dir, scale=1)
+        manifest["bank"] = {"lev": os.path.join(bank_dir, name + ".LEV"),
+                            "lcf": os.path.join(bank_dir, name + ".LCF")}
+        if not ok:
+            warnings.append("bake checks failed; see build/%s.report.json"
+                            % name)
+    shutil.rmtree(raw_dir, ignore_errors=True)
 
     # Print a compact, useful summary.
     covered = {c["id"]: sorted(c["sets"]) for c in cars}
@@ -1301,7 +1285,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
     return {
         "city": city,
         "dir": dir_name or city,
-        "manifest": _rel(manifest_path, out_root),
+        "manifest": _rel(os.path.join(city_dir, "bank.json"), out_root),
         "bank": (_rel(os.path.join(city_dir, "build", "%s.LEV" % name), out_root)
                  if make_bank else None),
         "lcf": (_rel(os.path.join(city_dir, "build", "%s.LCF" % name), out_root)
@@ -1998,11 +1982,6 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         # shape no longer matches what basebank writes.
         p = os.path.join(manifest_dir, "pages", "PAGE_%d.bin" % s)
         if not os.path.isfile(p):
-            # exportd2's own layout keeps the source page bytes with the donor
-            donor_p = os.path.join(manifest_dir, "donor", "pages", "PAGE_%d.bin" % s)
-            if os.path.isfile(donor_p):
-                p = donor_p
-        if not os.path.isfile(p):
             legacy = os.path.join(manifest_dir, "raw", "pages",
                                   "PAGE_%d.bin" % s)
             if os.path.isfile(legacy):
@@ -2418,6 +2397,17 @@ def rebuild_cli(index_or_manifest, out_dir, city, order_path):
         manifest = doc
         manifest_path = index_or_manifest
 
+    if "declare" in manifest:
+        # a bank.json: bake it generatively, exactly as rebake.bat does
+        import carbank_bake
+        if out_dir is None:
+            out_dir = carbank_bake.bank_layout(bankjson.load(manifest_path))[1]
+        ok, _w = carbank_bake.bake_bank(manifest_path, os.path.abspath(out_dir),
+                                        scale=1)
+        if not ok:
+            raise SystemExit("bank verification failed")
+        return 0
+
     if out_dir is None:
         out_dir = os.path.join(os.path.dirname(os.path.abspath(manifest_path)),
                                "bank")
@@ -2592,7 +2582,7 @@ def main(argv=None):
                 continue
             entries.append(entry)
             continue
-        # one bank folder per car: <out>/<CITY>_model<N>/{art,sounds,donor,build}
+        # one bank folder per car: <out>/<CITY>_model<N>/{cars,shared,build}
         city = os.path.splitext(os.path.basename(path))[0].upper()
         for m in sorted(models_filter if models_filter is not None
                         else range(MAX_CAR_MODELS)):

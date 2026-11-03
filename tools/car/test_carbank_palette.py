@@ -26,11 +26,11 @@ import fourbpp
 BANK = os.path.abspath(os.path.join(HERE, "..", "..", "..",
                                     "betacars", "banks", "firebird"))
 LEV = os.path.join(BANK, "FIREBIRD.LEV")
-# donor/ in the split layout (bank.json "donor_dir"), the bank folder when flat
-_DONOR = (os.path.join(BANK, "donor")
-          if os.path.isfile(os.path.join(BANK, "donor", "pallet.bin")) else BANK)
-PALLET = os.path.join(_DONOR, "pallet.bin")
-PALETTE_JSON = os.path.join(_DONOR, "palette.json")
+# the generated palette: build/ in the split layout, the bank folder when flat
+_GEN = (os.path.join(BANK, "build")
+        if os.path.isfile(os.path.join(BANK, "build", "pallet.bin")) else BANK)
+PALLET = os.path.join(_GEN, "pallet.bin")
+PALETTE_JSON = os.path.join(_GEN, "palette.json")
 # the baked pages: build/ in the split layout, the bank folder when flat
 PAGES_BASE = (os.path.join(BANK, "build")
               if os.path.isdir(os.path.join(BANK, "build", "pages")) else BANK)

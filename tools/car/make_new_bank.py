@@ -5,12 +5,12 @@ The output is the SAME bank shape the full exporter writes (and any exported ban
 uses), so a bank started here can be edited, re-baked and installed exactly
 like one produced by exportd2:
 
-    bank.json                the declaration: donor, slot order, cars, layout
+    bank.json                the declaration: slot order, cars, layout
     NAME.LEV / NAME.LCF      installed copies of build/NAME.LEV / .LCF
     cars/<city>_model<slot>/ editable OBJ/MTL, page PNGs and sounds
-    donor/                   the donor's untouched manifest and lumps
-    build/                   what the bake generates: NAME.LEV/.LCF,
-                             NAME.report.json, NAME.json, pages/, models/
+    build/                   what the bake generates (never edited): NAME.LEV/.LCF,
+                             NAME.report.json, NAME.json, pages/, models/,
+                             pallet/textureinfo/texturenames/modelnames.bin
     cities.ini, README.txt   install hints
     rebake.bat/playtest.bat/preview.bat/wizard.bat
 
@@ -119,7 +119,7 @@ def build_base(args):
     os.makedirs(out_root, exist_ok=True)
 
     # One car, all three variants, at the requested destination slot. The
-    # export creates bank.json (declare), cars/, donor/ and build/, then
+    # export creates bank.json (declare), cars/ and build/, then
     # bakes build/NAME.LEV + NAME.LCF and the bank's scripts.
     entry = exportd2.export_one(
         lev, out_root, {args.model}, ("clean", "damaged", "low"), True,
@@ -132,14 +132,6 @@ def build_base(args):
         src = os.path.join(out, "build", name + ext)
         if os.path.isfile(src):
             shutil.copyfile(src, os.path.join(out, name + ext))
-
-    # export_one also leaves <city>.export.json at the bank root for the
-    # multi-model --rebuild-bank path. A one-car bank's rebuild manifest is
-    # donor/<NAME>.json, so do not leave a second copy in the bank folder.
-    if entry.get("city"):
-        stray = os.path.join(out, "%s.export.json" % entry["city"])
-        if os.path.isfile(stray):
-            os.remove(stray)
 
     # --- install snippet and README --------------------------------------
     game_data = os.path.abspath(args.game_data) if args.game_data else os.path.join(
@@ -170,12 +162,10 @@ def build_base(args):
         "This bank carries ONE car: clean, damaged and low. Every other model\n"
         "slot is -1.\n\n"
         "Files:\n"
-        "  bank.json          the declaration (donor, slot order, cars)\n"
+        "  bank.json          the declaration (slot order, cars)\n"
         "  %s.LEV / .LCF      installed copies of build/ (loadable pair)\n"
         "  cars/              the car's editable OBJ/MTL, page PNGs and sounds\n"
-        "  donor/             the donor manifest and untouched lumps\n"
-        "  build/             the bake output: NAME.LEV/.LCF, NAME.json,\n"
-        "                     NAME.report.json, pages/, models/\n\n"
+        "  build/             the bake output, never edited (safe to delete)\n\n"
         "Install:\n"
         "  1. Put this folder where cities.ini can reach it.\n"
         "  2. Add the line from cities.ini under [cities] in\n"

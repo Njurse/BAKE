@@ -13,6 +13,7 @@ GT3/GT4 so they do not pull garbage into VRAM.
 """
 
 import argparse
+import re
 import json
 import os
 import sys
@@ -188,8 +189,35 @@ def kind_of_material(name):
     return "GT3"
 
 
+# Author page names. Blender names a material after its image, so an author
+# OBJ says "PAGE_10" (or "PAGE_10.png", or Blender's "PAGE_10.001" duplicate)
+# where a stock Driver 2 export says "set10_id3". The rule:
+#
+#   PAGE_N  ->  (N, 0): the WHOLE of texture page N, set number = N.
+#
+# Set N is the page's own number, so there is nothing to invent or remap: the
+# car's textures{N} (declared, or auto-wired by bankjson from textures/PAGE_N.png)
+# is re-baked as one page with one CLUT row, and id 0 is that row. UVs are
+# whole-page 0..1 coordinates, which is what Blender painted against.
+PAGE_RE = re.compile(r"^page[_ ]?(\d+)(?:\.png|\.tga|\.bmp)?(?:\.\d{3})?$",
+                     re.IGNORECASE)
+SET_RE = re.compile(r"^set(\d+)_id(\d+)$")
+
+
+def page_of_author_material(name):
+    """'PAGE_10' -> 10; anything else -> None."""
+    if name.endswith("_ft"):
+        name = name[:-3]
+    m = PAGE_RE.match(name or "")
+    return int(m.group(1)) if m else None
+
+
 def material_to_page(name, where, default=None, unmapped=None):
-    """'set65_id12' -> (65, 12); 'flat' or '' -> None (solid grey).
+    """Material name -> (set, id), or None for an untextured poly.
+
+      'set65_id12' -> (65, 12)   stock Driver 2 export (optional _ft suffix)
+      'PAGE_10'    -> (10, 0)    author material: the whole of page 10
+      'flat' / ''  -> None       solid colour
 
     A name this tool does not recognise is an error rather than a silent grey
     page: a typo in a material would otherwise quietly put a wing on the wrong
@@ -201,28 +229,28 @@ def material_to_page(name, where, default=None, unmapped=None):
     if name in ("", "flat"):
         return None
 
-    if not name.startswith(MATERIAL_PREFIX):
-        # An author's OBJ (Blender and friends) names its materials its own way.
-        # Without an explicit --default-page that is a refusal, because guessing
-        # a page puts a body panel on the wrong texture; with one it is taken and
-        # the name is reported.
-        if default is not None:
-            if unmapped is not None:
-                unmapped.append(name)
+    page = page_of_author_material(name)
+    if page is not None:
+        if not 0 <= page <= 255:
+            raise ValueError("%s: material %r names page %d; pages are 0..255"
+                             % (where, name, page))
+        return (page, 0)
 
-            return default
+    m = SET_RE.match(name)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
 
-        raise ValueError("%s: material %r is neither \"flat\" nor "
-                         "set<number>_id<number> (pass --default-page "
-                         "set:id to map author material names)" % (where, name))
+    if default is not None:
+        if unmapped is not None:
+            unmapped.append(name)
+        return default
 
-    try:
-        body = name[len(MATERIAL_PREFIX):]
-        set_txt, id_txt = body.split("_id")
-        return (int(set_txt), int(id_txt))
-    except ValueError:
-        raise ValueError("%s: material %r is not of the form set<S>_id<T>"
-                         % (where, name))
+    raise ValueError(
+        "%s: material %r is not a name the bake understands.\n"
+        "  Name each Blender material after the texture page it paints on,\n"
+        "  e.g. PAGE_10 for textures/PAGE_10.png (the bake picks the set/id).\n"
+        "  Also accepted: flat (untextured) and set<S>_id<T> (stock exports)."
+        % (where, name))
 
 
 def materials_to_pages(names, where, default=None, unmapped=None):

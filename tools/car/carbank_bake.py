@@ -60,37 +60,6 @@ def _warn(msg):
     print("carbank_bake: warning: %s" % msg, file=sys.stderr)
 
 
-def _source_colors(lev_path):
-    """{variant: [(r, g, b), ...]} read from the bank being replaced.
-
-    An OBJ has nowhere to put a per-poly colour, so the round trip invents the
-    neutral grey a Driver 1 flat poly carries. For a Driver 2 car the poly
-    colour is a TINT that multiplies the texture, and the donor's is a real
-    dark tint - re-baking with grey made the whole car brighter than the bank
-    it replaced. The colours therefore come from the bank's own current polygon
-    stream, matched by index (the export is 1:1).
-    """
-    if not lev_path or not os.path.isfile(lev_path):
-        return {}
-
-    try:
-        with open(lev_path, "rb") as f:
-            blob = f.read()
-        table = exportd2.d2_model_table(blob)
-        out = {}
-        for variant in VARIANTS:
-            try:
-                model = exportd2.decode_variants(blob, table, 1)[variant]
-            except (KeyError, IndexError, ValueError):
-                continue
-            out[variant] = [tuple(p.color) for p in model.polys]
-        return out
-    except (OSError, ValueError, struct.error) as exc:
-        _warn("could not read poly colours from %s (%s); the bake will use "
-              "neutral grey" % (lev_path, exc))
-        return {}
-
-
 def _geom_for(obj_path, scale, default_page=None, flip_y=False, flip_winding=False,
                colors=None, flip_z=False):
     """The geom record for one OBJ, with its materials and normals."""
@@ -177,34 +146,27 @@ def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, 
 
 
 def bank_layout(bank):
-    """(bank_dir, donor_dir, build_dir) for a loaded bank.
+    """(bank_dir, build_dir) for a loaded bank.
 
-    A bank.json may name two folders at its top level, both relative to the
-    bank folder:
+    The bank folder holds the author's INPUTS and nothing else: bank.json,
+    cars/<id>/ (handling.json, OBJ/MTL, textures) and any shared/ art they name.
+    "build_dir" (bank.json, relative to the bank folder) holds everything the
+    bake GENERATES: pages/, models/, pallet.bin, textureinfo.bin,
+    texturenames.bin, modelnames.bin, the built <NAME>.json, <NAME>.report.json
+    and the LEV/LCF. Nothing under it is read back as an input, so deleting it
+    is always safe.
 
-      "donor_dir": "donor"   the donor-derived INPUTS make_new_bank.py wrote: the
-                             source manifest (<CITY>.json), source.LCF,
-                             cosmetics.json, textureinfo/texturenames/
-                             modelnames/pallet.bin, <CITY>.donor.LEV
-      "build_dir": "build"   everything the bake GENERATES: pages/, models/,
-                             pallet.bin (palette_from_pages), the built
-                             manifest, <CITY>.report.json, the LEV/LCF
-
-    Either one left out is the bank folder itself - the flat layout every bank
-    used before, which keeps baking exactly as it did.
+    Left out, the build folder is the bank folder itself (the old flat layout).
+    An old "donor_dir" key is ignored: a declared bank has no donor inputs.
     """
     bank_dir = os.path.dirname(os.path.abspath(bank.path))
+    value = bank.raw.get("build_dir")
 
-    def sub(key):
-        value = bank.raw.get(key)
+    if not value:
+        return bank_dir, bank_dir
 
-        if not value:
-            return bank_dir
-
-        return os.path.normpath(value if os.path.isabs(value)
-                                else os.path.join(bank_dir, value))
-
-    return bank_dir, sub("donor_dir"), sub("build_dir")
+    return bank_dir, os.path.normpath(value if os.path.isabs(value)
+                                      else os.path.join(bank_dir, value))
 
 
 def _manifest_name(bank):
@@ -214,110 +176,181 @@ def _manifest_name(bank):
             + ".json")
 
 
-def _find_manifest(bank):
-    """The manifest a bake starts from: the last build's, else the donor's."""
-    _bank_dir, donor_dir, build_dir = bank_layout(bank)
-    name = _manifest_name(bank)
+def _built_manifest(bank):
+    """build/<NAME>.json - what the last bake assembled. An OUTPUT: a declared
+    bank never reads it back as a bake input (only --check/--audit look)."""
+    _bank_dir, build_dir = bank_layout(bank)
+    path = os.path.join(build_dir, _manifest_name(bank))
+    return path if os.path.isfile(path) else ""
 
-    for folder in (build_dir, donor_dir):
-        path = os.path.join(folder, name)
 
+def _legacy_manifest(bank):
+    """The manifest an UNDECLARED (pre-generative) bank is reproduced from.
+
+    Such a bank has no declaration, so its manifest IS its description. It is
+    looked for beside the build output, in the bank folder, and in an old
+    "donor_dir" if bank.json still names one. Declared banks never come here.
+    """
+    bank_dir, build_dir = bank_layout(bank)
+    folders = [build_dir, bank_dir]
+
+    if bank.raw.get("donor_dir"):
+        folders.append(os.path.join(bank_dir, bank.raw["donor_dir"]))
+
+    for folder in folders:
+        path = os.path.join(folder, _manifest_name(bank))
         if os.path.isfile(path):
             return path
 
     return ""
 
 
-def source_lev_of(bank):
-    """The LEV whose poly colours this bake should keep.
+def _legacy_manifest_as_is(bank, gen_dir, out_dir):
+    """An undeclared bank's manifest, reproduced as it stands (migration only)."""
+    path = _legacy_manifest(bank)
 
-    Prefer the untouched donor: a bank that has already been baked through the
-    OBJ round trip carries the neutral grey an OBJ forces, so reading its own
-    polygons would bake grey forever. The donor (or an explicitly declared
-    donor.lev) is the only place the original tints survive.
+    if not path:
+        raise SystemExit("%s declares nothing and has no %s to reproduce; add a "
+                         "\"declare\" block (see bank-schema.md)"
+                         % (bank.path, _manifest_name(bank)))
+
+    base = os.path.dirname(path)
+    bank_dir = os.path.dirname(os.path.abspath(bank.path))
+
+    with open(path, encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    manifest["city"] = bank.raw.get("city") or manifest.get("city")
+    manifest["source"] = {"path": os.path.join(bank_dir, bank.raw.get("lev") or "")}
+
+    def absolute(value):
+        value = str(value)
+        return value if os.path.isabs(value) else os.path.join(base, value)
+
+    manifest["raw"] = {k: absolute(v) for k, v in (manifest.get("raw") or {}).items()}
+
+    for key in ("lcf", "cosmetics"):
+        if manifest.get(key):
+            manifest[key] = absolute(manifest[key])
+
+    if manifest.get("pages"):
+        manifest["pages"] = [dict(page, png=absolute(page["png"]))
+                             if page.get("png") else page
+                             for page in manifest["pages"]]
+
+    _sync_page_sizes(manifest, gen_dir, out_dir)
+    return manifest, []
+
+
+# Wheel crop rects are named in LUMP_TEXTUREINFO the way a retail level names
+# them: models.c finds WHLCLEAN / WHLBOTH there when a bank has no wheel lump.
+_WHEEL_DETAIL = {"clean": "WHLCLEAN", "damaged": "WHLBOTH"}
+
+
+def generated_textureinfo(page_sizes, wheels=()):
+    """(textureinfo, texturenames) lump bodies made from the baked pages alone.
+
+    `page_sizes` is {set: bytes}. The bank lists every page (the engine's
+    import reads only the permanent/special lists, texture.c
+    ParseImportedTextureInfoForCity); tpage_positions are zero, and the only
+    TEXINF details are the declared wheel islands, named in the returned name
+    buffer.
     """
-    bank_dir, donor_dir, _build_dir = bank_layout(bank)
-    lev = bank.raw.get("lev") or ""
-    stem = os.path.splitext(os.path.basename(lev))[0] if lev else ""
+    sets = sorted(page_sizes)
 
-    declared = getattr(bank, "declared", None)
-    donor_lev = getattr(declared, "donor_lev", None) if declared else None
-    candidates = []
-    if donor_lev:
-        candidates.append(os.path.join(bank_dir, donor_lev))
-    if stem:
-        candidates.append(os.path.join(donor_dir, stem + ".donor.LEV"))
-        candidates.append(os.path.join(bank_dir, stem + ".donor.LEV"))
-    candidates.append(os.path.join(bank_dir, lev))
+    if sets and sets[-1] >= 128:
+        raise SystemExit("bank: page set %d is past the 128 a TextureInfo lump "
+                         "can carry" % sets[-1])
 
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-    return ""
+    tpage_amount = sets[-1] + 1 if sets else 1
+    names = bytearray()
+    details = {}
+
+    for spec in wheels or ():
+        name = _WHEEL_DETAIL.get(spec["variant"]) if spec else None
+
+        if not name:
+            continue
+
+        u0, v0, u1, v1 = spec["island"]
+        recs = details.setdefault(spec["set"], [])
+        recs.append(struct.pack(pages1.TEXINF_FMT, len(recs), len(names),
+                                u0, v0, min(255, u1 - u0), min(255, v1 - v0)))
+        names += name.encode("ascii") + b"\0"
+
+    head = bytearray(struct.pack("<ii", tpage_amount, 0))
+    head += b"\0" * (8 * (tpage_amount + 1))
+
+    for page in range(tpage_amount):
+        recs = details.get(page, [])
+        head += struct.pack("<i", len(recs)) + b"".join(recs)
+
+    body = exportd2.build_textureinfo(bytes(head),
+                                      [(s, page_sizes[s]) for s in sets], [])
+    return body, bytes(names)
+
+
+def generated_modelnames(order):
+    """LUMP_MODELNAMES: one name per model slot, the car id in a filled slot."""
+    slots = dict(order)
+    top = max(slots) + 1 if slots else 0
+    return b"".join(slots.get(i, "").encode("ascii", "replace") + b"\0"
+                    for i in range(top))
+
+
+def _write_generated_lumps(manifest, bank, gen_dir, wheels):
+    """build/textureinfo.bin, texturenames.bin, modelnames.bin from the pages
+    and the declaration - the only place these lumps come from."""
+    sizes = {}
+
+    for page in manifest.get("pages") or []:
+        path = os.path.join(gen_dir, "pages", "PAGE_%d.bin" % page["set"])
+
+        if not os.path.isfile(path):
+            raise SystemExit("bank: declared page set %d was not baked (no %s)"
+                             % (page["set"], path))
+
+        sizes[page["set"]] = page["size"] = os.path.getsize(path)
+
+    textureinfo, texturenames = generated_textureinfo(sizes, wheels)
+    raw = dict(manifest.get("raw") or {})
+
+    for key, body in (("textureinfo", textureinfo),
+                      ("texturenames", texturenames),
+                      ("modelnames", generated_modelnames(bank.order))):
+        path = os.path.join(gen_dir, key + ".bin")
+
+        with open(path, "wb") as f:
+            f.write(body)
+
+        raw[key] = path
+
+    manifest["raw"] = raw
 
 
 def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=False,
                    flip_winding=False, colors=None, flip_normals=False, flip_z=False,
                    force_pages=False):
     """A manifest exportd2.build_bank can assemble, from the declaration."""
-    bank_dir, _donor_dir, gen_dir = bank_layout(bank)
-    lev_name = bank.raw.get("lev") or ""
-    source_lev = os.path.join(bank_dir, lev_name)
-    # the rebuild manifest is <CITY>.json (FIREBIRD.json), not bank.json itself:
-    # bank.json carries the declaration, that one the raw blocks. The last
-    # build's copy wins (it remembers which pages are current); a fresh build
-    # folder starts from the donor's
-    source_manifest_path = _find_manifest(bank)
-    manifest_base = (os.path.dirname(source_manifest_path)
-                     if source_manifest_path else bank_dir)
-
-    # start from the SOURCE manifest (it carries the page blobs, the palette
-    # sets and the cosmetics record) and replace only the models and the order:
-    # a bank is more than its geometry, and a cherry-picked manifest loses the
-    # pages silently ("bank page omitted") and writes a bank that cannot draw
-    if os.path.isfile(source_manifest_path):
-        with open(source_manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
-    else:
-        manifest = {}
-
-    manifest["city"] = bank.raw.get("city") or bank.name
-    manifest["source"] = {"path": source_lev}
-
-    # the source manifest's paths are relative to the folder it lives in; the
-    # built one may live elsewhere, so make them absolute rather than copy a
-    # broken path
-    for key in ("raw",):
-        manifest[key] = {k: (v if os.path.isabs(str(v)) else os.path.join(manifest_base, str(v)))
-                         for k, v in (manifest.get(key) or {}).items()}
-
-    for key in ("lcf", "cosmetics"):
-        value = manifest.get(key)
-
-        if value and not os.path.isabs(str(value)):
-            manifest[key] = os.path.join(manifest_base, str(value))
-
-    if manifest.get("pages"):
-        manifest["pages"] = [
-            dict(page, png=(page.get("png") if not page.get("png") else
-                            page["png"] if os.path.isabs(str(page["png"]))
-                            else os.path.join(manifest_base, str(page["png"]))))
-            for page in manifest["pages"]]
+    bank_dir, gen_dir = bank_layout(bank)
 
     if not bank.declared:
-        # A donor-derived bank (make_new_bank's original flat/base shape) has no
-        # declaration to derive models, order or pages from: its manifest IS the
-        # description, so reproduce it as it stands. The declaration filters
-        # below run over bank.cars, which is empty here, and used to wipe every
-        # page and model the manifest named.
-        warnings = []
-        _sync_page_sizes(manifest, gen_dir, out_dir)
-        return manifest, warnings
+        return _legacy_manifest_as_is(bank, gen_dir, out_dir)
+
+    if not bank.palette_from_pages:
+        raise SystemExit("%s: \"palette_from_pages\": false - a declared bank's "
+                         "palette is generated from its pages; remove the key"
+                         % bank.path)
+
+    # A declared bank is GENERATED: the working manifest starts empty and is
+    # built from bank.json + cars/ alone. No earlier manifest - the last
+    # build's or an exported one - is read back as an input.
+    name = bank.raw.get("city") or bank.name
+    manifest = {"city": name, "bank_name": name, "pages": [], "raw": {}}
 
     # Every DECLARED page has to exist in the manifest: the assembler carves a
     # page only when something names it, so a declared-but-unlisted set is baked
-    # to disk and pruned straight back out ("1 sets"). The wheel art lives on
-    # its own sets, which the donor manifest has never heard of.
+    # to disk and pruned straight back out ("1 sets").
     # The manifest's pages[] is COMPUTED from the declaration's textures map:
     # the images in the car json are the source of truth and the pages record is
     # what they produced (its png is a preview, never an input).
@@ -346,11 +379,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     if bank.palette_from_pages:
         _sync_palette_from_pages(manifest, bank, gen_dir, warnings)
 
-    _sync_page_sizes(manifest, gen_dir, out_dir)
-
-
-    # the DECLARATION owns the slot order: the source manifest still names the
-    # donor ids, which no longer exist once the cars are rebuilt
+    # the DECLARATION owns the slot order
     manifest["bank_order"] = [{"slot": slot, "car": carname}
                                 for slot, carname in bank.order]
 
@@ -436,8 +465,11 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("wheel_sets", None)
 
+    # textureinfo / texturenames / modelnames are generated, never copied
+    _write_generated_lumps(manifest, bank, gen_dir, wheels)
+
     # Each car's handling.json "handling" block IS its cosmetics record (LCF):
-    # wheelDisp, cPoints, colBox, mass... The donor LCF is reference only.
+    # wheelDisp, cPoints, colBox, mass... There is no other source.
     decl_cars = (bank.raw.get("declare") or {}).get("cars") or {}
     for model in manifest["models"]:
         ref = decl_cars.get(model["id"])
@@ -451,7 +483,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
             model["handling"] = handling
         else:
             warnings.append("%s: no \"handling\" block - its LCF record is "
-                            "zeroed (the donor is not read)" % model["id"])
+                            "zeroed" % model["id"])
     manifest.pop("lcf", None)
     manifest.pop("cosmetics", None)
 
@@ -1244,7 +1276,7 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
         warnings.append("palette: rebuilt %d row(s) from the pages"
                         % len(rows))
 
-    # the bank bakes THIS file, wherever the donor's pallet.bin lives
+    # the bank bakes THIS file
     manifest["raw"] = dict(manifest.get("raw") or {}, pallet=path)
 
     doc_path = os.path.join(bank_dir, "palette.json")
@@ -1355,14 +1387,16 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
               % bank_path)
 
     os.makedirs(out_dir, exist_ok=True)
-    bank_dir, _donor_dir, gen_dir = bank_layout(bank)
+    bank_dir, gen_dir = bank_layout(bank)
     os.makedirs(gen_dir, exist_ok=True)
     # the blocks belong in the build folder's models/, so the manifest this
     # writes still describes the bank after the bake
     blocks_dir = os.path.join(gen_dir, "models")
     # Y mirror and winding are SEPARATE: reversing the winding is how an
     # inside-out car is fixed when the mesh is already the right way up.
-    colors = _source_colors(source_lev_of(bank))
+    # poly tints come from the OBJ/MTL (neutral grey otherwise); there is no
+    # source LEV to read them back from
+    colors = None
     manifest, warnings = build_manifest(bank, out_dir, scale, blocks_dir, default_page, flip_y,
                                        flip_winding,
                                        colors, flip_normals, flip_z,
@@ -1423,8 +1457,8 @@ def _write_bake_report(manifest_path, report, warnings):
 def _report_only(args):
     """--check / --audit: read the workspace, write nothing."""
     bank = bankjson.load(args.bank)
-    bank_dir, _donor_dir, gen_dir = bank_layout(bank)
-    manifest_path = _find_manifest(bank)
+    bank_dir, gen_dir = bank_layout(bank)
+    manifest_path = _built_manifest(bank) or _legacy_manifest(bank)
 
     manifest = {}
 
@@ -1695,7 +1729,7 @@ def main(argv=None):
         default_page = (int(s_), int(i_))
 
     if not args.out:
-        args.out = bank_layout(bankjson.load(args.bank))[2]
+        args.out = bank_layout(bankjson.load(args.bank))[1]
 
     ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
                              default_page=default_page,

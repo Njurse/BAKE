@@ -190,7 +190,7 @@ def _paletteize_crop(pixels, width: int, height: int):
     if len(pixels) != width * height:
         raise jc.JMPPEDError("crop has %d pixels, expected %d"
                              % (len(pixels), width * height))
-    return fourbpp.paletteize(pixels, width, height)
+    return fourbpp.paletteize_legacy(pixels, width, height)
 
 
 def _apply_crop(state: dict, crop: dict, root: str, texture_ids=()) -> int:
