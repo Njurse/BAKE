@@ -17,9 +17,14 @@ import os
 
 SCHEMA = 1
 
+# One stock car-select portrait: a 256x256 4bpp page (the slot SetupExtraPoly
+# uploads from CCARS.RAW), plus an optional 16-colour RGB555 CLUT.
+PORTRAIT_BYTES = 0x8000
+PORTRAIT_CLUT_BYTES = 32
+
 CAR_KEYS = {
     "clean", "damaged", "low", "atlas", "textures", "wheels",
-    "sounds", "palette", "remap",
+    "sounds", "palette", "remap", "portrait",
 }
 # A car's sounds: three samples (engine, idle, horn-or-siren) plus the knobs
 # the bake applies to them. Every sample can be a bare path - the short form
@@ -227,6 +232,40 @@ class Car(object):
                 except (TypeError, ValueError):
                     _fail(where, "remap.%s" % kind,
                           "%r -> %r is not a pair of integers" % (src, dst))
+
+        # Optional car-select portrait. The game reads it from beside the built
+        # LEV, not from this path: the bake copies it. It must already be one
+        # 4bpp page — this does not quantise, so fourbpp's RGB555 rounding is
+        # not involved. A sibling "<name>.clut" of 32 bytes is the private CLUT.
+        portrait_rel = data.get("portrait")
+
+        if portrait_rel not in (None, ""):
+            _check_not_output(where, "portrait", portrait_rel, self.base)
+
+        self.portrait = self._file(where, "portrait", portrait_rel)
+        self.portrait_clut = None
+
+        if self.portrait is not None:
+            size = os.path.getsize(self.portrait)
+
+            if size != PORTRAIT_BYTES:
+                _fail(where, "portrait",
+                      "%s is %d bytes; a car-select portrait is one 4bpp "
+                      "page, exactly %d bytes (256x256, the top 219 rows show)"
+                      % (os.path.basename(self.portrait), size, PORTRAIT_BYTES))
+
+            clut = os.path.splitext(self.portrait)[0] + ".clut"
+
+            if os.path.isfile(clut):
+                csize = os.path.getsize(clut)
+
+                if csize != PORTRAIT_CLUT_BYTES:
+                    _fail(where, "portrait",
+                          "%s is %d bytes; the optional CLUT beside a portrait "
+                          "is %d bytes (16 little-endian RGB555 colours)"
+                          % (os.path.basename(clut), csize, PORTRAIT_CLUT_BYTES))
+
+                self.portrait_clut = clut
 
     def _wire_author_pages(self, where):
         """Declare textures{N} for every PAGE_N material the car's OBJs use.
@@ -867,6 +906,56 @@ def dumps_compact(obj, width=100, _ind=0):
         return "{\n" + ",\n".join(items) + "\n" + " " * _ind + "}"
     items = [pad + dumps_compact(v, width, _ind + 2) for v in obj]
     return "[\n" + ",\n".join(items) + "\n" + " " * _ind + "]"
+
+
+def install_portraits(bank, out_dir, stem):
+    """Copy declared portraits beside the LEV the game opens.
+
+    Writes ``<out_dir>/<stem>.portraits/<model>.raw`` and, when the source has
+    one, ``<model>.clut``. ``stem`` is the LEV filename without its extension
+    (the same name ``build_bank`` uses). The model number is the car's slot in
+    ``order``, which is the number the frontend asks for.
+
+    Returns ``(slots, notes)``. A portrait on a car that is not in ``order``
+    is skipped and named in ``notes`` — it has no model number to file it under.
+    """
+    written = []
+    notes = []
+
+    if not getattr(bank, "declared", False) or not stem:
+        return written, notes
+
+    slots = {name: slot for slot, name in bank.order}
+    dest_dir = os.path.join(out_dir, stem + ".portraits")
+
+    for name, car in bank.cars.items():
+        if not getattr(car, "portrait", None):
+            continue
+
+        slot = slots.get(name)
+
+        if slot is None:
+            notes.append("%s declares a portrait but is not in order, so it "
+                         "has no model number" % name)
+            continue
+
+        if not os.path.isdir(dest_dir):
+            os.makedirs(dest_dir)
+
+        dest = os.path.join(dest_dir, "%d.raw" % slot)
+
+        with open(car.portrait, "rb") as src, open(dest, "wb") as out:
+            out.write(src.read())
+
+        if car.portrait_clut:
+            cdest = os.path.join(dest_dir, "%d.clut" % slot)
+
+            with open(car.portrait_clut, "rb") as src, open(cdest, "wb") as out:
+                out.write(src.read())
+
+        written.append(slot)
+
+    return written, notes
 
 
 def load(path):
