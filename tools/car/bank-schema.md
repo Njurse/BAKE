@@ -251,10 +251,19 @@ in one 16-entry row. A one-row page that already fits is left alone.
 ### REDBUICK (one D1 car, PAGE_N or set/id)
 
 The OBJ is in Driver 1 units. Bake it at `2048/3000` (`carbank_bake --scale
-0.68267`, the default). Preview then places the handling wheels with that same
+0.68267`, the default when `declare.scale` is absent). Preview then places the handling wheels with that same
 scale, and `preview.py` / `textured.py` / `spin.py` frame every car against
 the Driver 2 median (length 752) so an unscaled mesh (~1104) draws larger
 than the car the game shows.
+
+A Driver 2 export, retail or the Aug 2000 demo, is already in engine units.
+`exportd2` writes `declare.scale: 1` and `declare.donor.obj_scale: 1`. Measured
+on HAVANA clean models, demo length / retail length is 1 (slot 0 both 750,
+slot 10 both 1386; both map headers are cell size 2048). Baking that OBJ at
+`2048/3000` is what makes it too small. `carbank_bake` with no `--scale` uses
+`declare.scale` when the bank names one, so a demo bank is not silently given
+the Driver 1 ratio. `donor.source` is `driver2-demo` or `driver2`; the bake
+does not read it, and it is not a `cities.ini` key.
 
 ```json
 "textures": {

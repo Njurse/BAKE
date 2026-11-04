@@ -71,7 +71,10 @@ def build_base(args):
     name = _sanitize_name(args.name) if args.name else "BASE"
 
     if args.slot == 0:
-        raise SystemExit("model slot 0 is carhacks' 'no car' slot; use 1..12")
+        raise SystemExit(
+            "model slot 0 is carhacks' 'no car' slot for a one-car overlay; "
+            "use 1..12. A whole-city export (exportd2.py) keeps slot 0 when "
+            "the level has a cop — that is the demohavana path")
     if not 0 <= args.slot < exportd2.MAX_CAR_MODELS:
         raise SystemExit("slot %d is outside 0..%d"
                          % (args.slot, exportd2.MAX_CAR_MODELS - 1))

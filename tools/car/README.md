@@ -108,6 +108,41 @@ with no car stay `-1`, and the `.LCF` is rebuilt in the same slot order.
 `--no-bank` stops after the source package. Generated output lives under the
 gitignored `tools/car/out/`.
 
+## Demo HAVANA (`DRIVER2DEMO/LEVELS`)
+
+The Aug 2000 demo level (junction lump 42, `gDemoLevel`) stores car vertices
+in the same units as retail. Clean-model lengths, demo / retail HAVANA:
+
+| slot | demo | retail |
+|---|---|---|
+| 0 (cop) | 750 | 750 |
+| 1 | 750 | 750 |
+| 2 | 681 | 680 |
+| 3 | 692 | 692 |
+| 8 | 882 | 882 |
+| 9 | 882 | 882 |
+| 10 | 1386 | 1386 |
+| 11 | 674 | 674 |
+
+Both map headers are cell size 2048. The ratio is **1**, not `2048/3000`.
+That Driver 1 factor is what shrinks a demo car in-game and in the bake
+preview. `exportd2` writes the OBJ at 1:1 and sets `declare.scale` to 1, which
+`carbank_bake` uses when `--scale` is omitted. Slot 0 is the cop and is
+exported when the clean offset is present (it is, on this demo). Slots 4 and
+12 are empty in the demo level itself; retail has cars there.
+
+Re-export from the demo LEVELS, not from a bank that was already baked at
+`2048/3000`:
+
+```sh
+python tools/car/exportd2.py DRIVER2DEMO/LEVELS/HAVANA.LEV \
+    -o JERICHO/MODS/d2demo
+```
+
+That writes `JERICHO/MODS/d2demo/HAVANA/` (`bank.json` with
+`donor.source` `driver2-demo`, `scale` 1, and `HAVANA_model0` for the cop).
+`rebake.bat` bakes at `--scale 1`. Do not pass `--obj-scale 0.68267`.
+
 ## One-car banks: `make_new_bank.py`
 
 `make_new_bank.py` is the one-car front end for the same export path
