@@ -855,6 +855,23 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
               "%d unused pair(s) packed away (%d source record(s) walked)"
               % (count, len(used), len(packed), records))
 
+        # civ_clut has one row per carTpages slot (8 on the stock engine). The
+        # bake still emits every set — dropping one would change a bank that
+        # already loads — and names the sets a slot past the budget will draw
+        # with the first page's palette.
+        import carbank_page
+        seen_sets = []
+        for new_set, _level, _old, _entry, _size in page_list:
+            if new_set not in seen_sets:
+                seen_sets.append(new_set)
+        overflow = [m for m in carbank_page.civ_row_map(seen_sets)
+                    if m["overflow"]]
+        if overflow:
+            print("   palette: WARNING %d set(s) past civ_clut's %d rows draw "
+                  "row 0 (the first page's palette): %s"
+                  % (len(overflow), carbank_page.CIV_CLUT_ROWS,
+                     ", ".join(str(m["set"]) for m in overflow)))
+
         missing = sorted(used - have)
         if missing:
             print("   palette: WARNING %d used pair(s) have no emitted row (they draw the "

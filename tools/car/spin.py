@@ -42,6 +42,33 @@ def project(v, cy, sy, cp, sp):
     return cx, (y * cp - cz * sp), cz
 
 
+def _reference_worst(pitch, samples=48):
+    """Projected span of the Driver 2 median car over a full turn.
+
+    Every model in the spin uses this, so a car the game draws at the median
+    fills the cell and one still in Driver 1 units (~1104 vs 752) stays larger
+    at every yaw instead of being zoomed to fit.
+    """
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    worst = 1.0
+    corners = preview.median_box_corners()
+
+    for k in range(samples):
+        cy = math.cos(2 * math.pi * k / samples)
+        sy = math.sin(2 * math.pi * k / samples)
+        xs = []
+        ys = []
+
+        for v in corners:
+            px, py, _pz = project(v, cy, sy, cp, sp)
+            xs.append(px)
+            ys.append(py)
+
+        worst = max(worst, max(xs) - min(xs), max(ys) - min(ys))
+
+    return worst
+
+
 def refs_for(items, pitch, cell, pad, samples=48):
     """A fixed (centre3d, scale) per item, so a turning model does not breathe.
 
@@ -52,7 +79,8 @@ def refs_for(items, pitch, cell, pad, samples=48):
     on the model's own 3D middle rather than on each frame's projected box.
     """
     out = []
-    cp, sp = math.cos(pitch), math.sin(pitch)
+    scale = (cell - 2 * pad) / float(_reference_worst(pitch, samples))
+
     for item in items:
         verts = item[2]
         if not verts:
@@ -61,17 +89,7 @@ def refs_for(items, pitch, cell, pad, samples=48):
         lo = [min(v[i] for v in verts) for i in range(3)]
         hi = [max(v[i] for v in verts) for i in range(3)]
         centre = [(lo[i] + hi[i]) / 2.0 for i in range(3)]
-        worst = 1
-        for k in range(samples):
-            cy, sy = math.cos(2 * math.pi * k / samples), math.sin(2 * math.pi * k / samples)
-            xs = []
-            ys = []
-            for v in verts:
-                px, py, _pz = project(v, cy, sy, cp, sp)
-                xs.append(px)
-                ys.append(py)
-            worst = max(worst, max(xs) - min(xs), max(ys) - min(ys))
-        out.append((centre, (cell - 2 * pad) / float(worst)))
+        out.append((centre, scale))
     return out
 
 

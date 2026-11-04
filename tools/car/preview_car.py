@@ -333,7 +333,14 @@ def main():
     hd = car.get("handling") or {}
     if hd.get("wheelDisp") and hd.get("wheelSize"):
         disp, wsize, cog = hd["wheelDisp"], hd["wheelSize"], hd.get("cog")
-    S = a.bake_scale or (1.0 if max(ext) > 50 else 265.0)
+    # handling colBox is engine half-extents. A Driver 1 OBJ (REDBUICK and the
+    # rest of the pool) is ~3000/2048 times that box; treating every mesh longer
+    # than 50 as already engine-sized left the wheels on a short wheelbase and
+    # the body reading huge next to them. The baked LEV is already scaled, which
+    # is why the same car is normal in game.
+    import preview
+    col = (hd.get("colBox") if hd else None)
+    S = a.bake_scale if a.bake_scale else preview.infer_bake_scale(ext, col)
     if disp:
         rad = wsize / S
         # 1) hub relative to the BODY MODEL ORIGIN, D2 engine space (Y-down),

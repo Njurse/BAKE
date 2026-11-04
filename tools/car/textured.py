@@ -146,7 +146,9 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None,
         proj = [preview._project(v) for v in verts]
         xs = [q[0] for q in proj]
         ys = [q[1] for q in proj]
-        span = max(max(xs) - min(xs), max(ys) - min(ys), 1)
+        # Shared with preview.py: the Driver 2 median car fills the cell, so a
+        # mesh that is still in Driver 1 units draws ~1.47× larger.
+        span = preview.reference_span()
         sc = (cell - 2 * pad) / float(span)
         ox = (idx % cols) * cell + cell / 2.0 - (min(xs) + max(xs)) / 2.0 * sc
         oy = (idx // cols) * cell + cell / 2.0 - (min(ys) + max(ys)) / 2.0 * sc
@@ -214,8 +216,15 @@ def render(items, pages_root, path, cols=6, cell=170, pad=8, baked=None,
                       int(pts[0][0]), int(pts[0][1]), (32, 32, 32))
 
     preview._png(path, w, h, pix)
-    print("  %s  (%dx%d, %d shapes, %d polys with no page)"
-          % (path, w, h, len(items), misses))
+    got = preview.world_lengths(item[2] for item in items)
+    size = ""
+
+    if got:
+        size = ", longest axis %.0f..%.0f (D2 median length %d)" % (
+            got[0], got[1], preview.D2_MEDIAN_BOX[2])
+
+    print("  %s  (%dx%d, %d shapes, %d polys with no page%s)"
+          % (path, w, h, len(items), misses, size))
     return path
 
 

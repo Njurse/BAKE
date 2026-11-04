@@ -128,10 +128,11 @@ class FromPagesTests(unittest.TestCase):
         import pages1
 
         rows = carbank_palette.rows_from_pages(PAGES_BASE, {1, 2, 3})
+        base = [r for r in rows if r["texnum"] == 0]
 
-        self.assertEqual([r["tpageindex"] for r in rows], [1, 2, 3])
+        self.assertEqual([r["tpageindex"] for r in base], [1, 2, 3])
 
-        for row in rows:
+        for row in base:
             with open(os.path.join(PAGES_BASE, "pages",
                                    "PAGE_%d.bin" % row["tpageindex"]), "rb") as f:
                 page = f.read()

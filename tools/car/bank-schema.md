@@ -162,8 +162,10 @@ what the images produced: size, palette row, the image's sha256, the preview pat
 | `transparent_chroma` | no | match by COLOUR CAST instead: a texel whose `(r-g, b-g)` is within N of the backdrop's. Catches a soft blended edge without eating grey art |
 | `protect` | no | colours the page's 16 MUST keep (`["b8b8c0", ...]`); the quantiser evicts the least-used colour instead |
 | `palette` | no | exactly 16 hex colours: the page is re-indexed to them and nothing is quantised |
-| `paints` | no | colour variants, in order: `{"yellow": "e0c020", "red": "c02020", ...}` (max 5). Needs `palette_from_pages`. See *Paints* below |
-| `paint_body` | no | which page colours a paint recolours (`["c0e0f0", ...]`). Default: every mid/light blue entry |
+| `split` | no | `"auto"` (default) or `"off"`. `auto` gives each panel its own CLUT row when the page's snapped colours do not fit in one 16-entry row. `off` is the old single-row quantize. A page that already snaps to 16 or fewer colours is never split |
+| `max_error` | no | with `split: "auto"`, accept one row when the worst channel error of that quantize is at most this (0..255). Leave it out to split whenever 16 entries cannot hold the colours exactly |
+| `paints` | no | colour variants, in order: a hex colour or a paletted image (max 5). Needs `palette_from_pages`. See *Paints* below |
+| `paint_body` | no | which page colours a hex paint recolours (`["c0e0f0", ...]`). Default: every mid/light blue entry. Image paints do not use this; they copy indices |
 
 #### Paints (colour variants)
 
@@ -177,12 +179,73 @@ Column 0 is ALWAYS the page's own colours - the original paint. Each declared
 paint becomes one more palette record (lump `palette` k -> column k+1), so the
 example above gives 0 blue, 1 yellow, 2 red, 3 green, 4 grey.
 
-A paint copies the page's 16-colour row and recolours only the BODY entries:
+A hex paint copies the page's 16-colour row and recolours only the BODY entries:
 hue and saturation from the paint, shading kept (the brightest body entry lands
 on the paint colour's own lightness). Never touched: `0x0000` (transparent),
 `protect` colours (lights), and anything that is not body - by default the
 dark/near-grey entries (glass, trim, tyres). If glass is a light blue and gets
 painted, list the body colours explicitly in `paint_body`.
+
+An **image paint** is a recolour of the same atlas (or of one panel), already
+paletted or close to it. Each source index takes the colour that image shows
+on the texels which use that index, so the 4bpp indices stay put and only the
+CLUT row changes. `id` limits it to one texture id (`set65_id13`'s lights);
+`panel` is `[x0, y0, x1, y1]` when the image is that rectangle rather than a
+full page. Whole-atlas and per-panel both bake a normal 4bpp page plus a CLUT
+the engine can draw.
+
+```json
+"paints": {
+  "yellow": "e0c020",
+  "night": { "image": "art/firebird_night.png" },
+  "lights": { "image": "art/firebird_lights.png", "id": 13 }
+}
+```
+
+`declare.clut_rows` (default 8) is how many `civ_clut` rows this engine build
+binds (`carTpages[city][8]` on the stock build). It only changes the
+`clut-dump.txt` the bake writes next to `pallet.bin`. A set past that budget
+still draws row 0 — the first page's palette — until the engine has a slot
+for it. Raising the number does not invent rows.
+
+### Firebird (multi-id page + an image paint)
+
+Stock materials are `set65_id0` for the body and `set65_id13` for the lamps.
+`split: "auto"` keeps id 13 on its own CLUT row when the two panels do not fit
+in one 16-entry row. A one-row page that already fits is left alone.
+
+```json
+"textures": {
+  "65": {
+    "png": "art/firebird.png",
+    "split": "auto",
+    "protect": ["ebebe8", "4b0a08"],
+    "paints": {
+      "yellow": "e0c020",
+      "night": { "image": "art/firebird_night.png" },
+      "lamps": { "image": "art/firebird_lamps.png", "id": 13 }
+    }
+  }
+}
+```
+
+### REDBUICK (one D1 car, PAGE_N or set/id)
+
+The OBJ is in Driver 1 units. Bake it at `2048/3000` (`carbank_bake --scale
+0.68267`, the default). Preview then places the handling wheels with that same
+scale, and `preview.py` / `textured.py` / `spin.py` frame every car against
+the Driver 2 median (length 752) so an unscaled mesh (~1104) draws larger
+than the car the game shows.
+
+```json
+"textures": {
+  "1": { "png": "textures/PAGE_1.png", "split": "auto" }
+}
+```
+
+Materials may be `PAGE_1` (the whole of set 1, id 0) or `set1_id0`. Both are
+read. `split: "auto"` cuts the atlas into extra texture ids only when one
+16-entry row cannot hold the snapped colours.
 
 Civilian cars pick a column at random. The player car uses the frontend palette
 (SQUARE on the car select cycles "Palette n/6"); a column nothing filled falls

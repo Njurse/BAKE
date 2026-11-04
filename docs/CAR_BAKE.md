@@ -1,0 +1,113 @@
+# Car bake — palette, preview size, sounds
+
+Root causes for the imported-car colour, preview-scale and sound reports, and
+what the bake does about each. Output stays a carhacks LEV/LCF. `fourbpp.rgb555`
+is unchanged (a different rounding shifts every bank already baked).
+
+## 1. Palette pagination and colour crush
+
+Two different mechanisms were being treated as one.
+
+**Texture id collapsed onto row 0** — `carbank_bake.car_blocks`. A declared page
+was baked with one CLUT row and every poly on that set was rewritten to
+`id = 0`. The engine picks the row with `texture_cluts[set][id]`
+(`exportd2.page_png` says the same thing: painting the whole page with row 0
+garbles every sprite but the first). Firebird's lamps are `set65_id13`. Forcing
+them onto id 0 paints the lamps with the body row. That is a separate bug from
+the old "one mesh, many ids" note: the mesh was right, the bake threw the id
+away. A page whose snapped colours already fit in 16 entries still takes this
+path, so an existing one-row bank does not change.
+
+**One 16-entry row for a page that does not fit** — `carbank_page.bake_page` →
+`fourbpp.paletteize`. A 256-colour PNG that snaps to 16 or fewer RGB555 colours
+is kept exact (`count_snapped` / `should_split`). Past that, `split: "auto"`
+(the default) groups the page's UV islands (`plan_islands`) so each group gets
+its own CLUT row and the poly's id follows the island (`_id_at`). The first
+group of a source id keeps that id, so `set65_id13` stays 13. `split: "off"`
+is the old single-row quantize. `max_error` accepts one row when the quantize
+is no worse than that many channels.
+
+**civ_clut row budget** — not a bake that only emits eight rows. `bake.build_pallet`
+emits every `(set, id)` the geometry names. `CarPalIndexInCity` only searches
+`carTpages[city][0..7]` (`docs/DRIVER1.md` §7), so a set past the eighth draws
+row 0, the first page's palette. A D1 city bakes 11–13 sets; the pool can name
+more. `carbank_page.civ_row_map` records that, `build_pallet` prints the
+overflow, and a declared bank writes `clut-dump.txt` (set → row, then each CLUT
+as hex). `declare.clut_rows` changes the diagnostic only. The bake does not
+drop or renumber sets: a bank that already loads would move.
+
+`carbank_palette.rows_from_pages` emits one LUMP_PALLET record per CLUT row,
+`texnum` = the texture id. A one-row page is still a single texnum-0 record.
+
+## 2. Preview scale (REDBUICK)
+
+The bake multiplies Driver 1 vertices by `2048/3000` (`bake.build_model_record`,
+`docs/DRIVER1.md` §8). The LEV the game reads is already in the Driver 2 band
+(D1 median length 1104 → about 754, against D2's 752).
+
+`preview.py` `render`, `textured.py` `render` and `spin.py` `refs_for` used to
+fit **each mesh to its own span**. An unscaled body and a correctly scaled one
+filled the same cell, so the preview could not show the in-game size. They now
+share the projected span of the Driver 2 median box (284×176×752). A mesh still
+at D1 size draws about 1.47× larger.
+
+`preview_car.py` reads the OBJ, not the LEV. It treated every mesh longer than
+50 units as already engine-sized (`S = 1`), then divided handling `wheelDisp`
+(engine units) by that. A REDBUICK OBJ is ~1100 units long and the colBox is
+the scaled half-extent, so the wheelbase landed at `2048/3000` of the body and
+the car read as huge next to its wheels. `preview.infer_bake_scale` uses the
+colBox ratio (or a long axis past 980) and returns `2048/3000` for that OBJ,
+`1` when the OBJ already matches the colBox.
+
+The earlier "huge black wheels" note was the opposite case (body too small for
+the wheel mesh). This one is the body, in the authoring preview.
+
+## 3. Sounds
+
+`tools/common/vag.py` packed sample 0 in the **high** nibble. `vag.decode`
+agreed with itself, so the round-trip tests passed, and the engine did not:
+`add_car_sounds.decode_vag` and real VAG are low-nibble first. Every pair of
+samples was swapped. That is the garbled / crushed playback on a bank baked
+from WAV (Firebird). Loop and end flags are byte 1 of the block; `vag.encode`
+still writes `0x04` on the loop start and `0x03` / `0x01` on the last block,
+and `add_car_sounds._scaled_vag` still copies the source block's flags after
+the gain re-encode.
+
+Level, RMS and the 6% dead band are unchanged (`vag.level`, `docs/SOUNDS.md`).
+A recording that is already limited (Firebird engine crest ~2.0) stays limited;
+the nibble order was what made a clean encode play back destroyed.
+
+## 4. Paletted-image paint
+
+`textures.<set>.paints` accepts a hex colour (the existing hue shift,
+`carbank_palette.paint_row`) or `{"image": path, "id": N, "panel": [x0,y0,x1,y1]}`.
+`paint_from_image` sets each CLUT index to the colour the image shows on the
+texels that already use that index. Indices are not rewritten. `id` restricts
+the paint to one texture row (Firebird lamps). See `bank-schema.md`.
+
+## Verification
+
+```text
+python3 -m unittest test_page_split test_preview_scale test_carbank_page \
+    test_fourbpp_palette test_bankjson test_sound_knobs -q
+python3 -m unittest test_vag test_fourbpp -q          # from tools/common
+```
+
+In the bank, after `carbank_bake.py bank.json`:
+
+- `build/clut-dump.txt` — which set lands on which civ row, and the swatches.
+  `OVERFLOW` means that set draws the first page's palette in a stock
+  8-row engine.
+- Preview a REDBUICK (or any D1) OBJ with `preview_car.py`. Wheels from
+  `handling.json` should sit on the body's wheelbase, not a short one.
+  `preview.py` / `textured.py` print the longest axis next to D2's 752.
+- Sounds: rebake, then in JERICHO grep for
+  `gamesnd: resident slot N uses the imported model bank`. Engine and idle
+  should loop (flags byte still `0x04` / `0x03`); a one-shot horn ends (`0x01`).
+  Compare a decoded VAG against `add_car_sounds.decode_vag`, not only
+  `vag.decode`.
+
+Full in-game colour and pitch still need a JERICHO pack: load the bank, look
+at lamps versus body on the Firebird, and listen to the rev loop. `clut_rows`
+must match that build's `carTpages` second dimension or the dump's "fits" line
+is only true on paper.

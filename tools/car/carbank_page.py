@@ -423,6 +423,363 @@ def read_page(path):
     return blob, fourbpp.clut_rgb(rows[0]) if rows else [], indices
 
 
+# carTpages[city][8] (texture.c). A set past this draws the block's base row —
+# the first page's palette. A later engine may have more slots; bank.json
+# `clut_rows` overrides the count the diagnostic uses. It does not invent rows
+# the running engine does not have.
+CIV_CLUT_ROWS = 8
+MAX_TEX_IDS = 32
+
+
+def civ_row_map(sets, budget=CIV_CLUT_ROWS):
+    """Texture sets in ascending order -> the civ_clut row the engine binds.
+
+    `CarPalIndexInCity` walks `carTpages[city][0..budget)`. A set with no slot
+    answers -1 and the draw falls back to row 0, so those panels wear the first
+    page's colours. The map says so; it does not renumber a bank that already
+    loads.
+    """
+    ordered = sorted({int(s) for s in sets})
+    out = []
+
+    for i, page_set in enumerate(ordered):
+        out.append({"set": page_set,
+                    "row": i if i < budget else 0,
+                    "overflow": i >= budget})
+
+    return out
+
+
+def clut_dump_text(records, budget=CIV_CLUT_ROWS):
+    """One block of text: set -> civ row, then every CLUT row as hex swatches.
+
+    `records` are palette rows `{tpageindex, texnum, palette, clut}` with `clut`
+    the 32 raw bytes (or already a list of rgb triples).
+    """
+    sets = [r.get("tpageindex", r.get("set")) for r in records]
+    lines = ["civ_clut budget %d" % budget]
+
+    for entry in civ_row_map(sets, budget):
+        note = "  OVERFLOW -> row 0 (first page's palette)" if entry["overflow"] else ""
+        lines.append("set %d -> civ row %d%s" % (entry["set"], entry["row"], note))
+
+    for record in records:
+        clut = record.get("clut")
+        rgb = clut if clut and isinstance(clut[0], (tuple, list)) else fourbpp.clut_rgb(clut)
+        swatch = " ".join("%02x%02x%02x" % tuple(c) for c in rgb)
+        lines.append("set %s tex %s pal %s  %s" % (
+            record.get("tpageindex", record.get("set")),
+            record.get("texnum", 0), record.get("palette", 0), swatch))
+
+    return "\n".join(lines) + "\n"
+
+
+def _clip_rect(rect, width, height):
+    x0, y0, x1, y1 = rect
+    return (max(0, int(x0)), max(0, int(y0)),
+            min(width, int(x1)), min(height, int(y1)))
+
+
+def _bbox_uv(uvs):
+    us = [p[0] for p in uvs]
+    vs = [p[1] for p in uvs]
+    return (min(us), min(vs), max(us) + 1, max(vs) + 1)
+
+
+def _colours_in(pixels, width, rect):
+    """Distinct snapped colours in `rect`, insertion order."""
+    x0, y0, x1, y1 = _clip_rect(rect, width, len(pixels) // width)
+    seen = []
+    have = set()
+
+    for y in range(y0, y1):
+        row = y * width
+
+        for x in range(x0, x1):
+            colour = fourbpp.snap555(pixels[row + x])
+
+            if colour not in have:
+                have.add(colour)
+                seen.append(colour)
+
+    return seen
+
+
+def _pad16(colours):
+    """16 entries. Unused slots copy a real colour, never transparent black."""
+    colours = [tuple(c) for c in colours]
+
+    if not colours:
+        return [(8, 8, 8)] * fourbpp.CLUT_ROW_ENTRIES
+
+    filler = next((c for c in colours if c != (0, 0, 0)), (8, 8, 8))
+    colours = colours[:fourbpp.CLUT_ROW_ENTRIES]
+    return colours + [filler] * (fourbpp.CLUT_ROW_ENTRIES - len(colours))
+
+
+def count_snapped(pixels, width=None):
+    """How many RGB555 colours the engine will see in this image."""
+    width = width or fourbpp.PAGE_W
+
+    if width > 0 and len(pixels) % width == 0:
+        return len(_colours_in(pixels, width,
+                               (0, 0, width, len(pixels) // width)))
+
+    return len({fourbpp.snap555(p) for p in pixels})
+
+
+def _cluster_uvs(pixels, width, height, uv_lists, split):
+    """Group UV islands so each group fits in one 16-entry row.
+
+    An island whose own bbox already exceeds 16 colours cannot be cut (one poly
+    has one texture id) and is marked for quantization. `split` false puts
+    every island in that one quantized group — the old whole-page behaviour.
+    """
+    if not split:
+        rects = [_bbox_uv(uvs) for uvs in uv_lists if uvs]
+        return [{"rects": rects or [(0, 0, width, height)], "quantize": True,
+                 "cols": []}]
+
+    groups = []
+
+    for uvs in uv_lists:
+        if not uvs:
+            continue
+
+        rect = _clip_rect(_bbox_uv(uvs), width, height)
+
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+
+        cols = _colours_in(pixels, width, rect)
+
+        if len(cols) > fourbpp.CLUT_ROW_ENTRIES:
+            groups.append({"rects": [rect], "quantize": True, "cols": cols})
+            continue
+
+        placed = False
+
+        for group in groups:
+            if group["quantize"]:
+                continue
+
+            if len(set(group["cols"]) | set(cols)) <= fourbpp.CLUT_ROW_ENTRIES:
+                group["cols"] = list(dict.fromkeys(list(group["cols"]) + cols))
+                group["rects"].append(rect)
+                placed = True
+                break
+
+        if not placed:
+            groups.append({"rects": [rect], "quantize": False, "cols": list(cols)})
+
+    return groups or [{"rects": [(0, 0, width, height)], "quantize": True, "cols": []}]
+
+
+def should_split(pixels, width, height, islands, split="auto", max_error=None):
+    """True when one 16-entry row would crush this page.
+
+    A page whose snapped colours already fit is never split: a 256-colour PNG
+    that only uses 16 RGB555 shades stays one row, byte for byte the old bake.
+    An explicit `split` of "off" keeps that bake even when the colours do not
+    fit. `max_error` (max channel, 0..255) accepts a single-row quantize whose
+    worst texel is no further than that.
+    """
+    if split in ("off", False, None, "false", 0):
+        return False
+
+    if count_snapped(pixels) <= fourbpp.CLUT_ROW_ENTRIES:
+        return False
+
+    if max_error is not None:
+        colours, indices = fourbpp.paletteize(pixels, width, height)
+        worst = 0
+
+        for pixel, index in zip(pixels, indices):
+            got = colours[index]
+            src = fourbpp.snap555(pixel)
+            worst = max(worst, max(abs(src[c] - got[c]) for c in range(3)))
+
+            if worst > max_error:
+                break
+
+        if worst <= max_error:
+            return False
+
+    groups = 0
+
+    for uv_lists in (islands or {}).values():
+        groups += len(_cluster_uvs(pixels, width, height, uv_lists, True))
+
+    # One island that itself does not fit is the legacy whole-page quantize:
+    # there is no second poly to give a row to. Two ids, or two polys whose
+    # colours separate, each get a row.
+    return groups > 1 or len(islands or {}) > 1
+
+
+def _scatter_exact(indices, pixels, width, rects, colours):
+    index = {tuple(c): i for i, c in enumerate(colours)}
+
+    for rect in rects:
+        x0, y0, x1, y1 = _clip_rect(rect, width, len(pixels) // width)
+
+        for y in range(y0, y1):
+            row = y * width
+
+            for x in range(x0, x1):
+                indices[row + x] = index[fourbpp.snap555(pixels[row + x])]
+
+
+def _scatter_quantize(indices, pixels, width, height, rects):
+    x0 = min(r[0] for r in rects)
+    y0 = min(r[1] for r in rects)
+    x1 = max(r[2] for r in rects)
+    y1 = max(r[3] for r in rects)
+    x0, y0, x1, y1 = _clip_rect((x0, y0, x1, y1), width, height)
+    rw, rh = x1 - x0, y1 - y0
+
+    if rw < 1 or rh < 1:
+        return _pad16([(8, 8, 8)])
+
+    sub = [pixels[(y0 + y) * width + (x0 + x)] for y in range(rh) for x in range(rw)]
+    colours, local = fourbpp.paletteize(sub, rw, rh)
+
+    for rect in rects:
+        rx0, ry0, rx1, ry1 = _clip_rect(rect, width, height)
+
+        for y in range(ry0, ry1):
+            for x in range(rx0, rx1):
+                if x0 <= x < x1 and y0 <= y < y1:
+                    indices[y * width + x] = local[(y - y0) * rw + (x - x0)]
+
+    return colours
+
+
+def plan_islands(pixels, width, height, islands, split=True):
+    """(indices, {id: 16 colours}, pieces) for a page that does not fit one row.
+
+    `islands` is `{texture id: [uv list, ...]}` with uvs in page texels.
+    The first group of each source id keeps that id (so set65_id13 stays id
+    13). Further groups take the next free id, up to 32. Pieces carry the rect
+    a poly's UV centroid is matched against.
+    """
+    islands = islands or {0: [[(0, 0), (width - 1, 0),
+                               (width - 1, height - 1), (0, height - 1)]]}
+    indices = bytearray(width * height)
+    rows = {}
+    pieces = []
+    next_id = (max(islands) + 1) if islands else 1
+
+    for src_id in sorted(islands):
+        groups = _cluster_uvs(pixels, width, height, islands[src_id], split)
+
+        for number, group in enumerate(groups):
+            if number == 0:
+                tex_id = src_id
+            elif next_id < MAX_TEX_IDS:
+                tex_id = next_id
+                next_id += 1
+            else:
+                tex_id = src_id
+
+            rects = group["rects"]
+
+            if group["quantize"] or len(group["cols"]) > fourbpp.CLUT_ROW_ENTRIES:
+                colours = _scatter_quantize(indices, pixels, width, height, rects)
+            else:
+                colours = _pad16(group["cols"])
+                _scatter_exact(indices, pixels, width, rects, colours)
+
+            rows[tex_id] = colours
+
+            for rect in rects:
+                pieces.append({"id": tex_id, "rect": [int(v) for v in rect],
+                               "src": src_id})
+
+    return indices, rows, pieces
+
+
+def _key_matches(colour, key, tolerance, chroma):
+    if key is None:
+        return True
+
+    if chroma is not None:
+        return (abs((colour[0] - colour[1]) - (key[0] - key[1])) <= chroma
+                and abs((colour[2] - colour[1]) - (key[2] - key[1])) <= chroma)
+
+    snapped = fourbpp.snap555(key)
+    return min(max(abs(colour[c] - candidate[c]) for c in range(3))
+               for candidate in (key, snapped)) <= max(tolerance or 0, 0)
+
+
+def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
+                 chroma=None, pieces=None):
+    """Page blob from per-id CLUT rows. Gaps copy the lowest id's colours.
+
+    A keyed backdrop is cleared (0x0000) only on the index its texels actually
+    took, and only when that entry still is the key colour — a near-black shade
+    is not turned into the transparent marker.
+    """
+    if not rows_by_id:
+        rows_by_id = {0: [(8, 8, 8)] * fourbpp.CLUT_ROW_ENTRIES}
+
+    filler = list(rows_by_id[min(rows_by_id)])
+    top = min(MAX_TEX_IDS - 1, max(rows_by_id))
+    ordered = []
+
+    for tex_id in range(top + 1):
+        colours = list(rows_by_id.get(tex_id, filler))
+        ordered.append(_pad16(colours))
+
+    cleared = {}
+
+    if mask is not None and key is not None and any(mask):
+        owned = {}
+
+        for piece in pieces or []:
+            owned.setdefault(piece["id"], []).append(piece["rect"])
+
+        for tex_id, rects in owned.items():
+            if tex_id >= len(ordered):
+                continue
+
+            votes = {}
+
+            for rect in rects:
+                x0, y0, x1, y1 = _clip_rect(rect, fourbpp.PAGE_W, fourbpp.PAGE_H)
+
+                for y in range(y0, y1):
+                    row = y * fourbpp.PAGE_W
+
+                    for x in range(x0, x1):
+                        if mask[row + x]:
+                            index = indices[row + x]
+                            votes[index] = votes.get(index, 0) + 1
+
+            if not votes:
+                continue
+
+            at = max(votes, key=lambda k: (votes[k], -k))
+            colour = ordered[tex_id][at]
+
+            if _key_matches(colour, key, tolerance, chroma):
+                cleared.setdefault(tex_id, set()).add(at)
+
+    raw = fourbpp.encode_indices(bytes(indices))
+    stream = fourbpp.encode_literal(raw[::-1])
+    body = bytearray()
+
+    for tex_id, colours in enumerate(ordered):
+        row = bytearray(fourbpp.rgb_to_clut(colours))
+
+        for index in cleared.get(tex_id, ()):
+            struct.pack_into("<H", row, index * 2, 0)
+
+        body += row
+
+    blob = struct.pack("<i", len(ordered)) + bytes(body) + stream
+    return blob, ordered
+
+
 def hex_colour(text):
     """'#rrggbb' / 'rrggbb' -> (r, g, b)."""
     value = str(text).strip().lower()
