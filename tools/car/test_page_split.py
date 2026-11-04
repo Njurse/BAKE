@@ -121,6 +121,25 @@ class SplitTests(unittest.TestCase):
         self.assertIn("set 1 -> civ row 0", text)
 
 
+class MaterialRowTests(unittest.TestCase):
+    def test_page_1_stays_on_its_row_when_the_centroid_hits_a_leftover(self):
+        import carbank_bake
+
+        rects = [
+            {"id": 0, "rect": [0, 0, 40, 40], "src": 0},
+            {"id": 2, "rect": [100, 100, 140, 140], "src": None},
+        ]
+        body = {"id": 0, "uv": [(110, 110), (130, 110), (120, 130)]}
+        self.assertEqual(carbank_bake._id_at(body, rects), 0)
+
+        # a real split of the same material still follows the centroid
+        split = [
+            {"id": 0, "rect": [0, 0, 40, 40], "src": 0},
+            {"id": 1, "rect": [100, 100, 140, 140], "src": 0},
+        ]
+        self.assertEqual(carbank_bake._id_at(body, split), 1)
+
+
 class LeftoverTests(unittest.TestCase):
     """Sprites the mesh does not cover must not spend the body's CLUT slots."""
 

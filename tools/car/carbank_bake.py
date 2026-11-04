@@ -97,13 +97,20 @@ def _id_at(poly, rects):
 
     The smallest containing rect wins, and a rect of the poly's own id wins a
     tie, so a panel that was not split stays on the id its material named.
+    A leftover retail sprite (src is None — not a material) does not replace
+    that id: PAGE_1 stays on row 0 when its centroid only hits the leftover.
     """
     uvs = poly.get("uv") or []
     fallback = rects[0]["id"]
+    own_id = poly.get("id")
+
+    def material_row():
+        if any(r.get("id") == own_id and r.get("src") is not None for r in rects):
+            return own_id
+        return None
 
     if not uvs:
-        own = poly.get("id")
-        return own if any(r["id"] == own for r in rects) else fallback
+        return own_id if any(r["id"] == own_id for r in rects) else fallback
 
     u = sum(p[0] for p in uvs) / float(len(uvs))
     v = sum(p[1] for p in uvs) / float(len(uvs))
@@ -111,11 +118,18 @@ def _id_at(poly, rects):
            if r["rect"][0] <= u < r["rect"][2] and r["rect"][1] <= v < r["rect"][3]]
 
     if not hit:
-        own = poly.get("id")
-        return own if any(r["id"] == own for r in rects) else fallback
+        kept = material_row()
+        if kept is not None:
+            return kept
+        return own_id if any(r["id"] == own_id for r in rects) else fallback
 
-    own_id = poly.get("id")
     own = [r for r in hit if r["id"] == own_id]
+
+    if not own and hit and all(r.get("src") is None for r in hit):
+        kept = material_row()
+        if kept is not None:
+            return kept
+
     chosen = own or hit
     chosen.sort(key=lambda r: (r["rect"][2] - r["rect"][0]) * (r["rect"][3] - r["rect"][1]))
     return chosen[0]["id"]
@@ -1078,7 +1092,8 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                 tolerance=page.transparent_tolerance,
                 chroma=page.transparent_chroma, pieces=pieces)
             colours = row_map.get(min(row_map)) if row_map else []
-            entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"]}
+            entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"],
+                                    "src": piece.get("src")}
                                    for piece in pieces]
             ncluts = (max(row_map) + 1) if row_map else 1
             warnings.append(
