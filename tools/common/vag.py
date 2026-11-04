@@ -545,6 +545,41 @@ def encode(samples, loop=False, loop_from=0, loop_end=None):
     return bytes(out), len(samples), rms
 
 
+def encode_settled(samples, tolerance=0.06, **encode_kw):
+    """Encode, then once more if the reconstruction missed the PCM's loudness.
+
+    The level is applied to the samples before they are encoded. ADPCM's
+    reconstruction is not unity gain: a loop levelled onto retail's rms can
+    come back hot or quiet, which is the crushed-soft / crushed-loud gap next
+    to a stock Driver 2 bank. One corrective scale, capped by the peak the
+    PCM already had, puts the decoded sample back on that loudness. A miss
+    inside `tolerance` (the same 6% dead band as `level`) is left alone — a
+    second quantisation of a sample that already landed is pure loss.
+    """
+    data, count, err = encode(samples, **encode_kw)
+    intended = [max(-32768, min(32767, int(round(s)))) for s in samples]
+    want = stats(intended)
+    got = stats(decode(data, len(intended)))
+
+    if want["rms"] <= 0 or got["rms"] <= 0 or got["peak"] <= 0:
+        return data, count, err
+
+    corr = want["rms"] / got["rms"]
+
+    # A few reconstructed samples poking past the ceiling must not pull the
+    # whole loop down: loudness is the rms. Only refuse to turn a quiet loop
+    # up when its peak is already over the ceiling we levelled to.
+    if corr > 1.0 and want["peak"] > 0 and got["peak"] > want["peak"]:
+        corr = 1.0
+    elif corr > 1.0 and want["peak"] > 0 and got["peak"] * corr > want["peak"]:
+        corr = want["peak"] / float(got["peak"])
+
+    if abs(corr - 1.0) <= tolerance:
+        return data, count, err
+
+    return encode(scale(samples, corr), **encode_kw)
+
+
 def blocks_for(samples):
     """How many 16-byte blocks `samples` needs."""
     return (len(samples) + SAMPLES_PER_BLOCK - 1) // SAMPLES_PER_BLOCK
