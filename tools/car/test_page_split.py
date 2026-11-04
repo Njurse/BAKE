@@ -121,6 +121,54 @@ class SplitTests(unittest.TestCase):
         self.assertIn("set 1 -> civ row 0", text)
 
 
+class MaterialRowTests(unittest.TestCase):
+    def test_page_1_stays_on_its_row_when_the_centroid_hits_a_leftover(self):
+        import carbank_bake
+
+        rects = [
+            {"id": 0, "rect": [0, 0, 40, 40], "src": 0},
+            {"id": 2, "rect": [100, 100, 140, 140], "src": None},
+        ]
+        body = {"id": 0, "uv": [(110, 110), (130, 110), (120, 130)]}
+        self.assertEqual(carbank_bake._id_at(body, rects), 0)
+
+        # a real split of the same material still follows the centroid
+        split = [
+            {"id": 0, "rect": [0, 0, 40, 40], "src": 0},
+            {"id": 1, "rect": [100, 100, 140, 140], "src": 0},
+        ]
+        self.assertEqual(carbank_bake._id_at(body, split), 1)
+
+
+class LeftoverTests(unittest.TestCase):
+    """Sprites the mesh does not cover must not spend the body's CLUT slots."""
+
+    def test_a_retail_leftover_is_paginated_off_the_body_row(self):
+        pixels = [(255, 0, 255)] * (W * H)
+        body = _reds(12)
+        _paint(pixels, 16, 16, body, size=8)
+        leftover = [fourbpp.snap555((0, 24 + i * 8, 16)) for i in range(16)]
+        _paint(pixels, 180, 180, leftover, size=4)
+        islands = {0: [_quad(16, 16, 16 + 12 * 8, 24)]}
+
+        self.assertTrue(carbank_page.should_split(pixels, W, H, islands, "auto"))
+        self.assertFalse(carbank_page.should_split(pixels, W, H, islands, "off"))
+
+        indices, rows, pieces = carbank_page.plan_islands(
+            pixels, W, H, islands, True)
+        body_cols = {tuple(c) for c in rows[0]}
+        self.assertTrue(body_cols & set(body))
+        self.assertFalse(body_cols & set(leftover))
+
+        extra = [p for p in pieces if p["src"] is None]
+        self.assertTrue(extra)
+        self.assertNotEqual(extra[0]["id"], 0)
+        self.assertIn(extra[0]["id"], rows)
+        got = rows[0][indices[16 * W + 16]]
+        self.assertGreater(got[0], got[1])
+        self.assertGreater(got[0], got[2])
+
+
 class PaintImageTests(unittest.TestCase):
     def test_an_image_repaints_by_index(self):
         colours = [(255, 0, 0), (0, 255, 0)] + [(8, 8, 8)] * 14

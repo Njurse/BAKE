@@ -12,6 +12,12 @@ bytes are untouched.
 import argparse
 import os
 import struct
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "common"))
+
+import vag  # noqa: E402
 
 LUMP_CAR_DATA = 35
 LUMP_CAR_MODELS = 28
@@ -50,10 +56,12 @@ HORN8_MODELS = {
 SMALL_MODELS = {"FRISCO": (3,), "BETAMIAMI": (1,)}
 SIREN_SAMPLE_RETAIL = 4
 
-# Attenuation applied to imported samples so they sit in the same headroom
-# as retail D1 loops. 0.45 ≈ -7 dB. Raise toward 0.55–0.6 if too quiet,
-# drop toward 0.35 if still crushing.
-SAMPLE_GAIN = 0.45
+# Extra linear trim after the sample has been levelled to a stock Driver 2
+# car bank (peak ceiling 0.999, rms 0.34 — see vag.DEFAULT_PEAK / DEFAULT_RMS).
+# 1.0 means no extra trim. The old 0.45 was a peak scale: a limited loop
+# (crest ~2) stayed loud and a dynamic one went quiet, and the encode then
+# moved it again. Pass a number below 1 to sit a bank under retail on purpose.
+SAMPLE_GAIN = 1.0
 
 
 def decode_vag(data):
@@ -193,26 +201,39 @@ def _scaled_vag(src, index, gain):
     raw = bytes(src["vag"][addr:addr + length])
     # Key on the bytes themselves: id() of a freed source can be reused by the
     # next city's, which would hand that city another city's sample.
-    key = (raw, gain)
-    vag = _VAG_CACHE.get(key)
-    if vag is None:
+    key = (raw, gain, "d2rms")
+    cached = _VAG_CACHE.get(key)
+    if cached is None:
         pcm = decode_vag(raw)
-        peak = max((abs(s) for s in pcm), default=0) or 1
-        scale = gain * 32767.0 / peak
-        out = bytearray(encode_vag([max(-32768, min(32767, int(s * scale))) for s in pcm]))
-        # encode_vag writes flag 0 in every block. Carry the source's ADPCM
-        # flags (loop start 0x04, loop end 0x03, one-shot end 0x01) across
-        # block for block, as the pre-gain bake did by copying the bytes.
-        # Without them the engine note never loops and the SPU decoder runs
-        # off the sample's end (BETAMIAMI's bank, last in SPU RAM, overran
-        # decodeSound's buffer and crashed).
-        for b in range(min(len(raw), len(out)) // 16):
-            out[b * 16 + 1] = raw[b * 16 + 1]
-        if len(out) >= 16 and not any(out[b * 16 + 1] & 0x01 for b in range(len(out) // 16)):
-            out[len(out) - 16 + 1] |= 0x01
-        vag = bytes(out)
-        _VAG_CACHE[key] = vag
-    return vag
+        # Match a stock D2 car bank. A sample already inside the 6% band is
+        # kept byte for byte: re-quantising a VAG that is already on the
+        # ADPCM lattice is what crushes a clean loop.
+        levelled, _before, applied = vag.level(
+            pcm, peak=vag.DEFAULT_PEAK, rms=vag.DEFAULT_RMS)
+        trim = float(gain if gain is not None else 1.0)
+
+        if trim != 1.0:
+            levelled = vag.scale(levelled, trim)
+            applied *= trim
+
+        if applied == 1.0:
+            cached = raw
+        else:
+            data, _count, _err = vag.encode_settled(levelled, loop=False)
+            out = bytearray(data)
+            # encode writes its own flags. Carry the source's ADPCM flags
+            # (loop start 0x04, loop end 0x03, one-shot end 0x01) across
+            # block for block. Without them the engine note never loops and
+            # the SPU decoder runs off the sample's end (BETAMIAMI's bank,
+            # last in SPU RAM, overran decodeSound's buffer and crashed).
+            for b in range(min(len(raw), len(out)) // 16):
+                out[b * 16 + 1] = raw[b * 16 + 1]
+            if (len(out) >= 16 and not any(
+                    out[b * 16 + 1] & 0x01 for b in range(len(out) // 16))):
+                out[len(out) - 16 + 1] |= 0x01
+            cached = bytes(out)
+        _VAG_CACHE[key] = cached
+    return cached
 
 
 def build_bank(voices, engine_index, horn_index, idle_index=None,
@@ -226,9 +247,9 @@ def build_bank(voices, engine_index, horn_index, idle_index=None,
         if rate is not None:
             samplerate = rate
 
-        vag = _scaled_vag(src, index, gain)
-        entries.append((len(payload), len(vag), loop, samplerate))
-        payload.extend(vag)
+        block = _scaled_vag(src, index, gain)
+        entries.append((len(payload), len(block), loop, samplerate))
+        payload.extend(block)
 
     append(engine_index, rate=engine_rate)
     if idle_index is None:
