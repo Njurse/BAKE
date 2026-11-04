@@ -42,10 +42,16 @@ findstr /i "warning" "%LOG%"
 for /f "usebackq delims=" %%L in (`findstr /i /c:"bank ok" "%LOG%"`) do echo   %%L
 copy /Y "%OUT%\@NAME@.LEV" "%BANK%\" >nul
 copy /Y "%OUT%\@NAME@.LCF" "%BANK%\" >nul
+if exist "%OUT%\@NAME@.portraits\" (
+    xcopy /E /I /Y "%OUT%\@NAME@.portraits" "%BANK%\@NAME@.portraits\" >nul
+)
 if not "%MIRROR%"=="" (
     if not exist "%MIRROR%" mkdir "%MIRROR%"
     copy /Y "%OUT%\@NAME@.LEV" "%MIRROR%\" >nul
     copy /Y "%OUT%\@NAME@.LCF" "%MIRROR%\" >nul
+    if exist "%OUT%\@NAME@.portraits\" (
+        xcopy /E /I /Y "%OUT%\@NAME@.portraits" "%MIRROR%\@NAME@.portraits\" >nul
+    )
     echo   installed to %MIRROR%
 )
 if "%EXEDIR%"=="" exit /b 0

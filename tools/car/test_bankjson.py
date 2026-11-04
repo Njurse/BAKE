@@ -324,6 +324,80 @@ class RefusalTests(BankFixture):
         self.assertIn("bank.json", str(caught.exception))
 
 
+class PortraitTests(BankFixture):
+    def _page(self, name="portrait.raw", clut=False, clut_size=32):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as f:
+            f.write(b"\x11" * bankjson.PORTRAIT_BYTES)
+        if clut:
+            with open(os.path.splitext(path)[0] + ".clut", "wb") as f:
+                f.write(b"\x00\x80" * (clut_size // 2))
+        return name
+
+    def test_a_portrait_page_loads_and_installs_by_slot(self):
+        self._page(clut=True)
+        bank = bankjson.load(self.write(self.declare(
+            car=self.car(portrait="portrait.raw"),
+            order=[{"slot": 3, "car": "car1"}]),
+            computed={"city": "FIREBIRD", "lev": "build/FIREBIRD.LEV"}))
+
+        car = bank.cars["car1"]
+        self.assertTrue(car.portrait.endswith("portrait.raw"))
+        self.assertTrue(car.portrait_clut.endswith("portrait.clut"))
+
+        out = os.path.join(self.dir, "build")
+        slots, notes = bankjson.install_portraits(bank, out, "FIREBIRD")
+
+        self.assertEqual(slots, [3])
+        self.assertEqual(notes, [])
+        raw = os.path.join(out, "FIREBIRD.portraits", "3.raw")
+        clut = os.path.join(out, "FIREBIRD.portraits", "3.clut")
+        self.assertEqual(os.path.getsize(raw), bankjson.PORTRAIT_BYTES)
+        self.assertEqual(os.path.getsize(clut), bankjson.PORTRAIT_CLUT_BYTES)
+
+    def test_a_short_portrait_is_refused(self):
+        with open(os.path.join(self.dir, "portrait.raw"), "wb") as f:
+            f.write(b"\x00" * 100)
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(
+                car=self.car(portrait="portrait.raw"))))
+
+        self.assertIn("32768", str(caught.exception))
+
+    def test_a_short_clut_is_refused(self):
+        self._page(clut=True, clut_size=8)
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(
+                car=self.car(portrait="portrait.raw"))))
+
+        self.assertIn("32", str(caught.exception))
+
+    def test_a_portrait_under_build_is_refused(self):
+        os.makedirs(os.path.join(self.dir, "build"))
+        with open(os.path.join(self.dir, "build", "portrait.raw"), "wb") as f:
+            f.write(b"\x11" * bankjson.PORTRAIT_BYTES)
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(
+                car=self.car(portrait="build/portrait.raw"))))
+
+        self.assertIn("build/", str(caught.exception))
+
+    def test_a_portrait_on_an_unordered_car_is_noted(self):
+        self._page()
+        # car1 is ordered and has no portrait; car2 has a page but no slot
+        decl = self.declare(car=self.car())
+        decl["cars"]["car2"] = self.car(portrait="portrait.raw")
+        bank = bankjson.load(self.write(decl))
+        slots, notes = bankjson.install_portraits(bank, self.dir, "TEST")
+
+        self.assertEqual(slots, [])
+        self.assertIn("car2", notes[0])
+        self.assertFalse(os.path.isdir(os.path.join(self.dir, "TEST.portraits")))
+
+
 class WriteBackTests(BankFixture):
     def test_write_declare_keeps_the_computed_half(self):
         decl = self.declare()

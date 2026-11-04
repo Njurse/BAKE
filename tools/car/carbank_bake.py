@@ -1600,6 +1600,14 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
 
     report = exportd2.build_bank(manifest, manifest_path, out_dir, None)
 
+    # Portraits are not a lump. The frontend reads <LEV stem>.portraits/<model>.raw
+    # from beside the .LEV it opens, so the copy lands next to the LEV this bake
+    # just wrote. rebake.bat carries that folder on to the install copy.
+    _slots, portrait_notes = bankjson.install_portraits(
+        bank, out_dir, report.get("city") or "bank")
+    if portrait_notes:
+        warnings = list(warnings) + portrait_notes
+
     # A bakes's own checks are the only thing standing between a workshop and a
     # bank with holes in it: build_bank writes the files either way, so the
     # verdict has to reach the caller and the exit code (rebake.bat installs on

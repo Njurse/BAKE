@@ -107,6 +107,24 @@ delete the scratch: the bank they leave behind is already donor-free.
 
 Every path is relative to the folder holding `bank.json`.
 
+### Portrait
+
+Optional. One file per car, named by the **model slot** in `order` (not by the frontend list position):
+
+```
+<LEV stem>.portraits/<slot>.raw
+<LEV stem>.portraits/<slot>.clut    optional
+```
+
+The bake writes that folder beside the built `<CITY>.LEV`. `rebake.bat` copies it next to the install copy and into the game mirror, which is where the frontend looks: beside the `.LEV` the city registry opens. Dropping the folder there by hand works without a declaration.
+
+| file | size | what it is |
+| --- | --- | --- |
+| `<slot>.raw` | exactly `32768` (`0x8000`) | one 4bpp page, 256×256, 128 bytes a row. The frontend uploads the top **219** rows and draws a **255×219** sprite, the same rectangle as one slot of `DATA\CARS\CCARS.RAW` |
+| `<slot>.clut` | exactly `32` bytes | 16 little-endian RGB555 colours. Uploaded over the portrait CLUT at VRAM `(960,256)` after `CARBACK.RAW`. Omit it to keep the stock car-select palette |
+
+`portrait` in the declaration is a path to that `.raw`, relative to the car file. A `<same-name>.clut` beside the source is copied too. The page must already be 4bpp indices — the bake does not run it through the quantiser. A source under `work/`, `pages/` or `build/` is refused, same as a texture.
+
 ### `order[]`
 
 The bank's model slots, in engine order: `slot` is 0..12 and unique, `car` names
@@ -129,6 +147,7 @@ bake writes `-1` for them.
 | `sounds` | no | see below |
 | `palette` | no | a CLUT source for a car whose colours are not its pages' own |
 | `remap` | no | `set` / `id` maps applied to every poly as it is read |
+| `portrait` | no | a car-select portrait page. See *Portrait* above. The bake copies it; it does not quantise it |
 
 ### `textures`
 
