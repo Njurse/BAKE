@@ -114,7 +114,7 @@ and `sample_bytes` (per-sample cap, default 16384).
 They are applied in this order, and the order is audible:
 
     dc offset -> resample -> trim -> fade_out -> gain_db -> level -> byte budget
-    -> loop points -> encode
+    -> loop points -> encode -> one loudness correction if the reconstruction missed
 
 Trimming before the fade puts the fade on the new tail; the fade before the level
 stops it dragging the peak down and making the level scale everything else up;
@@ -257,6 +257,21 @@ lattice and forces a re-quantisation, which measures ~30 dB instead of ~76 dB.
 On the Firebird's own samples the gains the target would have applied were 1.7%,
 3.3% and 5.2% - all inside the band, so all three are used as they are, and the
 idle went from 32.6 dB to 79.3 dB. `force: true` when the exact level is the point.
+
+The level is applied to the PCM, and the ADPCM reconstruction is not unity
+gain. `vag.encode_settled` encodes, measures the decoded rms, and encodes once
+more when that miss is outside the same 6% band, capped by the peak the PCM
+already had. A sample that was not rescaled (the dead band) and whose
+reconstruction already landed is not encoded a second time.
+
+Driver 1 banks patched by `add_car_sounds.py` use the same target. `_scaled_vag`
+used to peak-normalise and multiply by 0.45. A limited loop (crest near 2)
+then sat loud and crushed next to a stock Driver 2 bank, and a dynamic loop
+sat quiet, and the re-encode moved it again. The trim is now `SAMPLE_GAIN`
+(default 1.0, no extra trim) after `vag.level` at rms 0.34 / peak 0.999. A
+decoded VAG already inside the band is copied byte for byte, flags included.
+A sample that has to move is re-encoded with `encode_settled`, then the
+source block flags are copied back so the loop still loops.
 
 ## Pitch: the game asks for less than the recording
 

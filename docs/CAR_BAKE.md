@@ -39,6 +39,16 @@ drop or renumber sets: a bank that already loads would move.
 `carbank_palette.rows_from_pages` emits one LUMP_PALLET record per CLUT row,
 `texnum` = the texture id. A one-row page is still a single texnum-0 record.
 
+**Leftover sprites on a retail page.** A Driver 1 page (REDBUICK `PAGE_1` is
+the one that shows it) still carries sprites the mesh does not sample. A
+whole-page quantise spends the body's 16 CLUT entries on those sprites and
+the body crushes. `split: "auto"` now also looks at texels outside the UV
+coverage (`carbank_page.leftover_blobs`). When those colours do not fit in
+the body's row they are paginated onto the next texture ids, each with its
+own CLUT row. The body polys stay on the id their material named. The
+backdrop (the page's top-left colour) is not a sprite. `split: "off"` keeps
+the old whole-page quantise.
+
 ## 2. Preview scale (REDBUICK)
 
 The bake multiplies Driver 1 vertices by `2048/3000` (`bake.build_model_record`,
