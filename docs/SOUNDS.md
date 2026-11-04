@@ -53,6 +53,12 @@ lets FIREBIRD.json name a WAV and still rebuild the bank exactly.
 
 ## The flags byte is load-bearing
 
+Nibbles are packed **low nibble first** (sample 0 in the low half of the byte),
+the same order `add_car_sounds.decode_vag` and the engine use. Packing the high
+nibble first still round-trips through `vag.decode` and plays back as swapped
+pairs — garbled, crushed audio. The loop/end flags are byte 1 and are separate
+from that order.
+
 Bit 0 = loop end, bit 1 = repeat, bit 2 = loop start. A stream whose last block
 carries **no end marker keeps decoding past its own end**; on PsyCross that walks
 off the sample and writes outside the host's SPU buffer — a hard crash with no
