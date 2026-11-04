@@ -45,6 +45,17 @@ enumerates every one.
 | `tools/ped/` | the JMPPED pedestrian toolkit |
 | `tools/common/` | shared helpers |
 
+## Python dependencies
+
+The bake itself needs Python 3 and [Pillow](https://python-pillow.org/).
+`BAKE_D1_CARS.bat` / `.sh` check for Pillow before the first bake step and
+install it for the Python they are about to use when it is missing (`pip
+install --user`, with a plain install fallback). Nothing else is required for a
+bake: the preview tools' extras (numpy, pygame-ce, PyOpenGL) stay optional.
+
+To diagnose the environment without changing it, run
+`python tools/require_deps.py --check`.
+
 ## Building
 
 Auto-discovered: any `JERICHO/MODS/<id>/` with a `mod.toml` is a module, the
