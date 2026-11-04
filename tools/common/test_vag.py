@@ -54,6 +54,19 @@ class RoundTripTests(unittest.TestCase):
     def test_the_blocks_are_28_samples(self):
         self.assertEqual(vag.BLOCK_BYTES * 2 - 4, 28)
 
+    def test_low_nibble_is_the_first_sample(self):
+        # The engine and add_car_sounds.decode_vag read the low nibble as
+        # sample 0. A high-nibble-first pack round-trips through vag.decode
+        # and still plays back as garbled pairs.
+        sys.path.insert(0, os.path.join(HERE, "..", "car"))
+        import add_car_sounds
+
+        pcm = _sine(56, amplitude=8000)
+        data, count, _rms = vag.encode(pcm, loop=False)
+        back = add_car_sounds.decode_vag(data)[:count]
+        self.assertEqual(len(back), count)
+        self.assertLess(max(abs(a - b) for a, b in zip(pcm, back)), 1500)
+
 
 class FlagTests(unittest.TestCase):
     """The flags byte is not decoration: a stream with no end marker keeps

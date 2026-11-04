@@ -92,8 +92,37 @@ def _block_for(variant, geom, clean_block, scale, flip_normals=False):
                                    scale, flip_normals=flip_normals)
 
 
+def _id_at(poly, rects):
+    """The CLUT row a poly draws: the plan rect its UV centroid lands in.
+
+    The smallest containing rect wins, and a rect of the poly's own id wins a
+    tie, so a panel that was not split stays on the id its material named.
+    """
+    uvs = poly.get("uv") or []
+    fallback = rects[0]["id"]
+
+    if not uvs:
+        own = poly.get("id")
+        return own if any(r["id"] == own for r in rects) else fallback
+
+    u = sum(p[0] for p in uvs) / float(len(uvs))
+    v = sum(p[1] for p in uvs) / float(len(uvs))
+    hit = [r for r in rects
+           if r["rect"][0] <= u < r["rect"][2] and r["rect"][1] <= v < r["rect"][3]]
+
+    if not hit:
+        own = poly.get("id")
+        return own if any(r["id"] == own for r in rects) else fallback
+
+    own_id = poly.get("id")
+    own = [r for r in hit if r["id"] == own_id]
+    chosen = own or hit
+    chosen.sort(key=lambda r: (r["rect"][2] - r["rect"][0]) * (r["rect"][3] - r["rect"][1]))
+    return chosen[0]["id"]
+
+
 def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, colors=None,
-               flip_normals=False, flip_z=False):
+               flip_normals=False, flip_z=False, clut_plans=None):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -112,16 +141,27 @@ def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, 
     if "clean" not in geoms:
         raise SystemExit("carbank_bake: car %r has no clean OBJ" % car.label)
 
-    # A page the car declares is re-baked with ONE CLUT row (row 0), and the
-    # palette rows are taken from that row with texnum 0. A poly keeps the
-    # source id (set36_id17) from its material, but the id picks the CLUT row
-    # (texture_cluts[set][id]) - row 17 of a one-row page does not exist, so the
-    # car drew white/garbage. Point those polys at row 0.
+    # A page baked as one CLUT row can only be drawn with texture id 0:
+    # texture_cluts[set][id] is that row, and id 17 of a one-row page is empty
+    # (the car drew white). A page the splitter gave several rows keeps each
+    # poly on the row its UV centroid landed in — id 13 stays 13 when that row
+    # was built for it. Collapsing those ids onto 0 is what painted the lights
+    # with the body palette.
     rebaked = {t.set for t in car.textures}
+    plans = clut_plans or {}
 
     for geom in geoms.values():
         for poly in geom["polys"]:
-            if poly.get("set") in rebaked:
+            page_set = poly.get("set")
+
+            if page_set not in rebaked:
+                continue
+
+            rects = plans.get(page_set)
+
+            if rects:
+                poly["id"] = _id_at(poly, rects)
+            else:
                 poly["id"] = 0
 
     warnings = []
@@ -389,8 +429,12 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
-        blocks, car_warnings = car_blocks(car, scale, default_page, flip_y, flip_winding, colors,
-                                          flip_normals, flip_z)
+        blocks, car_warnings = car_blocks(
+            car, scale, default_page, flip_y, flip_winding, colors,
+            flip_normals, flip_z,
+            clut_plans={p["set"]: p["clut_rects"]
+                        for p in (manifest.get("pages") or [])
+                        if p.get("clut_rects")})
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -802,17 +846,81 @@ def _file_sha256(path):
         return None
 
 
-def _page_source_hash(page, setid, sprites=None):
+def _uv_islands(bank, setid):
+    """{texture id: [uv list, ...]} for every poly on this set, page texels.
+
+    OBJ uvs are 0..1, v up. The engine's are 0..255, v down — the same conversion
+    obj2geom uses, so a centroid tested later lands in the rect built here.
+    """
+    import obj2geom
+
+    islands = {}
+    cache = getattr(_uv_islands, "_cache", None)
+
+    if cache is None:
+        cache = {}
+        _uv_islands._cache = cache
+
+    for car in bank.cars.values():
+        uses = any(t.set == setid for t in car.textures)
+
+        if not uses:
+            continue
+
+        for path in (car.clean, car.damaged, car.low):
+            if not path:
+                continue
+
+            if path not in cache:
+                try:
+                    cache[path] = obj2geom.parse_obj(path, with_materials=True)
+                except OSError:
+                    cache[path] = None
+
+            parsed = cache[path]
+
+            if not parsed:
+                continue
+
+            _verts, uvs, faces, names = parsed
+
+            for (_vi, ti), name in zip(faces, names):
+                try:
+                    page = obj2geom.material_to_page(name, path)
+                except ValueError:
+                    continue
+
+                if page is None or page[0] != setid:
+                    continue
+
+                pts = []
+
+                for t in ti:
+                    if 0 <= t < len(uvs):
+                        u, v = uvs[t]
+                        pts.append((int(round(u * 255)) & 0xFF,
+                                    int(round((1.0 - v) * 255)) & 0xFF))
+
+                if len(pts) >= 3:
+                    islands.setdefault(page[1] & 0xFF, []).append(pts)
+
+    return islands
+
+
+def _page_source_hash(page, setid, sprites=None, uv_islands=None):
     """The (image hash, bake options, wheel sprites) a page was baked from.
 
     The sprites are part of the source: an island is composited from them, so a
     re-painted wheel image has to re-bake its page even though the page image
-    itself never changed.
+    itself never changed. UV islands are too: they decide which polys share a
+    CLUT row, so an edited unwrap has to re-bake even when the PNG did not change.
     """
     record = {"image": os.path.basename(page.image or ""),
               "transparent": page.transparent,
               "tolerance": page.transparent_tolerance,
-              "chroma": page.transparent_chroma}
+              "chroma": page.transparent_chroma,
+              "split": getattr(page, "split", "auto"),
+              "max_error": getattr(page, "max_error", None)}
 
     if sprites:
         record["wheels"] = [{"variant": variant,
@@ -826,6 +934,11 @@ def _page_source_hash(page, setid, sprites=None):
 
     if page.palette:
         record["palette"] = list(page.palette)
+
+    if uv_islands:
+        record["islands"] = {str(tex_id): [list(carbank_page._bbox_uv(uvs))
+                                            for uvs in lists if uvs]
+                             for tex_id, lists in sorted(uv_islands.items())}
 
     try:
         with open(page.image, "rb") as f:
@@ -909,7 +1022,8 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
     for setid, page in sorted(declared.items()):
         entry = by_set.setdefault(setid, {"set": setid})
-        source = _page_source_hash(page, setid, islands.get(setid))
+        uv_islands = _uv_islands(bank, setid)
+        source = _page_source_hash(page, setid, islands.get(setid), uv_islands)
         want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
 
         if (not force and entry.get("source") == source
@@ -949,10 +1063,35 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                                 % (setid, variant, os.path.basename(sprite_path),
                                    tuple(island)))
 
-        blob, colours, indices, _error, background = carbank_page.bake_page(
-            pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
-            palette=page.palette, protect=page.protect,
-            chroma=page.transparent_chroma)
+        pieces = None
+        background = None
+        use_split = (not page.palette and carbank_page.should_split(
+            pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
+            getattr(page, "split", "auto"), getattr(page, "max_error", None)))
+
+        if use_split:
+            indices, row_map, pieces = carbank_page.plan_islands(
+                pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
+                split=True)
+            blob, _ordered = carbank_page.pack_indexed(
+                indices, row_map, mask=mask, key=key,
+                tolerance=page.transparent_tolerance,
+                chroma=page.transparent_chroma, pieces=pieces)
+            colours = row_map.get(min(row_map)) if row_map else []
+            entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"]}
+                                   for piece in pieces]
+            ncluts = (max(row_map) + 1) if row_map else 1
+            warnings.append(
+                "page set %d: %d texture id(s) %s — each has its own CLUT row "
+                "(one 16-entry row could not hold the snapped colours)"
+                % (setid, len(row_map), sorted(row_map)))
+        else:
+            blob, colours, indices, _error, background = carbank_page.bake_page(
+                pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
+                palette=page.palette, protect=page.protect,
+                chroma=page.transparent_chroma)
+            entry.pop("clut_rects", None)
+            ncluts = 1
 
         os.makedirs(os.path.dirname(want), exist_ok=True)
 
@@ -966,20 +1105,30 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         try:
             rows, _raw = pages1.read_page(blob, 0, len(blob))
             keyed = {background["index"]} if background else set()
+            regions = None
+
+            if pieces:
+                regions = [(p["rect"][0], p["rect"][1],
+                            p["rect"][2] - p["rect"][0],
+                            p["rect"][3] - p["rect"][1], p["id"])
+                           for p in pieces]
+
             exportd2.page_png(os.path.join(bank_dir, "pages",
                                            "PAGE_%d.png" % setid),
                               rows, fourbpp.decode_indices(_raw),
-                              transparent=keyed)
+                              transparent=keyed, regions=regions)
         except (ValueError, struct.error) as exc:
             warnings.append("page set %d: preview not written (%s)"
                             % (setid, exc))
 
-        entry.update({"set": setid, "size": len(blob), "ncluts": 1,
+        entry.update({"set": setid, "size": len(blob), "ncluts": ncluts,
                       "bin": "pages/PAGE_%d.bin" % setid,
                       "source": source})
         by_set[setid] = entry
 
-        if background is None:
+        if use_split:
+            pass
+        elif background is None:
             warnings.append("page set %d: re-baked from %s (no transparent "
                             "colour)" % (setid, os.path.basename(page.image)))
         else:
@@ -1187,7 +1336,9 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
         pages = carbank_palette.page_sets(lev) if os.path.isfile(lev) else set()
         pages = pages or {p.get("set") for p in (manifest.get("pages") or [])}
         paints = _paints_of(bank)
-        rows = carbank_palette.rows_from_pages(gen_dir, pages, paints)
+        regions = {p.get("set"): p.get("clut_rects") or []
+                   for p in (manifest.get("pages") or [])}
+        rows = carbank_palette.rows_from_pages(gen_dir, pages, paints, regions)
         bank_rows = {(r["tpageindex"], r["palette"]): r["clut"]
                      for r in pal["records"]}
 
@@ -1255,11 +1406,31 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
     # page for a set this bank no longer carries must not add a palette row
     sets = {texture.set for car in bank.cars.values()
             for texture in car.textures}
-    rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank))
+    regions = {p["set"]: p.get("clut_rects") or []
+               for p in (manifest.get("pages") or [])}
+    rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank),
+                                           regions)
 
     if not rows:
         warnings.append("palette_from_pages: no pages to take a palette from")
         return
+
+    dump = carbank_page.clut_dump_text(rows, getattr(bank, "clut_rows", 8))
+    dump_path = os.path.join(bank_dir, "clut-dump.txt")
+
+    with open(dump_path, "w", encoding="utf-8") as f:
+        f.write(dump)
+
+    overflow = [line for line in dump.splitlines() if "OVERFLOW" in line]
+
+    if overflow:
+        warnings.append("palette: %d set(s) past civ_clut's %d rows draw the "
+                        "first page's colours — see %s"
+                        % (len(overflow), getattr(bank, "clut_rows", 8),
+                           os.path.basename(dump_path)))
+    else:
+        warnings.append("palette: clut map written to %s"
+                        % os.path.basename(dump_path))
 
     body = exportd2.build_palette_body(rows, len(rows))
     path = os.path.join(bank_dir, "pallet.bin")

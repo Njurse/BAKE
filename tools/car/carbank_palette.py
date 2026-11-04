@@ -224,14 +224,128 @@ def paint_row(row, target, body=None, protect=(), tolerance=8):
     return bytes(out), len(pick)
 
 
-def rows_from_pages(bank_dir, sets=None, paints=None):
-    """Palette rows built from the PAGES themselves: page row 0 of each set.
+def _fit_paint_image(pixels, width, height, panel):
+    """Paint texels laid out on a 256x256 page.
 
-    The bank's LUMP_PALLET is what paints a car's texel indices, and a page is
-    quantised against its OWN 16 colours - row 0. Carrying the donor city's rows
-    instead leaves every index painted by a colour chosen for different art,
-    which is how a panel ends up wearing a leftover magenta or a stranger's grey.
-    One record per page, and the two agree by construction.
+    A full-page image is used as it stands. An image the size of `panel` is
+    stamped into that rectangle. Anything else is nearest-neighbour scaled to
+    the page, which is what a differently sized recolour of the whole atlas is.
+    """
+    import fourbpp
+
+    page = fourbpp.PAGE_W * fourbpp.PAGE_H
+
+    if (width, height) == (fourbpp.PAGE_W, fourbpp.PAGE_H):
+        return pixels
+
+    if panel and len(panel) == 4:
+        x0, y0, x1, y1 = panel
+        rw, rh = x1 - x0, y1 - y0
+
+        if rw > 0 and rh > 0 and (width, height) == (rw, rh):
+            out = [(0, 0, 0)] * page
+
+            for y in range(rh):
+                for x in range(rw):
+                    out[(y0 + y) * fourbpp.PAGE_W + (x0 + x)] = pixels[y * width + x]
+
+            return out
+
+    out = []
+
+    for y in range(fourbpp.PAGE_H):
+        sy = min(height - 1, int(y * height / fourbpp.PAGE_H)) if height else 0
+
+        for x in range(fourbpp.PAGE_W):
+            sx = min(width - 1, int(x * width / fourbpp.PAGE_W)) if width else 0
+            out.append(pixels[sy * width + sx] if pixels else (0, 0, 0))
+
+    return out
+
+
+def paint_from_image(base_row, indices, paint_pixels, mask=None, protect=(),
+                     tolerance=8):
+    """One CLUT row recoloured from a paletted image of the same texels.
+
+    Index N takes the snapped colour the paint image shows on the texels that
+    already use N (the mode when they disagree). 0x0000, protected colours and
+    indices the image never covers stay as they are, and every entry keeps its
+    STP bit. The page's indices are not rewritten: the engine still draws the
+    same 4bpp, with this row in the paint column.
+    """
+    def near(a, b):
+        return all(abs(x - y) <= tolerance for x, y in zip(a, b))
+
+    rgb = fourbpp.clut_rgb(base_row)
+    raw = [int.from_bytes(base_row[i * 2:i * 2 + 2], "little") for i in range(16)]
+    votes = {}
+
+    for i, index in enumerate(indices):
+        if i >= len(paint_pixels):
+            break
+
+        if mask is not None and not mask[i]:
+            continue
+
+        votes.setdefault(index, []).append(fourbpp.snap555(paint_pixels[i]))
+
+    colours = []
+
+    for i, colour in enumerate(rgb):
+        if raw[i] == 0 or any(near(colour, p) for p in protect):
+            colours.append(colour)
+            continue
+
+        samples = votes.get(i) or []
+
+        if not samples:
+            colours.append(colour)
+            continue
+
+        colours.append(max(set(samples), key=samples.count))
+
+    new = bytearray(fourbpp.rgb_to_clut(colours))
+
+    for i in range(16):
+        if raw[i] & 0x8000:
+            word = int.from_bytes(new[i * 2:i * 2 + 2], "little") | 0x8000
+            new[i * 2:i * 2 + 2] = word.to_bytes(2, "little")
+
+        if raw[i] == 0:
+            new[i * 2:i * 2 + 2] = b"\x00\x00"
+
+    return bytes(new)
+
+
+def _rect_mask(rects, length):
+    import fourbpp
+
+    mask = [False] * length
+
+    for rect in rects or []:
+        x0, y0, x1, y1 = rect
+
+        for y in range(max(0, y0), min(fourbpp.PAGE_H, y1)):
+            row = y * fourbpp.PAGE_W
+
+            for x in range(max(0, x0), min(fourbpp.PAGE_W, x1)):
+                if row + x < length:
+                    mask[row + x] = True
+
+    return mask
+
+
+def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
+    """Palette rows built from the PAGES themselves.
+
+    A page that carries one CLUT row emits texnum 0, as before. A page that was
+    split — one row per texture id — emits every row with `texnum` equal to
+    that id, which is what `texture_cluts[set][id]` and `civ_clut[row][id]`
+    index. Paint variants still use lump `palette` k for column k+1; an image
+    paint rebuilds the row from the image instead of a hue shift.
+
+    `regions` is `{set: [{id, rect}, ...]}` from the page plan, so an image
+    paint for one id only samples that id's texels.
     """
     import pages1
 
@@ -247,27 +361,67 @@ def rows_from_pages(bank_dir, sets=None, paints=None):
             blob = f.read()
 
         try:
-            rows, _raw = pages1.read_page(blob, 0, len(blob))
+            rows, raw = pages1.read_page(blob, 0, len(blob))
         except ValueError:
             continue
 
         if not rows:
             continue
 
+        indices = None
         spec = (paints or {}).get(page_set)
+        pieces = (regions or {}).get(page_set) or []
 
         if not spec or not spec.get("paints"):
-            out.append({"palette": 0, "texnum": 0, "tpageindex": page_set,
-                        "clut_number": -1, "clut": rows[0]})
+            # one record per CLUT row the page actually stores. A single-row
+            # page is exactly the old record (texnum 0, the page's row 0).
+            for texnum, row in enumerate(rows):
+                out.append({"palette": 0, "texnum": texnum, "tpageindex": page_set,
+                            "clut_number": -1, "clut": row})
             continue
 
         # Paint variants: lump palette p fills civ_clut column p+1, column 0 is
         # the page's own CLUT (the original colours), so variant k -> palette k.
-        for k, (name, colour) in enumerate(spec["paints"]):
-            row, _n = paint_row(rows[0], colour, spec.get("body"),
-                                spec.get("protect") or ())
-            out.append({"palette": k, "texnum": 0, "tpageindex": page_set,
-                        "clut_number": -1, "clut": row, "paint": name})
+        for k, (name, paint) in enumerate(spec["paints"]):
+            if isinstance(paint, (tuple, list)) and len(paint) == 3 and not isinstance(paint[0], dict):
+                paint = {"rgb": tuple(paint)}
+
+            want_id = paint.get("id") if isinstance(paint, dict) else None
+
+            for texnum, row in enumerate(rows):
+                if want_id is not None and texnum != want_id:
+                    continue
+
+                if isinstance(paint, dict) and paint.get("image"):
+                    if indices is None:
+                        import fourbpp
+                        indices = fourbpp.decode_indices(raw)
+
+                    import carbank_page
+                    width, height, src, _alpha = carbank_page.load_pixels(paint["image"])
+                    laid = _fit_paint_image(src, width, height, paint.get("panel"))
+                    rects = [p["rect"] for p in pieces if p.get("id") == texnum]
+
+                    if paint.get("panel") and not rects:
+                        rects = [paint["panel"]]
+
+                    # A split page's index N means a different colour on each
+                    # row. Voting every texel into a row that does not own
+                    # those texels mixes the panels. A gap row (no island)
+                    # keeps the page's own colours.
+                    if not rects and len(rows) > 1 and want_id is None:
+                        continue
+
+                    mask = _rect_mask(rects, len(indices)) if rects else None
+                    painted = paint_from_image(row, indices, laid, mask,
+                                               spec.get("protect") or ())
+                else:
+                    colour = paint["rgb"] if isinstance(paint, dict) else paint
+                    painted, _n = paint_row(row, colour, spec.get("body"),
+                                            spec.get("protect") or ())
+
+                out.append({"palette": k, "texnum": texnum, "tpageindex": page_set,
+                            "clut_number": -1, "clut": painted, "paint": name})
 
     return out
 

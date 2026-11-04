@@ -35,6 +35,88 @@ PITCH = math.radians(18.0)
 # lit from below.
 LIGHT = (0.36, -0.86, -0.36)
 
+# docs/DRIVER1.md §8. A Driver 2 car of this size fills one preview cell; a
+# Driver 1 mesh that skipped 2048/3000 is about 1.47× longer and draws larger
+# than the cell, which is the in-game size difference the old per-car fit hid.
+D2_MEDIAN_BOX = (284, 176, 752)   # width, height, length
+D1_MEDIAN_LENGTH = 1104
+BAKE_SCALE = 2048.0 / 3000.0
+
+
+def median_box_corners(box=D2_MEDIAN_BOX):
+    """The eight corners of a box centred on the origin, in engine units."""
+    w, h, length = box
+    corners = []
+
+    for x in (-w / 2.0, w / 2.0):
+        for y in (-h / 2.0, h / 2.0):
+            for z in (-length / 2.0, length / 2.0):
+                corners.append((x, y, z))
+
+    return corners
+
+
+def projected_span(points):
+    """Max of the projected width and height. `points` are already projected."""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+
+
+def reference_span(project=None):
+    """Projected span of the Driver 2 median car under `project` (default camera)."""
+    project = project or _project
+    return projected_span([project(v) for v in median_box_corners()])
+
+
+def infer_bake_scale(extents, col_box=None):
+    """OBJ units -> engine units, for placing handling-space wheels on the mesh.
+
+    `col_box` is the handling record's half-extents (engine units). A Driver 1
+    OBJ is about 3000/2048 times that box; a Driver 2 export already matches it.
+    Without a box, a long axis past the Driver 2 band (median length 752, the
+    longest ordinary cars sit near 850) is treated as Driver 1. A mesh under 50
+    units is authoring metres, and 265 is the historic metres->engine factor.
+    """
+    long = max(extents) if extents else 0.0
+
+    if col_box:
+        engine = max(abs(float(v)) for v in col_box) * 2.0
+
+        if engine > 1.0:
+            ratio = long / engine
+
+            if ratio >= 1.25:
+                return BAKE_SCALE
+
+            if ratio <= 1.15:
+                return 1.0
+
+    if long > 980:
+        return BAKE_SCALE
+
+    if long > 50:
+        return 1.0
+
+    return 265.0
+
+
+def world_lengths(vert_lists):
+    """(min, max) of each mesh's longest axis, for the size line the preview prints."""
+    lengths = []
+
+    for verts in vert_lists:
+        if not verts:
+            continue
+
+        span = max(max(v[i] for v in verts) - min(v[i] for v in verts) for i in range(3))
+        lengths.append(span)
+
+    if not lengths:
+        return None
+
+    return min(lengths), max(lengths)
+
 
 def _png(path, w, h, pix):
     import zlib
@@ -153,7 +235,10 @@ def render(items, path, cols, cell=128, pad=10):
         xs = [p[0] for p in proj]
         ys = [p[1] for p in proj]
         zs = [p[2] for p in proj]
-        span = max(max(xs) - min(xs), max(ys) - min(ys), 1)
+        # One scale for every car: the Driver 2 median. Fitting each mesh to
+        # its own span made an unscaled Driver 1 body (REDBUICK at ~1100) look
+        # the same size as the baked car the game draws at ~750.
+        span = reference_span()
         sc = (cell - 2 * pad) / float(span)
         ox = (idx % cols) * cell + cell / 2.0 - (min(xs) + max(xs)) / 2.0 * sc
         oy = (idx // cols) * cell + cell / 2.0 - (min(ys) + max(ys)) / 2.0 * sc
@@ -187,7 +272,14 @@ def render(items, path, cols, cell=128, pad=10):
                 _fill(pix, w, h, [scr[tri[0]], scr[tri[1]], scr[tri[2]]], rgb)
 
     _png(path, w, h, pix)
-    print("  %s  (%dx%d, %d shapes)" % (path, w, h, len(items)))
+    got = world_lengths(item[1] for item in items)
+    size = ""
+
+    if got:
+        size = "  longest axis %.0f..%.0f (D2 median length %d)" % (
+            got[0], got[1], D2_MEDIAN_BOX[2])
+
+    print("  %s  (%dx%d, %d shapes%s)" % (path, w, h, len(items), size))
     return path
 
 
