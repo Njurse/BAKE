@@ -244,8 +244,10 @@ than the car the game shows.
 ```
 
 Materials may be `PAGE_1` (the whole of set 1, id 0) or `set1_id0`. Both are
-read. `split: "auto"` cuts the atlas into extra texture ids only when one
-16-entry row cannot hold the snapped colours.
+read. `split: "auto"` cuts UV islands that do not share a 16-entry row, and
+paginates leftover sprites the mesh does not cover (other retail details still
+on the page) onto their own CLUT rows so they do not crush the body. The
+retail GSX mesh is not in this repo.
 
 Civilian cars pick a column at random. The player car uses the frontend palette
 (SQUARE on the car select cycles "Palette n/6"); a column nothing filled falls

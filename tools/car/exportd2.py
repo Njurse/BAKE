@@ -1429,6 +1429,7 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     they are applied in this order, because the order is audible:
 
         resample -> trim -> fade_out -> gain_db -> level -> budget -> encode
+        -> one loudness correction if the ADPCM reconstruction missed the level
 
     Trimming before the fade means the fade lands on the new tail; the fade
     before the level means a fade cannot pull the peak down and make `level`
@@ -1583,8 +1584,12 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
         loop_end = min(int(float(spec["loop_to"]) * rate),
                        len(samples) if loop_end is None else loop_end)
 
-    data, count, rms = vag.encode(samples, loop=bool(looping),
-                                  loop_from=loop_from, loop_end=loop_end)
+    # encode_settled re-encodes once when the reconstruction's rms is off the
+    # PCM we just levelled. The first pass is what the warning above describes;
+    # the correction does not change that warning, it only puts the bytes the
+    # engine plays back on the same loudness.
+    data, count, rms = vag.encode_settled(samples, loop=bool(looping),
+                                          loop_from=loop_from, loop_end=loop_end)
 
     if rms > 4000:
         warnings.append("sound %s: encode error is high (rms %.0f) - the sample "

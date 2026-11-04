@@ -486,8 +486,12 @@ def _bbox_uv(uvs):
     return (min(us), min(vs), max(us) + 1, max(vs) + 1)
 
 
-def _colours_in(pixels, width, rect):
-    """Distinct snapped colours in `rect`, insertion order."""
+def _colours_in(pixels, width, rect, mask=None):
+    """Distinct snapped colours in `rect`, insertion order.
+
+    `mask` limits the count to texels a poly actually covers, so a leftover
+    sprite inside the UV bbox does not join the body's row.
+    """
     x0, y0, x1, y1 = _clip_rect(rect, width, len(pixels) // width)
     seen = []
     have = set()
@@ -496,6 +500,9 @@ def _colours_in(pixels, width, rect):
         row = y * width
 
         for x in range(x0, x1):
+            if mask is not None and not mask[row + x]:
+                continue
+
             colour = fourbpp.snap555(pixels[row + x])
 
             if colour not in have:
@@ -528,7 +535,147 @@ def count_snapped(pixels, width=None):
     return len({fourbpp.snap555(p) for p in pixels})
 
 
-def _cluster_uvs(pixels, width, height, uv_lists, split):
+# A leftover retail sprite smaller than this is treated as a fringe, not a
+# texture that needs its own CLUT row. 4x4 is the smallest sprite worth a row.
+MIN_LEFTOVER_TEXELS = 16
+
+
+def _cover_poly(mask, width, height, pts):
+    """Mark the texels a poly's UVs actually cover.
+
+    An axis-aligned quad fills its bbox (that is the rect the old colour count
+    used). Anything else is rasterised, so a gutter sprite sitting inside the
+    bbox but outside the triangles is not part of the poly.
+    """
+    if len(pts) < 3:
+        return
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+
+    if len(pts) == 4 and len(set(int(v) for v in xs)) <= 2 and len(
+            set(int(v) for v in ys)) <= 2:
+        rect = _clip_rect((min(xs), min(ys), max(xs) + 1, max(ys) + 1),
+                          width, height)
+
+        for y in range(rect[1], rect[3]):
+            row = y * width
+
+            for x in range(rect[0], rect[2]):
+                mask[row + x] = 1
+
+        return
+
+    for i in range(1, len(pts) - 1):
+        _fill_tri(mask, width, height, pts[0], pts[i], pts[i + 1])
+
+
+def _fill_tri(mask, width, height, a, b, c):
+    xs = (a[0], b[0], c[0])
+    ys = (a[1], b[1], c[1])
+    x0 = max(0, int(min(xs)))
+    x1 = min(width - 1, int(max(xs)))
+    y0 = max(0, int(min(ys)))
+    y1 = min(height - 1, int(max(ys)))
+
+    if x0 > x1 or y0 > y1:
+        return
+
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay)
+
+    if area == 0:
+        return
+
+    for y in range(y0, y1 + 1):
+        fy = y + 0.5
+        row = y * width
+
+        for x in range(x0, x1 + 1):
+            fx = x + 0.5
+            w0 = (bx - ax) * (fy - ay) - (fx - ax) * (by - ay)
+            w1 = (cx - bx) * (fy - by) - (fx - bx) * (cy - by)
+            w2 = (ax - cx) * (fy - cy) - (fx - cx) * (ay - cy)
+
+            if ((w0 >= 0 and w1 >= 0 and w2 >= 0)
+                    or (w0 <= 0 and w1 <= 0 and w2 <= 0)):
+                mask[row + x] = 1
+
+
+def page_coverage(width, height, islands):
+    """1 where any poly UV covers the texel, else 0."""
+    mask = bytearray(width * height)
+
+    for lists in (islands or {}).values():
+        for uvs in lists or []:
+            _cover_poly(mask, width, height, uvs)
+
+    return mask
+
+
+def leftover_blobs(pixels, width, height, mask, backdrop):
+    """Sprites on the page that no poly covers, and that are not the backdrop.
+
+    A retail car page (the Buick's PAGE_1 is the case this is for) still holds
+    the other sprites that shared that page. Folding them into the body's
+    16-entry row is what crushes the body. Each blob is the texels of one
+    connected sprite plus the snapped colours it uses.
+    """
+    seen = bytearray(width * height)
+    blobs = []
+    n = width * height
+
+    for start in range(n):
+        if seen[start] or mask[start]:
+            continue
+
+        if fourbpp.snap555(pixels[start]) == backdrop:
+            seen[start] = 1
+            continue
+
+        stack = [start]
+        seen[start] = 1
+        texels = []
+        cols = []
+        have = set()
+
+        while stack:
+            i = stack.pop()
+            colour = fourbpp.snap555(pixels[i])
+            texels.append(i)
+
+            if colour not in have:
+                have.add(colour)
+                cols.append(colour)
+
+            x = i % width
+            y = i // width
+
+            for jx, jy in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if jx < 0 or jy < 0 or jx >= width or jy >= height:
+                    continue
+
+                j = jy * width + jx
+
+                if seen[j] or mask[j]:
+                    continue
+
+                if fourbpp.snap555(pixels[j]) == backdrop:
+                    seen[j] = 1
+                    continue
+
+                seen[j] = 1
+                stack.append(j)
+
+        if len(texels) >= MIN_LEFTOVER_TEXELS and cols:
+            blobs.append({"texels": texels, "cols": cols})
+
+    return blobs
+
+
+def _cluster_uvs(pixels, width, height, uv_lists, split, mask=None):
     """Group UV islands so each group fits in one 16-entry row.
 
     An island whose own bbox already exceeds 16 colours cannot be cut (one poly
@@ -551,7 +698,10 @@ def _cluster_uvs(pixels, width, height, uv_lists, split):
         if rect[2] <= rect[0] or rect[3] <= rect[1]:
             continue
 
-        cols = _colours_in(pixels, width, rect)
+        cols = _colours_in(pixels, width, rect, mask)
+
+        if not cols:
+            continue
 
         if len(cols) > fourbpp.CLUT_ROW_ENTRIES:
             groups.append({"rects": [rect], "quantize": True, "cols": cols})
@@ -605,10 +755,30 @@ def should_split(pixels, width, height, islands, split="auto", max_error=None):
         if worst <= max_error:
             return False
 
+    mask = page_coverage(width, height, islands)
+
+    if any(mask) and pixels:
+        backdrop = fourbpp.snap555(pixels[0])
+        blobs = leftover_blobs(pixels, width, height, mask, backdrop)
+
+        if blobs:
+            covered = set()
+
+            for i, bit in enumerate(mask):
+                if bit:
+                    covered.add(fourbpp.snap555(pixels[i]))
+
+            extra = {c for blob in blobs for c in blob["cols"]} - covered
+
+            # The body's polys never sample these texels, but a whole-page
+            # quantise still spends CLUT slots on them. That is the crush.
+            if extra and len(covered | extra) > fourbpp.CLUT_ROW_ENTRIES:
+                return True
+
     groups = 0
 
     for uv_lists in (islands or {}).values():
-        groups += len(_cluster_uvs(pixels, width, height, uv_lists, True))
+        groups += len(_cluster_uvs(pixels, width, height, uv_lists, True, mask))
 
     # One island that itself does not fit is the legacy whole-page quantize:
     # there is no second poly to give a row to. Two ids, or two polys whose
@@ -616,7 +786,7 @@ def should_split(pixels, width, height, islands, split="auto", max_error=None):
     return groups > 1 or len(islands or {}) > 1
 
 
-def _scatter_exact(indices, pixels, width, rects, colours):
+def _scatter_exact(indices, pixels, width, rects, colours, mask=None):
     index = {tuple(c): i for i, c in enumerate(colours)}
 
     for rect in rects:
@@ -626,10 +796,13 @@ def _scatter_exact(indices, pixels, width, rects, colours):
             row = y * width
 
             for x in range(x0, x1):
+                if mask is not None and not mask[row + x]:
+                    continue
+
                 indices[row + x] = index[fourbpp.snap555(pixels[row + x])]
 
 
-def _scatter_quantize(indices, pixels, width, height, rects):
+def _scatter_quantize(indices, pixels, width, height, rects, mask=None):
     x0 = min(r[0] for r in rects)
     y0 = min(r[1] for r in rects)
     x1 = max(r[2] for r in rects)
@@ -640,7 +813,30 @@ def _scatter_quantize(indices, pixels, width, height, rects):
     if rw < 1 or rh < 1:
         return _pad16([(8, 8, 8)])
 
-    sub = [pixels[(y0 + y) * width + (x0 + x)] for y in range(rh) for x in range(rw)]
+    fill = None
+
+    if mask is not None:
+        for y in range(rh):
+            for x in range(rw):
+                i = (y0 + y) * width + (x0 + x)
+
+                if mask[i]:
+                    fill = pixels[i]
+                    break
+
+            if fill is not None:
+                break
+
+    if fill is None:
+        fill = pixels[y0 * width + x0]
+
+    sub = []
+
+    for y in range(rh):
+        for x in range(rw):
+            i = (y0 + y) * width + (x0 + x)
+            sub.append(pixels[i] if (mask is None or mask[i]) else fill)
+
     colours, local = fourbpp.paletteize(sub, rw, rh)
 
     for rect in rects:
@@ -648,10 +844,79 @@ def _scatter_quantize(indices, pixels, width, height, rects):
 
         for y in range(ry0, ry1):
             for x in range(rx0, rx1):
+                if mask is not None and not mask[y * width + x]:
+                    continue
+
                 if x0 <= x < x1 and y0 <= y < y1:
                     indices[y * width + x] = local[(y - y0) * rw + (x - x0)]
 
     return colours
+
+
+def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
+    """Give uncovered sprites their own CLUT rows. Returns the new pieces.
+
+    Colours already on a body row stay off that row: the point is that a
+    leftover retail sprite does not spend one of the body's 16 entries.
+    """
+    pieces = []
+    groups = []
+
+    for blob in blobs:
+        cols = blob["cols"]
+
+        if len(cols) > fourbpp.CLUT_ROW_ENTRIES:
+            groups.append({"quantize": True, "blobs": [blob], "cols": cols})
+            continue
+
+        placed = False
+
+        for group in groups:
+            if group["quantize"]:
+                continue
+
+            if len(set(group["cols"]) | set(cols)) <= fourbpp.CLUT_ROW_ENTRIES:
+                group["cols"] = list(dict.fromkeys(list(group["cols"]) + cols))
+                group["blobs"].append(blob)
+                placed = True
+                break
+
+        if not placed:
+            groups.append({"quantize": False, "blobs": [blob],
+                           "cols": list(cols)})
+
+    for group in groups:
+        if next_id >= MAX_TEX_IDS:
+            break
+
+        tex_id = next_id
+        next_id += 1
+        texels = [t for blob in group["blobs"] for t in blob["texels"]]
+
+        if group["quantize"]:
+            owned = [pixels[t] for t in texels]
+            side = max(1, int(len(owned) ** 0.5))
+            pad = side * side - len(owned)
+            grid = owned + [owned[0]] * pad
+            colours, local_idx = fourbpp.paletteize(grid, side, side)
+
+            for n, t in enumerate(texels):
+                indices[t] = local_idx[n]
+        else:
+            colours = _pad16(group["cols"])
+            index = {tuple(c): i for i, c in enumerate(colours)}
+
+            for t in texels:
+                indices[t] = index[fourbpp.snap555(pixels[t])]
+
+        rows[tex_id] = colours
+        xs = [t % width for t in texels]
+        ys = [t // width for t in texels]
+        pieces.append({"id": tex_id,
+                       "rect": [min(xs), min(ys), max(xs) + 1, max(ys) + 1],
+                       "src": None})
+
+    return pieces
 
 
 def plan_islands(pixels, width, height, islands, split=True):
@@ -668,9 +933,11 @@ def plan_islands(pixels, width, height, islands, split=True):
     rows = {}
     pieces = []
     next_id = (max(islands) + 1) if islands else 1
+    mask = page_coverage(width, height, islands) if split else None
 
     for src_id in sorted(islands):
-        groups = _cluster_uvs(pixels, width, height, islands[src_id], split)
+        groups = _cluster_uvs(pixels, width, height, islands[src_id], split,
+                              mask)
 
         for number, group in enumerate(groups):
             if number == 0:
@@ -684,16 +951,23 @@ def plan_islands(pixels, width, height, islands, split=True):
             rects = group["rects"]
 
             if group["quantize"] or len(group["cols"]) > fourbpp.CLUT_ROW_ENTRIES:
-                colours = _scatter_quantize(indices, pixels, width, height, rects)
+                colours = _scatter_quantize(indices, pixels, width, height,
+                                            rects, mask)
             else:
                 colours = _pad16(group["cols"])
-                _scatter_exact(indices, pixels, width, rects, colours)
+                _scatter_exact(indices, pixels, width, rects, colours, mask)
 
             rows[tex_id] = colours
 
             for rect in rects:
                 pieces.append({"id": tex_id, "rect": [int(v) for v in rect],
                                "src": src_id})
+
+    if split and any(mask or []):
+        backdrop = fourbpp.snap555(pixels[0]) if pixels else (0, 0, 0)
+        blobs = leftover_blobs(pixels, width, height, mask, backdrop)
+        pieces.extend(_paginate_leftovers(
+            indices, pixels, width, height, blobs, rows, next_id))
 
     return indices, rows, pieces
 
