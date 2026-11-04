@@ -299,7 +299,12 @@ def decode(data, samples=None):
 
         for i in range(NIBBLES_PER_BLOCK):
             byte = data[off + 2 + i // 2]
-            nib = (byte >> 4) if (i & 1) == 0 else (byte & 0x0F)
+            # Low nibble is sample 0. PSX VAG, the D1 banks add_car_sounds
+            # already decodes, and the page format (low nibble = even x) all
+            # agree. High-nibble-first swaps every pair; the engine then plays
+            # that as garbled, crushed audio. Loop/end flags live in byte 1
+            # and are not touched here.
+            nib = (byte & 0x0F) if (i & 1) == 0 else (byte >> 4)
 
             if nib >= 8:
                 nib -= 16
@@ -393,9 +398,9 @@ def _encode_block(samples, prev1, prev2):
         q &= 0x0F
 
         if (i & 1) == 0:
-            block[2 + i // 2] = q << 4
+            block[2 + i // 2] = q                 # low nibble, sample 0
         else:
-            block[2 + i // 2] |= q
+            block[2 + i // 2] |= q << 4           # high nibble, sample 1
 
     return bytes(block), nibbles
 

@@ -73,7 +73,8 @@ WHEEL_VARIANTS = ("clean", "damaged", "fast")
 # to reproduce the page from the declaration alone
 TEXTURE_KEYS = {"png", "transparent", "transparent_tolerance",
                 "transparent_chroma", "palette", "protect",
-                "paints", "paint_body"}
+                "paints", "paint_body", "split", "max_error"}
+PAINT_IMAGE_KEYS = {"image", "id", "panel"}
 
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
 # crop rect runs 0..256 in each axis (u1/v1 EXCLUSIVE, like PIL's crop box).
@@ -345,12 +346,29 @@ class Texture(object):
         # mid/light blue by default); protect colours and 0x0000 never move.
         paints = data.get("paints") or {}
         if not isinstance(paints, dict):
-            _fail(where, field + ".paints", "must be an object of name: rrggbb")
+            _fail(where, field + ".paints",
+                  "must be an object of name -> rrggbb or {image: path}")
         if len(paints) > 5:
             _fail(where, field + ".paints",
                   "at most 5 variants (civ_clut columns 1..5), not %d" % len(paints))
-        self.paints = [(str(name), _hex_colour(where, field + ".paints." + str(name), c))
-                       for name, c in paints.items()]
+        self.paints = [(str(name), _paint_spec(where, field + ".paints." + str(name),
+                                               spec, file_of))
+                       for name, spec in paints.items()]
+        split = data.get("split", "auto")
+        if split is True:
+            split = "auto"
+        if split is False:
+            split = "off"
+        if split not in ("auto", "off"):
+            _fail(where, field + ".split",
+                  "%r is not \"auto\" or \"off\"" % (split,))
+        self.split = split
+        self.max_error = data.get("max_error")
+        if (self.max_error is not None and
+                (not isinstance(self.max_error, int) or
+                 not 0 <= self.max_error <= 255)):
+            _fail(where, field + ".max_error",
+                  "%r is not a channel error 0..255" % (self.max_error,))
         body = data.get("paint_body")
         if body is not None and not isinstance(body, list):
             _fail(where, field + ".paint_body", "must be a list of hex colours")
@@ -376,7 +394,47 @@ class Texture(object):
                 "tolerance": self.transparent_tolerance,
                 "chroma": self.transparent_chroma,
                 "palette": self.palette,
-                "protect": list(self.protect or [])}
+                "protect": list(self.protect or []),
+                "split": self.split,
+                "max_error": self.max_error}
+
+
+def _paint_spec(where, field, spec, file_of):
+    """A paint is a hex colour, or a paletted image that supplies the new CLUT.
+
+    The image is a recolour of the same atlas (or of one panel rectangle): each
+    source index takes the colour the image shows at those texels. `id` limits
+    the paint to one texture id; `panel` is the exclusive rect the image covers
+    when it is not a full page.
+    """
+    if isinstance(spec, str):
+        return {"rgb": _hex_colour(where, field, spec)}
+
+    if not isinstance(spec, dict):
+        _fail(where, field, "must be a hex colour or {\"image\": path}")
+
+    _check_keys(where, field, spec, PAINT_IMAGE_KEYS, "paint")
+
+    if not spec.get("image"):
+        _fail(where, field, "an image paint needs \"image\"")
+
+    panel = spec.get("panel")
+
+    if panel is not None:
+        if (not isinstance(panel, (list, tuple)) or len(panel) != 4 or
+                not all(isinstance(v, int) for v in panel)):
+            _fail(where, field + ".panel",
+                  "must be [x0, y0, x1, y1] in page texels")
+
+    tex_id = spec.get("id")
+
+    if tex_id is not None and (not isinstance(tex_id, int) or not 0 <= tex_id <= 31):
+        _fail(where, field + ".id", "%r is not a texture id 0..31" % (tex_id,))
+
+    return {"image": file_of(where, field + ".image", spec.get("image"),
+                             required=True),
+            "id": tex_id,
+            "panel": None if panel is None else [int(v) for v in panel]}
 
 
 def _hex_colour(where, field, text):
@@ -683,6 +741,7 @@ class Bank(object):
         # build_manifest asks every bank: without the default the bake died
         # with AttributeError before it could reproduce the bank unchanged.
         self.palette_from_pages = False
+        self.clut_rows = 8
 
         if not self.declared:
             return
@@ -695,13 +754,22 @@ class Bank(object):
 
         _check_keys(where, "declare", decl,
                     {"schema", "name", "donor", "order", "cars",
-                     "palette_from_pages"}, "declare")
+                     "palette_from_pages", "clut_rows"}, "declare")
 
         # the bank's palette rows come from the pages themselves, so a page
         # re-bake cannot leave them disagreeing. A declared bank is generated
         # from its pages, so this is on unless the bank says otherwise (and the
         # bake refuses "false": there is no other palette to take).
         self.palette_from_pages = bool(decl.get("palette_from_pages", True))
+        # How many civ_clut rows this engine build actually binds. 8 is
+        # carTpages[city][8]. A larger number only changes the diagnostic: the
+        # bake still emits every set, and a row the engine does not have still
+        # draws the first page's palette.
+        rows = decl.get("clut_rows", 8)
+        if not isinstance(rows, int) or not 1 <= rows <= 32:
+            _fail(where, "declare.clut_rows",
+                  "%r is not a row count 1..32" % (rows,))
+        self.clut_rows = rows
         schema = decl.get("schema", SCHEMA)
 
         if schema != SCHEMA:
