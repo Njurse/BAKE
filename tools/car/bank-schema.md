@@ -111,7 +111,15 @@ Every path in an inline car object is relative to the folder holding `bank.json`
 
 Optional. Put `portrait` on the car in `cars/<id>/handling.json`. That is the author-facing field. An inline car object in `bank.json` accepts the same key and goes through the same packer; prefer the handling file, which is where the rest of that car already lives.
 
-The value is a path to one pre-packed `.raw`, relative to the handling file (or to `bank.json` when the car object is inline). A `<same-name>.clut` beside that source is optional. The page must already be 4bpp indices — the bake does not quantise it, and `fourbpp.py` RGB555 rounding is not involved. A source under `work/`, `pages/` or `build/` is refused, same as a texture.
+The value is a path, relative to the handling file (or to `bank.json` when the car object is inline). A source under `work/`, `pages/` or `build/` is refused, same as a texture.
+
+A name that does not end in `.png`, `.tga`, or `.bmp` is a pre-packed page. It must be exactly `32768` bytes of 4bpp indices, and it is copied unchanged — the bake does not quantise it, and `fourbpp.py` RGB555 rounding is not involved. A `<same-name>.clut` of `32` bytes beside that file is optional and is copied too.
+
+A `.png`, `.tga`, or `.bmp` (any case) is encoded at bake time. Pillow opens it, the same loader a car texture page uses. The picture is `256×219` (the rows the frontend uploads) or one full `256×256` page. A `256×219` picture is padded to 256 rows with index 0.
+
+A mode-P image whose first 16 palette entries already are the frontend portrait CLUT is packed by index and is not rematched, so those portraits are not colour-crushed. That CLUT is the 32 bytes at `CARBACK.RAW` offset `11 × 0x8000`, the row `LoadBackgroundFile` leaves at VRAM `(960, 256)` — the same 16 colours, in order. A PNG saver may keep the low 3 bits; the match is on `(channel >> 3) << 3`. A palette slot above 15 is kept only when its colour is already one of those 16 (a duplicate near-black folds to that entry, not to its low nibble).
+
+Any other raster is remapped onto that same CLUT: a 4×4 Bayer stipple between the two nearest entries, and a texel that is already a CLUT colour stays there. This is the stock car-select palette, not a new one. No `<slot>.clut` is written for a raster. A private CLUT belongs beside a pre-packed page only; shipping one next to a matched portrait would paint it through a different palette.
 
 The bake writes these beside the built `<CITY>.LEV` / `<CITY>.LCF`. `rebake.bat` copies them next to the install copy and into the game mirror, which is where the frontend looks: beside the `.LEV` the city registry opens. None of this goes inside the LEV.
 
@@ -125,7 +133,7 @@ The bake writes these beside the built `<CITY>.LEV` / `<CITY>.LCF`. `rebake.bat`
 
 The loose `<slot>.raw` is that same page. The frontend uses it when `<stem>.RAW` is missing or that page is all zero, so a hand-dropped `*.portraits` folder still works and a game that does not read the RAW yet still shows the icon. Dropping the folder there by hand works without a declaration.
 
-The CLUT is never inside the RAW. It stays `<slot>.clut`, and the frontend applies it whichever pixel source won.
+The CLUT is never inside the RAW. It stays `<slot>.clut`, and the frontend applies it whichever pixel source won. A raster portrait does not write `<slot>.clut`; the indices are for the stock palette. A pre-packed page writes one only when the source had a sibling `.clut`. A `<slot>.clut` left from an earlier bake is removed when this bake's source has none.
 
 | file | size | what it is |
 | --- | --- | --- |
@@ -155,7 +163,7 @@ bake writes `-1` for them.
 | `sounds` | no | see below |
 | `palette` | no | a CLUT source for a car whose colours are not its pages' own |
 | `remap` | no | `set` / `id` maps applied to every poly as it is read |
-| `portrait` | no | a car-select portrait page, usually in `handling.json`. See *Portrait* above. The bake packs it into `<stem>.RAW` and copies the loose page; it does not quantise it |
+| `portrait` | no | a car-select portrait, usually in `handling.json`. See *Portrait* above. A pre-packed page is copied; a `.png`, `.tga`, or `.bmp` is encoded onto the CARBACK portrait CLUT. The bake packs the page into `<stem>.RAW` and writes the loose page |
 
 ### `textures`
 

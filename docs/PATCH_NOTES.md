@@ -4,9 +4,12 @@
 
 ### Car-select portraits pack into `<CITY>.RAW`
 
-- `portrait` on `cars/<id>/handling.json` (path relative to that file; optional sibling `.clut`) is the author-facing field. An inline `bank.json` car object is the same key and the same packer.
-- The bake writes `<CITY>.RAW` beside the LEV/LCF: page at `model-slot * 0x8000` (the in-game model, not the roster cursor). It still writes `<CITY>.portraits/<slot>.raw` and `.clut`. Not a lump.
+- `portrait` on `cars/<id>/handling.json` (path relative to that file; optional sibling `.clut` on a pre-packed page) is the author-facing field. An inline `bank.json` car object is the same key and the same packer.
+- The bake writes `<CITY>.RAW` beside the LEV/LCF: page at `model-slot * 0x8000` (the in-game model, not the roster cursor). It still writes `<CITY>.portraits/<slot>.raw` and, for a pre-packed page, `.clut`. Not a lump.
 - `rebake.bat` copies the RAW with the LEV/LCF and removes a previously installed RAW when this bake declared none.
+- A portrait ending in `.png`, `.tga`, or `.bmp` (any case) is encoded to that same 32768-byte page. Pillow opens it, the same way a car texture page is opened. The picture is 256×219 or 256×256.
+- A mode-P image whose first 16 palette entries are already the frontend CARBACK portrait CLUT (`CARBACK.RAW` offset `11 * 0x8000`, the row at VRAM `(960, 256)`) is packed by index. It is not re-quantised. `fourbpp.py` RGB555 rounding is unchanged and is not used on this path.
+- Any other raster is Bayer-remapped onto that same CLUT. No `<slot>.clut` is written: the page uses the stock car-select palette. A `<slot>.clut` left from an earlier bake is removed when this source has none. A pre-packed `.raw` of exactly 32768 bytes, and its optional 32-byte sibling `.clut`, is still copied unchanged.
 
 ### Car banks are generated: no `donor/` (`carbank_bake.py`, `exportd2.py`, `make_new_bank.py`)
 

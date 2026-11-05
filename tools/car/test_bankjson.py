@@ -472,6 +472,171 @@ class PortraitTests(BankFixture):
             os.path.join(self.dir, "MIAMI.portraits", "8.clut")),
             bankjson.PORTRAIT_CLUT_BYTES)
 
+    def _matched_png(self, name, indices, size=(256, 219)):
+        """A mode-P PNG whose first 16 colours are the CARBACK CLUT.
+
+        The low 3 bits are dirty on purpose: a PNG saver keeps them, and the
+        match is on the 5-bit colour. Index 83 is a second near-black.
+        """
+        from PIL import Image
+
+        import portrait
+
+        clut, _raw = portrait.portrait_clut()
+        pal = []
+
+        for rgb in clut:
+            pal.extend(min(255, c + 1) for c in rgb)
+
+        pal.extend([0] * (768 - len(pal)))
+        pal[83 * 3:83 * 3 + 3] = (1, 2, 3)
+        im = Image.new("P", size)
+        im.putpalette(pal)
+        im.putdata(list(indices))
+        path = os.path.join(self.dir, name)
+        parent = os.path.dirname(path)
+
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+
+        im.save(path, format="PNG")
+        return name
+
+    def test_a_matched_png_packs_indices_into_the_slot(self):
+        import portrait
+        import fourbpp
+
+        # Entries 2 and 3 are the same RGB555 colour. Rematch would keep 2.
+        # Index 83's low nibble is 3 (that olive); the fold must be black.
+        indices = [3, 7, 83] + [0] * (portrait.PAGE_W * portrait.SHOWN_H - 3)
+        self._matched_png("cop.png", indices)
+        with open(os.path.join(self.dir, "cop.clut"), "wb") as f:
+            f.write(b"\xFF" * 32)
+        stale_dir = os.path.join(self.dir, "MIAMI.portraits")
+        os.makedirs(stale_dir)
+        with open(os.path.join(stale_dir, "1.clut"), "wb") as f:
+            f.write(b"\xEE" * 32)
+
+        bank = bankjson.load(self.write(self.declare(
+            car=self.car(portrait="cop.png"),
+            order=[{"slot": 1, "car": "car1"}])))
+        car = bank.cars["car1"]
+
+        self.assertTrue(car.portrait.endswith("cop.png"))
+        self.assertIsNone(car.portrait_clut)
+        self.assertEqual(len(car.portrait_page), bankjson.PORTRAIT_BYTES)
+        slots, notes = bankjson.install_portraits(bank, self.dir, "MIAMI")
+
+        self.assertEqual(slots, [1])
+        self.assertEqual(notes, [])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, "MIAMI.portraits", "1.clut")))
+
+        expected = [3, 7, 0] + [0] * (fourbpp.PAGE_W * fourbpp.PAGE_H - 3)
+        page = fourbpp.encode_indices(bytes(expected))
+        raw = os.path.join(self.dir, "MIAMI.portraits", "1.raw")
+
+        with open(raw, "rb") as f:
+            loose = f.read()
+
+        self.assertEqual(loose, page)
+
+        with open(os.path.join(self.dir, "MIAMI.RAW"), "rb") as f:
+            blob = f.read()
+
+        page_bytes = bankjson.PORTRAIT_BYTES
+        self.assertEqual(blob[:page_bytes], b"\x00" * page_bytes)
+        self.assertEqual(blob[page_bytes:2 * page_bytes], page)
+
+    def test_a_handling_json_png_is_relative_to_the_car(self):
+        import portrait
+
+        car_dir = os.path.join(self.dir, "cars", "car1")
+        os.makedirs(car_dir)
+
+        for name in ("clean.obj", "low.obj", "atlas.png"):
+            with open(os.path.join(car_dir, name), "w") as f:
+                f.write("x")
+
+        indices = [10] * (portrait.PAGE_W * portrait.SHOWN_H)
+        self._matched_png(os.path.join("cars", "car1", "art", "cop.png"),
+                          indices)
+
+        with open(os.path.join(car_dir, "handling.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({
+                "clean": "clean.obj",
+                "low": "low.obj",
+                "atlas": "atlas.png",
+                "portrait": "art/cop.png",
+            }, f)
+
+        decl = self.declare(order=[{"slot": 1, "car": "car1"}])
+        decl["cars"]["car1"] = "cars/car1/handling.json"
+        bank = bankjson.load(self.write(decl))
+        car = bank.cars["car1"]
+
+        self.assertTrue(car.portrait.endswith(
+            os.path.join("car1", "art", "cop.png")))
+        slots, notes = bankjson.install_portraits(bank, self.dir, "MIAMI")
+
+        self.assertEqual(slots, [1])
+        self.assertEqual(notes, [])
+        import fourbpp
+        got = list(fourbpp.decode_indices(car.portrait_page))
+        self.assertTrue(all(i == 10 for i in got[:portrait.PAGE_W * portrait.SHOWN_H]))
+        self.assertTrue(all(i == 0 for i in got[portrait.PAGE_W * portrait.SHOWN_H:]))
+
+    def test_a_tga_and_a_bmp_of_a_clut_colour_share_one_page(self):
+        from PIL import Image
+
+        import portrait
+
+        clut, _raw = portrait.portrait_clut()
+        color = clut[10]
+
+        for name, fmt in (("shot.tga", "TGA"), ("shot.BMP", "BMP"),
+                          ("shot.png", "PNG")):
+            im = Image.new("RGB", (portrait.PAGE_W, portrait.SHOWN_H), color)
+            im.save(os.path.join(self.dir, name), format=fmt)
+            bank = bankjson.load(self.write(self.declare(
+                car=self.car(portrait=name),
+                order=[{"slot": 4, "car": "car1"}])))
+            slots, notes = bankjson.install_portraits(bank, self.dir, "CITY")
+            self.assertEqual(slots, [4])
+            self.assertEqual(notes, [])
+            import fourbpp
+            got = list(fourbpp.decode_indices(bank.cars["car1"].portrait_page))
+            shown = got[:portrait.PAGE_W * portrait.SHOWN_H]
+            self.assertTrue(all(i == 10 for i in shown), name)
+            self.assertTrue(all(
+                i == 0 for i in got[portrait.PAGE_W * portrait.SHOWN_H:]), name)
+            self.assertIsNone(bank.cars["car1"].portrait_clut)
+
+    def test_a_short_raster_is_refused(self):
+        from PIL import Image
+
+        im = Image.new("RGB", (32, 32), (255, 0, 0))
+        im.save(os.path.join(self.dir, "tiny.png"))
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(
+                car=self.car(portrait="tiny.png"))))
+
+        self.assertIn("256", str(caught.exception))
+        self.assertNotIn("32768", str(caught.exception))
+
+    def test_a_png_that_is_not_an_image_is_not_read_as_raw(self):
+        with open(os.path.join(self.dir, "notes.png"), "wb") as f:
+            f.write(b"not a png")
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(
+                car=self.car(portrait="notes.png"))))
+
+        self.assertIn("image", str(caught.exception).lower())
+        self.assertNotIn("32768", str(caught.exception))
+
     def test_a_rebake_with_no_portrait_removes_a_stale_raw(self):
         stale = os.path.join(self.dir, "TEST.RAW")
         with open(stale, "wb") as f:
