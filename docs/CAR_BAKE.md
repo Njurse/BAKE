@@ -87,7 +87,37 @@ Level, RMS and the 6% dead band are unchanged (`vag.level`, `docs/SOUNDS.md`).
 A recording that is already limited (Firebird engine crest ~2.0) stays limited;
 the nibble order was what made a clean encode play back destroyed.
 
-## 4. Paletted-image paint
+## 4. Driver 1 extra body CLUTs
+
+A Driver 1 page is `[int npalettes][npalettes × 32-byte CLUT rows][decomp]`.
+Row *i* is texture id *i*: the engine copies it into
+`texture_cluts[set][i]`, and `buildNewCarFromModel` puts that id in
+`civ_clut[carid][i][0]`. `cp->ap.palette` indexes the six columns of
+`civ_clut[row][texid][0..5]` (`DrawCarObject`).
+Column 0 is that page CLUT. Columns 1..5 come from `LUMP_PALLET`, and
+`ProcessPalletLump` stores a record's `palette` at column `palette + 1`
+(so palette 0..4 are the five paint slots; a larger palette clamps at 5).
+
+The source lump already carries colour variants for the pages it names
+(FRISCO's car pages use palette 0..3). On a detail page the other body
+colours sit in CLUT rows the mesh never names: same trim, glass
+and lights, different body shades. `bake.build_pallet` keeps every lump
+variant of a used `(set, id)`, then
+`carbank_palette.apply_body_colour_slots` adds those unused rows as paint
+columns of the texture id they recolour. A palette-0 record that is only a
+copy of the page row gives civ slot 1 to the first real extra, because slot
+0 already shows the page. Rows that are a different texture (lamps, a
+split island) are not recolours and stay texture ids.
+
+Five extras fit. A sixth is reported (`civ_clut columns are 0..5`) and
+left out of the lump. The same detection runs in `carbank_palette.rows_from_pages` for a
+bank whose page still has those rows. `textures.<set>.body_rows` is
+`[base_id, extra, extra, ...]`: the first index is the texture id already
+in civ slot 0, and the rest are the paint columns, in swap order. A
+one-element list turns detection off. Declared `paints` already own slots
+1..5; with both set, the bake keeps `paints`.
+
+## 5. Paletted-image paint
 
 `textures.<set>.paints` accepts a hex colour (the existing hue shift,
 `carbank_palette.paint_row`) or `{"image": path, "id": N, "panel": [x0,y0,x1,y1]}`.
@@ -98,7 +128,7 @@ the paint to one texture row (Firebird lamps). See `bank-schema.md`.
 ## Verification
 
 ```text
-python3 -m unittest test_page_split test_preview_scale test_carbank_page \
+python3 -m unittest test_page_split test_carbank_palette test_preview_scale test_carbank_page \
     test_fourbpp_palette test_bankjson test_sound_knobs -q
 python3 -m unittest test_vag test_fourbpp -q          # from tools/common
 ```
