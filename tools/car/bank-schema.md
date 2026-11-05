@@ -201,6 +201,7 @@ what the images produced: size, palette row, the image's sha256, the preview pat
 | `max_error` | no | with `split: "auto"`, accept one row when the worst channel error of that quantize is at most this (0..255). Leave it out to split whenever 16 entries cannot hold the colours exactly |
 | `paints` | no | colour variants, in order: a hex colour or a paletted image (max 5). Needs `palette_from_pages`. See *Paints* below |
 | `paint_body` | no | which page colours a hex paint recolours (`["c0e0f0", ...]`). Default: every mid/light blue entry. Image paints do not use this; they copy indices |
+| `body_rows` | no | Driver 1 page CLUT indices that are one body colour, in swap order: `[base_id, extra, ...]`. The first is the texture id already in `civ_clut` slot 0. The rest fill slots 1..5. A one-element list disables auto-detection. See *Paints* below |
 
 #### Paints (colour variants)
 
@@ -236,6 +237,27 @@ the engine can draw.
   "lights": { "image": "art/firebird_lights.png", "id": 13 }
 }
 ```
+
+A Driver 1 page often already has those colours as extra CLUT rows (same
+trim, glass and lights, different body shades). Rows the mesh does not use,
+and that are a recolour of a row it does, are written into the same slots:
+`civ_clut` column 0 stays the page row for that texture id, and the extras
+take columns 1..5 (`LUMP_PALLET` palette 0..4, which `ProcessPalletLump`
+stores at `palette + 1`). `cp->ap.palette` cycles them. Five extras fit; a
+sixth is reported and dropped, because column 5 is the last and a higher
+palette clamps there.
+
+Name the rows when detection is wrong, or pass a one-element list to keep
+the page's own colours only:
+
+```json
+"body_rows": [0, 4, 5, 6]
+```
+
+The first index is the texture id already in civ slot 0 (the body's
+`texture_cluts` row). The rest are the paint columns, in swap order.
+When `paints` is also set, those colours fill slots 1..5 and `body_rows`
+is left unread.
 
 `declare.clut_rows` (default 8) is how many `civ_clut` rows this engine build
 binds (`carTpages[city][8]` on the stock build). It only changes the

@@ -744,16 +744,26 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
     dropped rather than remapped onto a used id. The flat-colour page is emitted
     separately, and the fill pass below still supplies a used pair the source lump
     has no record for.
+
+    Page CLUT rows the geometry does not name can still be body colours of a row
+    it does. Those fill civ_clut slots 1..5 (LUMP_PALLET palette 0..4, which
+    ProcessPalletLump stores at column palette+1). cp->ap.palette cycles them.
+    Slot 0 stays the page row. A car with more than five extras keeps the first
+    five; the rest are reported and not emitted.
     """
     import pages1
+    import carbank_palette
 
     used = _used_palette_pairs(items, wheels) if items is not None else None
-    body = bytearray()
-    body += struct.pack("<i", 0)                     # total_cluts: a CLUT count
-    count = 0
+    emitted = []
     have = set()
     packed = set()                                   # unused (set, id) pairs dropped
     records = 0                                      # source palette records walked
+
+    def _emit(palette, texnum, tpage, clut):
+        emitted.append({"palette": palette, "texnum": texnum,
+                        "tpageindex": tpage, "clut_number": -1, "clut": bytes(clut)})
+        have.add((tpage, texnum))
 
     by_level = {}
     for new_set, level, old_set, _bytes, _size in page_list:
@@ -762,7 +772,8 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
         by_level.setdefault(level, []).append((new_set, old_set))
 
     for level in by_level:
-        blob = open(os.path.join(levels_dir, d1pool.source_file(level, levels_dir) + ".LEV"), "rb").read()
+        with open(os.path.join(levels_dir, d1pool.source_file(level, levels_dir) + ".LEV"), "rb") as handle:
+            blob = handle.read()
         pal = pages1.pallet_lump(blob)
         if not pal:
             continue
@@ -787,10 +798,7 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
                 packed.add((new_set, texnum))
                 continue
 
-            body += struct.pack("<4i", r["palette"], texnum, new_set, -1)
-            body += r["row"]
-            count += 1
-            have.add((new_set, texnum))
+            _emit(r["palette"], texnum, new_set, r["row"])
 
     # The flat-colour page: one palette record per CLUT row. Its colours are not
     # read from any source level, so emit them straight from the page entry the
@@ -800,10 +808,7 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
             continue
         npal = int.from_bytes(entry[:4], "little")
         for i in range(npal):
-            body += struct.pack("<4i", 0, i, new_set, -1)
-            body += entry[4 + i * 32:4 + i * 32 + 32]
-            count += 1
-            have.add((new_set, i))
+            _emit(0, i, new_set, entry[4 + i * 32:4 + i * 32 + 32])
 
     # Fill the used ids the source PALLET does not cover from the page's own CLUT
     # row. The EURO-43 beta has no palette records for its set 31 (the clean
@@ -836,9 +841,66 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
                     row = entry[4:4 + 32]
                 else:
                     row = b"\x00" * 32
-                body += struct.pack("<4i", 0, tid, s, -1) + row
-                count += 1
-                have.add((s, tid))
+                _emit(0, tid, s, row)
+
+        # Body-colour CLUT rows the mesh does not reference. The source lump's
+        # own palette 0..N records are already in `emitted` and are kept; a
+        # palette 0 that only repeats the page row gives its civ slot to the
+        # first real extra. A page with no such row keeps its records, and
+        # their order, so a bake that had nothing to add stays byte-identical.
+        grouped = {}
+
+        for record in emitted:
+            grouped.setdefault(record["tpageindex"], []).append(record)
+
+        page_rows = {}
+
+        for new_set, level, _old_set, entry, _size in page_list:
+            if level is None:
+                continue
+
+            page_rows[new_set] = carbank_palette.clut_rows_from_entry(entry)
+
+        changed = {}
+        body_notes = []
+
+        for page_set, recs in grouped.items():
+            rows = page_rows.get(page_set) or []
+            used_here = {tid for (s, tid) in used if s == page_set}
+            updated, notes = carbank_palette.apply_body_colour_slots(
+                recs, rows, used_here, page_set)
+            body_notes.extend(notes)
+
+            if updated != recs:
+                changed[page_set] = updated
+
+        if changed:
+            rebuilt = []
+            seen = set()
+
+            for record in emitted:
+                page_set = record["tpageindex"]
+
+                if page_set not in changed:
+                    rebuilt.append(record)
+                    continue
+
+                if page_set in seen:
+                    continue
+
+                seen.add(page_set)
+                rebuilt.extend(changed[page_set])
+
+            emitted[:] = rebuilt
+            have.clear()
+
+            for record in emitted:
+                have.add((record["tpageindex"], record["texnum"]))
+
+        for line in body_notes:
+            print("   palette: " + line)
+
+    count = len(emitted)
 
     # PACKING INVARIANT: every record emitted must belong to a pair the geometry names.
     # If this fails, the bake has just written a colour no poly can read (or, worse, one
@@ -878,8 +940,14 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
                   "page CLUT): %s"
                   % (len(missing), ", ".join("%d/%d" % p for p in missing[:8])))
 
+    body = bytearray(struct.pack("<i", count))
+
+    for record in emitted:
+        body += struct.pack("<4i", record["palette"], record["texnum"],
+                            record["tpageindex"], -1)
+        body += record["clut"]
+
     body += struct.pack("<i", -1)                    # the lone terminator
-    struct.pack_into("<i", body, 0, count)           # total_cluts := rows written
     return bytes(body)
 
 
