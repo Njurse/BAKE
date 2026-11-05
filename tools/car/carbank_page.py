@@ -895,7 +895,10 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
 
         if group["quantize"]:
             owned = [pixels[t] for t in texels]
+            # ceil(sqrt): floor leaves pad negative when len is not square
             side = max(1, int(len(owned) ** 0.5))
+            if side * side < len(owned):
+                side += 1
             pad = side * side - len(owned)
             grid = owned + [owned[0]] * pad
             colours, local_idx = fourbpp.paletteize(grid, side, side)
