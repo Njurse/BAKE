@@ -233,10 +233,12 @@ class Car(object):
                     _fail(where, "remap.%s" % kind,
                           "%r -> %r is not a pair of integers" % (src, dst))
 
-        # Optional car-select portrait. The game reads it from beside the built
-        # LEV, not from this path: the bake copies it. It must already be one
-        # 4bpp page — this does not quantise, so fourbpp's RGB555 rounding is
-        # not involved. A sibling "<name>.clut" of 32 bytes is the private CLUT.
+        # Optional car-select portrait. Authors set this on handling.json; the
+        # path is relative to that file. The bake packs the page into <stem>.RAW
+        # at this car's model slot and also copies the loose page. It must
+        # already be one 4bpp page — this does not quantise, so fourbpp's
+        # RGB555 rounding is not involved. A sibling "<name>.clut" of 32 bytes
+        # is the private CLUT. The RAW does not carry CLUTs.
         portrait_rel = data.get("portrait")
 
         if portrait_rel not in (None, ""):
@@ -908,25 +910,55 @@ def dumps_compact(obj, width=100, _ind=0):
     return "[\n" + ",\n".join(items) + "\n" + " " * _ind + "]"
 
 
+def _write_portrait_raw(path, pages):
+    """One CCARS-shaped file. Page ``slot`` sits at ``slot * PORTRAIT_BYTES``.
+
+    ``slot`` is the in-game model number (``declare.order``), the same number
+    the frontend asks for and the same number as ``<stem>.portraits/<slot>.raw``.
+    It is not the dense roster cursor: Miami's cop is model 1 (roster slot 0)
+    and lives at offset ``0x8000``. Slots below the highest declared page that
+    have no portrait are zero-filled. The frontend treats an all-zero page as
+    empty and falls through to the loose file.
+    """
+    highest = max(pages)
+    blob = bytearray((highest + 1) * PORTRAIT_BYTES)
+
+    for slot, page in pages.items():
+        start = slot * PORTRAIT_BYTES
+        blob[start:start + PORTRAIT_BYTES] = page
+
+    with open(path, "wb") as out:
+        out.write(blob)
+
+
 def install_portraits(bank, out_dir, stem):
     """Copy declared portraits beside the LEV the game opens.
 
-    Writes ``<out_dir>/<stem>.portraits/<model>.raw`` and, when the source has
-    one, ``<model>.clut``. ``stem`` is the LEV filename without its extension
-    (the same name ``build_bank`` uses). The model number is the car's slot in
-    ``order``, which is the number the frontend asks for.
+    Writes two products from the same pages. Neither is a lump inside the LEV.
 
-    Returns ``(slots, notes)``. A portrait on a car that is not in ``order``
-    is skipped and named in ``notes`` — it has no model number to file it under.
+    * ``<out_dir>/<stem>.RAW`` — pages of ``0x8000`` at ``slot * 0x8000``.
+      ``slot`` is the car's model number in ``order``. A later rebake with
+      no portraits removes a RAW this function wrote before.
+    * ``<out_dir>/<stem>.portraits/<slot>.raw`` and, when the source has one,
+      ``<slot>.clut``. The loose page is the fallback when the RAW is missing
+      or that page is all zero. The CLUT stays loose: the RAW is pixels only,
+      same as ``CCARS.RAW``.
+
+    ``stem`` is the LEV filename without its extension (the same name
+    ``build_bank`` uses). Returns ``(slots, notes)``. A portrait on a car that
+    is not in ``order`` is skipped and named in ``notes`` — it has no model
+    number to file it under.
     """
     written = []
     notes = []
+    pages = {}
 
     if not getattr(bank, "declared", False) or not stem:
         return written, notes
 
     slots = {name: slot for slot, name in bank.order}
     dest_dir = os.path.join(out_dir, stem + ".portraits")
+    raw_path = os.path.join(out_dir, stem + ".RAW")
 
     for name, car in bank.cars.items():
         if not getattr(car, "portrait", None):
@@ -942,10 +974,13 @@ def install_portraits(bank, out_dir, stem):
         if not os.path.isdir(dest_dir):
             os.makedirs(dest_dir)
 
+        with open(car.portrait, "rb") as src:
+            page = src.read()
+
         dest = os.path.join(dest_dir, "%d.raw" % slot)
 
-        with open(car.portrait, "rb") as src, open(dest, "wb") as out:
-            out.write(src.read())
+        with open(dest, "wb") as out:
+            out.write(page)
 
         if car.portrait_clut:
             cdest = os.path.join(dest_dir, "%d.clut" % slot)
@@ -953,7 +988,13 @@ def install_portraits(bank, out_dir, stem):
             with open(car.portrait_clut, "rb") as src, open(cdest, "wb") as out:
                 out.write(src.read())
 
+        pages[slot] = page
         written.append(slot)
+
+    if pages:
+        _write_portrait_raw(raw_path, pages)
+    elif os.path.isfile(raw_path):
+        os.remove(raw_path)
 
     return written, notes
 
