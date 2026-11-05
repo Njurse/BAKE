@@ -1354,24 +1354,25 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
         regions = {p.get("set"): p.get("clut_rects") or []
                    for p in (manifest.get("pages") or [])}
         rows = carbank_palette.rows_from_pages(gen_dir, pages, paints, regions)
-        bank_rows = {(r["tpageindex"], r["palette"]): r["clut"]
+        bank_rows = {(r["tpageindex"], r.get("texnum", 0), r["palette"]): r["clut"]
                      for r in pal["records"]}
 
         for row in rows:
-            have = bank_rows.get((row["tpageindex"], row["palette"]))
+            key = (row["tpageindex"], row.get("texnum", 0), row["palette"])
+            have = bank_rows.get(key)
 
             if have is None:
-                problems.append("set %d is not in the bank's palette, so its "
-                                "texels paint whatever row is picked"
-                                % row["tpageindex"])
+                problems.append("set %d tex %d palette %d is not in the bank's "
+                                "palette, so its texels paint whatever row is picked"
+                                % key)
             elif have != row["clut"]:
                 differing = sum(1 for i in range(16)
                                 if have[i * 2:i * 2 + 2] != row["clut"][i * 2:i * 2 + 2])
-                problems.append("set %d: the palette row differs from the page's "
-                                "own in %d of 16 entries - the page was quantised "
-                                "against a palette the bank does not carry. Run "
-                                "carbank_palette.py --from-pages"
-                                % (row["tpageindex"], differing))
+                problems.append("set %d tex %d palette %d: the palette row differs "
+                                "from the page's own in %d of 16 entries - the page "
+                                "was quantised against a palette the bank does not "
+                                "carry. Run carbank_palette.py --from-pages"
+                                % (key[0], key[1], key[2], differing))
     except (OSError, ValueError, struct.error):
         pass
 
@@ -1403,13 +1404,15 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
 
 
 def _paints_of(bank):
-    """{set: {"paints", "body", "protect"}} for every page that declares paints."""
+    """{set: {"paints", "body", "protect", "body_rows"}} for pages that name them."""
     out = {}
     for car in bank.cars.values():
         for t in car.textures:
-            if getattr(t, "paints", None):
+            body_rows = getattr(t, "body_rows", None)
+            if getattr(t, "paints", None) or body_rows:
                 out[t.set] = {"paints": t.paints, "body": t.paint_body,
-                              "protect": list(t.protect or [])}
+                              "protect": list(t.protect or []),
+                              "body_rows": body_rows}
     return out
 
 
@@ -1423,8 +1426,10 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
             for texture in car.textures}
     regions = {p["set"]: p.get("clut_rects") or []
                for p in (manifest.get("pages") or [])}
+    notes = []
     rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank),
-                                           regions)
+                                           regions, notes)
+    warnings.extend(notes)
 
     if not rows:
         warnings.append("palette_from_pages: no pages to take a palette from")

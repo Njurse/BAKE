@@ -121,6 +121,15 @@ selects an inline CLUT, anything else references an earlier one, and the run end
 on a lone `-1`. D1 has no reference form and no terminator, because its count is
 already exact.
 
+`palette` is the colour variety. The engine stores it at
+`civ_clut[row][texnum][palette + 1]` (`ProcessPalletLump`); column 0 is the
+page CLUT for that texture id (`texture_cluts[set][texid]`), and
+`cp->ap.palette` selects the column. A page can also carry body colours the
+lump leaves out, as further CLUT rows of the same texture (shared trim,
+different paint). The bake writes those into the five paint slots
+(palette 0..4). Past five, the extra rows stay out of the lump: column 5 is
+the last, and `palette + 1` clamps there. See `docs/CAR_BAKE.md`.
+
 **Two normal tables** sit between the vertices and the poly block, and they are
 not interchangeable:
 

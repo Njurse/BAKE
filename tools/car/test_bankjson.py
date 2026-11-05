@@ -227,6 +227,23 @@ class RefusalTests(BankFixture):
         self.assertEqual([t.set for t in bank.cars["car1"].textures], [1, 2])
         self.assertTrue(bank.cars["car1"].textures[0].image.endswith("body.png"))
 
+    def test_body_rows_are_clut_indices(self):
+        car = self.car()
+        del car["atlas"]
+        car["textures"] = {"1": {"png": "body.png", "body_rows": [0, 4, 5]}}
+
+        texture = bankjson.load(self.write(self.declare(car=car))
+                                 ).cars["car1"].textures[0]
+
+        self.assertEqual(texture.body_rows, [0, 4, 5])
+
+        car["textures"] = {"1": {"png": "body.png", "body_rows": [0, 40]}}
+
+        with self.assertRaises(bankjson.BankError) as caught:
+            bankjson.load(self.write(self.declare(car=car)))
+
+        self.assertIn("body_rows", str(caught.exception))
+
     def test_a_texture_entry_may_carry_its_bake_options(self):
         car = self.car()
         del car["atlas"]
