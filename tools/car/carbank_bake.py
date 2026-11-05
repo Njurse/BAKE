@@ -1600,9 +1600,9 @@ def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
 
     report = exportd2.build_bank(manifest, manifest_path, out_dir, None)
 
-    # Portraits are not a lump. The frontend reads <LEV stem>.portraits/<model>.raw
-    # from beside the .LEV it opens, so the copy lands next to the LEV this bake
-    # just wrote. rebake.bat carries that folder on to the install copy.
+    # Portraits are not a lump. install_portraits writes <stem>.RAW beside the
+    # LEV (page at model-slot * 0x8000) and the loose <stem>.portraits/ folder
+    # the frontend falls back to. rebake.bat copies both on with the LEV/LCF.
     _slots, portrait_notes = bankjson.install_portraits(
         bank, out_dir, report.get("city") or "bank")
     if portrait_notes:
