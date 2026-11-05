@@ -1556,16 +1556,35 @@ def _sync_page_sizes(manifest, bank_dir, out_dir):
     _warn("page size(s) changed; rebuilt LUMP_TEXTUREINFO to match the files "
           "on disk")
 
-def bake_bank(bank_path, out_dir, scale=0.68267, d1=None, default_page=None,
+D1_OBJ_SCALE = 0.68267   # 2048/3000, Driver 1 cell / Driver 2 cell
+
+
+def resolve_scale(cli_scale, bank):
+    """OBJ multiplier. An explicit CLI value wins; otherwise the bank's
+    declare.scale; otherwise the Driver 1 ratio. A Driver 2 export sets
+    declare.scale to 1 so this does not shrink it."""
+    if cli_scale is not None:
+        return cli_scale
+    if getattr(bank, "obj_scale", None) is not None:
+        return bank.obj_scale
+    return D1_OBJ_SCALE
+
+
+def bake_bank(bank_path, out_dir, scale=None, d1=None, default_page=None,
               flip_y=False, flip_winding=False, flip_normals=False, flip_z=False,
               force_pages=False):
-    """Bake the declared bank into out_dir. Returns (ok, warnings)."""
+    """Bake the declared bank into out_dir. Returns (ok, warnings).
+
+    `scale` None uses declare.scale when the bank names one, otherwise
+    2048/3000 (the Driver 1 ratio). A Driver 2 export, demo or retail, names 1.
+    """
     if d1:
         raise SystemExit("carbank_bake: --d1 bakes a Driver 1 pool LEV with "
                          "bake.build_file; a bank is Driver 2 shaped and goes "
                          "through exportd2.build_bank")
 
     bank = bankjson.load(bank_path)
+    scale = resolve_scale(scale, bank)
 
     if not bank.declared:
         # nothing declared: the assembly must reproduce the bank untouched
@@ -1869,8 +1888,10 @@ def main(argv=None):
     ap.add_argument("-o", "--out", help="output folder for the LEV/LCF "
                                         "(default: the bank's build_dir, or the "
                                         "bank folder in the flat layout)")
-    ap.add_argument("--scale", type=float, default=0.68267,
-                    help="OBJ scale (default 0.68267, the D2/D1 cell ratio)")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="OBJ to engine units. Default: declare.scale if the "
+                         "bank names one, else 0.68267 (Driver 1, 2048/3000). "
+                         "A Driver 2 export sets declare.scale 1")
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")

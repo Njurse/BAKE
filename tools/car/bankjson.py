@@ -136,6 +136,15 @@ def _check_keys(where, field, obj, allowed, what):
                   % (what, ", ".join(sorted(allowed))))
 
 
+def _bake_scale(where, field, value):
+    """A vertex multiplier. 1 is a Driver 2 OBJ; 2048/3000 is a Driver 1 OBJ."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail(where, field, "%r is not a scale" % (value,))
+    if not 0.05 <= float(value) <= 16:
+        _fail(where, field, "%r is outside 0.05..16" % (value,))
+    return float(value)
+
+
 class Car(object):
     """One car's declared sources (cars/<id>/handling.json)."""
 
@@ -814,6 +823,9 @@ class Bank(object):
         # with AttributeError before it could reproduce the bank unchanged.
         self.palette_from_pages = False
         self.clut_rows = 8
+        # None: the bake keeps its Driver 1 default (2048/3000). A Driver 2
+        # export sets 1, because those OBJs are already engine units.
+        self.obj_scale = None
 
         if not self.declared:
             return
@@ -826,7 +838,10 @@ class Bank(object):
 
         _check_keys(where, "declare", decl,
                     {"schema", "name", "donor", "order", "cars",
-                     "palette_from_pages", "clut_rows"}, "declare")
+                     "palette_from_pages", "clut_rows", "scale"}, "declare")
+
+        if "scale" in decl:
+            self.obj_scale = _bake_scale(where, "declare.scale", decl.get("scale"))
 
         # the bank's palette rows come from the pages themselves, so a page
         # re-bake cannot leave them disagreeing. A declared bank is generated
@@ -859,7 +874,17 @@ class Bank(object):
         # a LABEL for people (where the car came from); the bake reads no file
         # of it. "lev" is accepted from older banks and ignored.
         _check_keys(where, "declare.donor", donor,
-                    {"city", "model", "slot", "lev"}, "donor")
+                    {"city", "model", "slot", "lev", "source", "obj_scale"},
+                    "donor")
+        # source / obj_scale are labels from exportd2 (driver2 vs driver2-demo,
+        # and the factor already applied to the OBJ). The bake does not apply
+        # obj_scale again; declare.scale is the bake multiplier.
+        if "source" in donor and (not isinstance(donor["source"], str)
+                                  or not donor["source"].strip()):
+            _fail(where, "declare.donor.source",
+                  "%r is not a source name" % (donor.get("source"),))
+        if "obj_scale" in donor:
+            _bake_scale(where, "declare.donor.obj_scale", donor["obj_scale"])
         self.donor = donor
 
         cars = decl.get("cars") or {}
