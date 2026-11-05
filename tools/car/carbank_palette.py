@@ -335,7 +335,278 @@ def _rect_mask(rects, length):
     return mask
 
 
-def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
+# civ_clut[row][texid][0..5] (cars.c). Slot 0 is the page CLUT
+# (texture_cluts[set][texid], refilled when the model is built). Slots 1..5
+# are LUMP_PALLET records: ProcessPalletLump stores palette k at column k+1,
+# and DrawCarObject selects the column with cp->ap.palette. Five is the
+# engine's paint budget; a sixth extra would clamp into slot 5.
+PAINT_SLOTS = 5
+
+
+def clut_rows_from_entry(entry):
+    """The CLUT rows at the front of a page entry, before the decomp stream.
+
+    A Driver 1 page is `[int npalettes][npalettes x 32-byte rows][decomp]`.
+    Row i is texture id i (`texture_cluts[set][i]`). Rows the geometry never
+    names can still be other body colours of a row it does name.
+    """
+    if not entry or len(entry) < 4:
+        return []
+
+    npal = struct.unpack_from("<i", entry, 0)[0]
+
+    if npal < 1 or npal > 64 or 4 + npal * 32 > len(entry):
+        return []
+
+    return [bytes(entry[4 + i * 32:4 + (i + 1) * 32]) for i in range(npal)]
+
+
+def _colour_words(row):
+    """16 RGB555 colours, STP (bit 15) stripped. 0 stays the transparent key."""
+    return [struct.unpack_from("<H", row, i * 2)[0] & 0x7FFF
+            for i in range(fourbpp.CLUT_ROW_ENTRIES)]
+
+
+def _shared_body_count(base_row, other_row):
+    """How many non-transparent entries the two rows agree on, and how many differ."""
+    shared = 0
+    shared_vals = set()
+    diff = 0
+
+    for a, b in zip(_colour_words(base_row), _colour_words(other_row)):
+        if a == b and a != 0:
+            shared += 1
+            shared_vals.add(a)
+        elif a != b:
+            diff += 1
+
+    return shared, len(shared_vals), diff
+
+
+def is_body_recolour(base_row, other_row):
+    """True when `other_row` is the same CLUT with the body paint changed.
+
+    Trim, glass and lights stay put (several shared entries, more than one
+    distinct colour) and at least two entries move. An identical row is not a
+    variant, and a lamp or detail row that shares nothing with the body is not
+    one either — those stay texture ids, not paint columns.
+    """
+    if not base_row or not other_row or base_row == other_row:
+        return False
+
+    shared, kinds, diff = _shared_body_count(base_row, other_row)
+    return shared >= 4 and kinds >= 2 and diff >= 2
+
+
+def body_colour_slots(rows, used_ids=None, body_rows=None, occupied=None):
+    """Page CLUT rows that belong in civ_clut paint columns.
+
+    `rows[i]` is texture id i. Slot 0 of that id is this row, from the page.
+    Each returned palette k (0..4) is the CLUT `ProcessPalletLump` writes at
+    civ_clut column k+1.
+
+    `used_ids` is the texture ids the geometry names. Only rows it does not
+    name are candidates, so a lamp id is not consumed as a body paint. None
+    means every later row may be a recolour of an earlier one (a page whose
+    polys are not in hand).
+
+    `body_rows` overrides detection: `[base_id, extra, extra, ...]`. The first
+    index is the texture id whose page row is already civ slot 0. A list of
+    just that id disables detection (no extras).
+
+    `occupied` is `{texnum: {palette: clut}}` already emitted for this page
+    (the source LUMP_PALLET). A palette-0 record that is byte-identical to the
+    page row is the slot-0 colour again; it is dropped so the first real extra
+    can take civ slot 1. Any other occupied palette is kept.
+
+    Returns `(slots, info)`. `slots` is `{texnum: {palette: clut}}` for texture
+    ids that gained at least one extra, and is the FULL palette map for that
+    id (previous records plus the extras). `info` is
+    `[{texnum, kept, overflow}, ...]` — `overflow` is extras past the five
+    paint slots.
+    """
+    rows = list(rows or [])
+    info = []
+
+    if body_rows is not None:
+        groups = {}
+
+        if body_rows:
+            base = int(body_rows[0])
+            groups[base] = [int(v) for v in body_rows[1:]]
+    else:
+        groups = _detect_body_variants(rows, used_ids)
+
+    slots = {}
+
+    for base, variants in groups.items():
+        if not 0 <= base < len(rows):
+            continue
+
+        have = dict((occupied or {}).get(base) or {})
+        base_row = bytes(rows[base])
+        extras = []
+
+        for index in variants:
+            if not 0 <= index < len(rows):
+                continue
+
+            clut = bytes(rows[index])
+
+            if clut == base_row or clut in have.values() or clut in extras:
+                continue
+
+            extras.append(clut)
+
+        if not extras:
+            continue
+
+        if have.get(0) == base_row:
+            del have[0]
+
+        kept = 0
+        overflow = 0
+        added = []
+
+        for clut in extras:
+            slot = next((p for p in range(PAINT_SLOTS) if p not in have), None)
+
+            if slot is None:
+                overflow += 1
+                continue
+
+            have[slot] = clut
+            added.append(slot)
+            kept += 1
+
+        if kept:
+            slots[base] = have
+            info.append({"texnum": base, "kept": kept, "overflow": overflow,
+                         "slots": [p + 1 for p in added]})
+        elif overflow:
+            info.append({"texnum": base, "kept": 0, "overflow": overflow,
+                         "slots": []})
+
+    return slots, info
+
+
+def _detect_body_variants(rows, used_ids):
+    """{base texnum: [variant row indices]} for recolours of a body row."""
+    n = len(rows)
+
+    if used_ids is None:
+        bases = list(range(n))
+        candidates = list(range(n))
+    else:
+        bases = [i for i in sorted(used_ids) if 0 <= i < n]
+        known = set(bases)
+        candidates = [i for i in range(n) if i not in known]
+
+    groups = {}
+
+    for index in candidates:
+        best = None
+        best_score = -1
+
+        for base in bases:
+            if base == index:
+                continue
+
+            if used_ids is None and base >= index:
+                continue
+
+            if not is_body_recolour(rows[base], rows[index]):
+                continue
+
+            score = _shared_body_count(rows[base], rows[index])[0]
+
+            if best is None or score > best_score or (score == best_score and base < best):
+                best = base
+                best_score = score
+
+        if best is not None:
+            groups.setdefault(best, []).append(index)
+
+    return groups
+
+
+def body_paint_note(page_set, item):
+    """One line naming the civ_clut columns a page's extra body CLUTs filled."""
+    kept = item["kept"]
+    overflow = item["overflow"]
+
+    if kept <= 0:
+        return ("set %d tex %d: %d extra body CLUT(s) do not fit "
+                "(civ_clut columns are 0..5, and palette+1 clamps at 5)"
+                % (page_set, item["texnum"], overflow))
+
+    civ = ", ".join(str(s) for s in item.get("slots") or [])
+    pals = ", ".join(str(s - 1) for s in item.get("slots") or [])
+    text = ("set %d tex %d: %d extra body CLUT(s) -> civ_clut slot(s) %s "
+            "(LUMP_PALLET palette %s; cp->ap.palette cycles them, "
+            "slot 0 stays the page CLUT)"
+            % (page_set, item["texnum"], kept, civ, pals))
+
+    if overflow:
+        text += (" ; %d more body CLUT(s) do not fit "
+                 "(civ_clut columns are 0..5, and palette+1 clamps at 5)"
+                 % overflow)
+
+    return text
+
+
+def apply_body_colour_slots(records, rows, used_ids, tpageindex, body_rows=None):
+    """`(records, notes)`. Extra body CLUTs join this page's LUMP_PALLET rows.
+
+    Records for a texture id that gained no extra are returned as they were,
+    in the same order, so a page with no body variants bakes the same bytes.
+    """
+    occupied = {}
+
+    for record in records:
+        occupied.setdefault(record["texnum"], {})[record["palette"]] = record["clut"]
+
+    slots, info = body_colour_slots(rows, used_ids, body_rows, occupied)
+
+    if not slots:
+        return list(records), [body_paint_note(tpageindex, item)
+                               for item in info if item["overflow"]]
+
+    out = []
+    written = set()
+
+    for record in records:
+        texnum = record["texnum"]
+
+        if texnum not in slots:
+            out.append(record)
+            continue
+
+        if texnum in written:
+            continue
+
+        written.add(texnum)
+
+        for palette, clut in sorted(slots[texnum].items()):
+            nxt = dict(record)
+            nxt["palette"] = palette
+            nxt["clut"] = clut
+            nxt["paint"] = "body%d" % (palette + 1)
+            out.append(nxt)
+
+    for texnum, have in slots.items():
+        if texnum in written:
+            continue
+
+        for palette, clut in sorted(have.items()):
+            out.append({"palette": palette, "texnum": texnum,
+                        "tpageindex": tpageindex, "clut_number": -1,
+                        "clut": clut, "paint": "body%d" % (palette + 1)})
+
+    return out, [body_paint_note(tpageindex, item) for item in info]
+
+
+def rows_from_pages(bank_dir, sets=None, paints=None, regions=None, notes=None):
     """Palette rows built from the PAGES themselves.
 
     A page that carries one CLUT row emits texnum 0, as before. A page that was
@@ -346,6 +617,12 @@ def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
 
     `regions` is `{set: [{id, rect}, ...]}` from the page plan, so an image
     paint for one id only samples that id's texels.
+
+    A page with no declared paints still contributes its extra body CLUTs.
+    Rows that are a recolour of an earlier row (or `body_rows` on the texture,
+    `[base_id, extra, ...]`) fill civ_clut slots 1..5 for that texture id.
+    Slot 0 stays the page's own row. More than five extras are reported in
+    `notes` and not emitted. Declared `paints` already own those columns.
     """
     import pages1
 
@@ -371,14 +648,37 @@ def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
         indices = None
         spec = (paints or {}).get(page_set)
         pieces = (regions or {}).get(page_set) or []
+        body_rows = None if not spec else spec.get("body_rows")
 
         if not spec or not spec.get("paints"):
             # one record per CLUT row the page actually stores. A single-row
             # page is exactly the old record (texnum 0, the page's row 0).
+            # Extra body colours on the same page fill the paint columns of
+            # the row they recolour; that row's own bytes stay civ slot 0.
+            slots, info = body_colour_slots(rows, body_rows=body_rows)
+
             for texnum, row in enumerate(rows):
-                out.append({"palette": 0, "texnum": texnum, "tpageindex": page_set,
-                            "clut_number": -1, "clut": row})
+                have = slots.get(texnum)
+
+                if not have:
+                    out.append({"palette": 0, "texnum": texnum,
+                                "tpageindex": page_set, "clut_number": -1,
+                                "clut": row})
+                    continue
+
+                for palette, clut in sorted(have.items()):
+                    out.append({"palette": palette, "texnum": texnum,
+                                "tpageindex": page_set, "clut_number": -1,
+                                "clut": clut, "paint": "body%d" % (palette + 1)})
+
+            if notes is not None:
+                notes.extend(body_paint_note(page_set, item) for item in info)
+
             continue
+
+        if body_rows is not None and notes is not None:
+            notes.append("set %d: paints fill civ_clut slots 1..5, so body_rows "
+                         "is not also read" % page_set)
 
         # Paint variants: lump palette p fills civ_clut column p+1, column 0 is
         # the page's own CLUT (the original colours), so variant k -> palette k.
@@ -516,7 +816,11 @@ def _from_pages(args, bank_dir, out, subject, bank_sets, sets):
         if not wanted:
             wanted = bank_sets or set()
 
-    rows = rows_from_pages(bank_dir, wanted or None)
+    notes = []
+    rows = rows_from_pages(bank_dir, wanted or None, notes=notes)
+
+    for line in notes:
+        print("  " + line)
 
     if not rows:
         raise SystemExit("no pages under %s/pages to take a palette from"

@@ -82,7 +82,7 @@ WHEEL_VARIANTS = ("clean", "damaged", "fast")
 # to reproduce the page from the declaration alone
 TEXTURE_KEYS = {"png", "transparent", "transparent_tolerance",
                 "transparent_chroma", "palette", "protect",
-                "paints", "paint_body", "split", "max_error"}
+                "paints", "paint_body", "body_rows", "split", "max_error"}
 PAINT_IMAGE_KEYS = {"image", "id", "panel"}
 
 # A page is 256x256 texels, and the UVs that name a crop are unsigned bytes, so a
@@ -455,6 +455,23 @@ class Texture(object):
             _fail(where, field + ".paint_body", "must be a list of hex colours")
         self.paint_body = (None if body is None else
                            [_hex_colour(where, field + ".paint_body", c) for c in body])
+
+        # Page CLUT indices that are one body colour, in swap order. The first
+        # is the texture id whose row is already civ_clut slot 0. The rest fill
+        # slots 1..5 (LUMP_PALLET palette 0..4). Omit it and rows that recolour
+        # an earlier row are detected. A one-element list turns detection off.
+        raw_rows = data.get("body_rows")
+        self.body_rows = None
+
+        if raw_rows is not None:
+            if (not isinstance(raw_rows, list) or not raw_rows or
+                    not all(isinstance(v, int) and not isinstance(v, bool)
+                            and 0 <= v <= 31 for v in raw_rows)):
+                _fail(where, field + ".body_rows",
+                      "must be a list of CLUT row indices 0..31 "
+                      "(first is the base texture id)")
+
+            self.body_rows = [int(v) for v in raw_rows]
 
         if self.palette is not None:
             if not isinstance(self.palette, list):
