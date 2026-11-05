@@ -355,6 +355,15 @@ class PortraitTests(BankFixture):
         self.assertEqual(os.path.getsize(raw), bankjson.PORTRAIT_BYTES)
         self.assertEqual(os.path.getsize(clut), bankjson.PORTRAIT_CLUT_BYTES)
 
+        packed = os.path.join(out, "FIREBIRD.RAW")
+        with open(packed, "rb") as f:
+            blob = f.read()
+        page = bankjson.PORTRAIT_BYTES
+        # slot 3, not a dense one-page file: models 0..2 are empty pages
+        self.assertEqual(len(blob), 4 * page)
+        self.assertEqual(blob[:3 * page], b"\x00" * (3 * page))
+        self.assertEqual(blob[3 * page:], b"\x11" * page)
+
     def test_a_short_portrait_is_refused(self):
         with open(os.path.join(self.dir, "portrait.raw"), "wb") as f:
             f.write(b"\x00" * 100)
@@ -396,6 +405,84 @@ class PortraitTests(BankFixture):
         self.assertEqual(slots, [])
         self.assertIn("car2", notes[0])
         self.assertFalse(os.path.isdir(os.path.join(self.dir, "TEST.portraits")))
+        self.assertFalse(os.path.isfile(os.path.join(self.dir, "TEST.RAW")))
+
+    def test_sparse_model_slots_pack_at_those_offsets(self):
+        # Miami's cop is model 1 (roster slot 0) and model 8 is roster slot 4.
+        # The RAW is indexed by the model, so these two pages are not adjacent.
+        self._page("cop.raw")
+        with open(os.path.join(self.dir, "civilian.raw"), "wb") as f:
+            f.write(b"\x22" * bankjson.PORTRAIT_BYTES)
+        decl = self.declare(
+            car=self.car(portrait="cop.raw"),
+            order=[{"slot": 1, "car": "car1"}, {"slot": 8, "car": "car2"}])
+        decl["cars"]["car2"] = self.car(portrait="civilian.raw")
+        bank = bankjson.load(self.write(decl))
+        slots, notes = bankjson.install_portraits(bank, self.dir, "MIAMI")
+
+        self.assertEqual(sorted(slots), [1, 8])
+        self.assertEqual(notes, [])
+        page = bankjson.PORTRAIT_BYTES
+        with open(os.path.join(self.dir, "MIAMI.RAW"), "rb") as f:
+            blob = f.read()
+
+        self.assertEqual(len(blob), 9 * page)
+        self.assertEqual(blob[0:page], b"\x00" * page)
+        self.assertEqual(blob[1 * page:2 * page], b"\x11" * page)
+        self.assertEqual(blob[2 * page:8 * page], b"\x00" * (6 * page))
+        self.assertEqual(blob[8 * page:9 * page], b"\x22" * page)
+
+    def test_a_handling_json_portrait_is_relative_to_the_car(self):
+        car_dir = os.path.join(self.dir, "cars", "car1", "art")
+        os.makedirs(car_dir)
+        for name in ("clean.obj", "low.obj", "atlas.png"):
+            with open(os.path.join(self.dir, "cars", "car1", name), "w") as f:
+                f.write("x")
+        with open(os.path.join(car_dir, "icon.raw"), "wb") as f:
+            f.write(b"\x5A" * bankjson.PORTRAIT_BYTES)
+        with open(os.path.join(car_dir, "icon.clut"), "wb") as f:
+            f.write(b"\x34\x12" * 16)
+        with open(os.path.join(self.dir, "cars", "car1", "handling.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({
+                "clean": "clean.obj",
+                "low": "low.obj",
+                "atlas": "atlas.png",
+                "portrait": "art/icon.raw",
+                "handling": {"mass": 4096},
+                "notes": "ignored by the bake",
+            }, f)
+
+        decl = self.declare(order=[{"slot": 8, "car": "car1"}])
+        decl["cars"]["car1"] = "cars/car1/handling.json"
+        bank = bankjson.load(self.write(decl))
+        car = bank.cars["car1"]
+
+        self.assertTrue(car.portrait.endswith(os.path.join("car1", "art", "icon.raw")))
+        self.assertTrue(car.portrait_clut.endswith("icon.clut"))
+        slots, notes = bankjson.install_portraits(bank, self.dir, "MIAMI")
+
+        self.assertEqual(slots, [8])
+        self.assertEqual(notes, [])
+        page = bankjson.PORTRAIT_BYTES
+        with open(os.path.join(self.dir, "MIAMI.RAW"), "rb") as f:
+            blob = f.read()
+        self.assertEqual(blob[8 * page:9 * page], b"\x5A" * page)
+        self.assertEqual(os.path.getsize(
+            os.path.join(self.dir, "MIAMI.portraits", "8.clut")),
+            bankjson.PORTRAIT_CLUT_BYTES)
+
+    def test_a_rebake_with_no_portrait_removes_a_stale_raw(self):
+        stale = os.path.join(self.dir, "TEST.RAW")
+        with open(stale, "wb") as f:
+            f.write(b"\x11" * bankjson.PORTRAIT_BYTES)
+
+        bank = bankjson.load(self.write(self.declare()))
+        slots, notes = bankjson.install_portraits(bank, self.dir, "TEST")
+
+        self.assertEqual(slots, [])
+        self.assertEqual(notes, [])
+        self.assertFalse(os.path.isfile(stale))
 
 
 class WriteBackTests(BankFixture):

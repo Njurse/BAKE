@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Car-select portraits pack into `<CITY>.RAW`
+
+- `portrait` on `cars/<id>/handling.json` (path relative to that file; optional sibling `.clut`) is the author-facing field. An inline `bank.json` car object is the same key and the same packer.
+- The bake writes `<CITY>.RAW` beside the LEV/LCF: page at `model-slot * 0x8000` (the in-game model, not the roster cursor). It still writes `<CITY>.portraits/<slot>.raw` and `.clut`. Not a lump.
+- `rebake.bat` copies the RAW with the LEV/LCF and removes a previously installed RAW when this bake declared none.
+
 ### Car banks are generated: no `donor/` (`carbank_bake.py`, `exportd2.py`, `make_new_bank.py`)
 
 - A declared bank bakes from `bank.json` + `cars/` (+ `shared/`) alone. The
