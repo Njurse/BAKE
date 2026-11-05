@@ -48,7 +48,9 @@ def _bank_name(bank):
 def write(bank_dir, name, donor_city="CHICAGO", mode="plain", args="",
           preview="--flip-y", force=False):
     bank = os.path.abspath(bank_dir)
-    name = _bank_name(bank) or name
+    # Prefer the caller name (exportd2 bank_name). Reading bank.json first
+    # stomped a fresh export with a stale donor-named bank.json left behind.
+    name = (name or _bank_name(bank) or os.path.basename(bank)).upper()
     tools = _from_bank(HERE, bank)          # full value for set "CAR=..."
     mirror, exedir = "", ""
     # game tree = the REDRIVER2 checkout holding src_rebuild; look above the

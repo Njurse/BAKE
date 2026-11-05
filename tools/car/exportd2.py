@@ -1329,10 +1329,12 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         assets.write_handling(city_dir, cars, cos_records, cosmetics_fields)
     _write_json(manifest_path, manifest)   # warnings may have grown
 
-    write_rebake(city_dir, name, city)
     write_bank_json(city_dir, city, cars, included_sets, bank_order,
                     os.path.basename(lev_path), extras, name=name,
                     source=kind_name, obj_scale=obj_scale)
+    # After bank.json so make_write_scripts can read the bank name, not a
+    # stale donor-named leftover from a previous export into this folder.
+    write_rebake(city_dir, name, city)
 
     # The bank is baked the way every rebake bakes it: generatively, from
     # bank.json + cars/ alone (carbank_bake). Then the scratch goes.
