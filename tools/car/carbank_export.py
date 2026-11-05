@@ -27,9 +27,10 @@ bank and re-baking it keeps the wheels rather than quietly dropping them. A bank
 that carries no wheel segment has only the author's wheel PNGs, which name no
 page, and those are copied as plain paths.
 
-The scale is the one the baker and the engine already use (see obj2geom --scale
-and bake.py's model path); the OBJ is written in the bank's own units, so a
-re-import with `--scale 1` reproduces the geometry.
+The OBJ is written in the bank's own units. A Driver 2 level (demo or retail)
+already stores cars in engine units, so the bake scale is 1. `--scale 0.68267`
+is the Driver 1 ratio (2048/3000) and shrinks these cars. Re-import with
+`--scale 1`.
 """
 
 import argparse
@@ -48,8 +49,13 @@ import lev1
 
 
 def _levels_scale():
-    """The scale the bake uses when it reads an OBJ back (obj2geom's default)."""
-    return 0.68267
+    """Bake multiplier for an OBJ this tool writes.
+
+    Driver 2 demo and retail vertices are already engine units (measured:
+    demo HAVANA clean lengths match retail, ratio 1). obj2geom's default
+    0.68267 is the Driver 1 cell ratio and must not be used here.
+    """
+    return exportd2.D2_OBJ_SCALE
 
 
 def _page_indices(blob, off, size, where):
@@ -368,7 +374,8 @@ def _declare_block(result, name):
 
         cars[carname] = entry
 
-    return {"schema": 1, "name": name, "order": result["order"], "cars": cars}
+    return {"schema": 1, "name": name, "scale": result["scale"],
+            "order": result["order"], "cars": cars}
 
 
 def main(argv=None):
@@ -402,7 +409,8 @@ def main(argv=None):
     print("  cars:  %s" % ", ".join(sorted(result["cars"])))
     print("  pages: %s" % ", ".join(str(s) for s in sorted(result["pages"])))
     print("  wheels: %s" % json.dumps(result["wheels"] or result["wheel_pngs"]))
-    print("  scale: %s (the bake's OBJ scale)" % result["scale"])
+    print("  scale: %s (bake the OBJ at this; Driver 2 is already engine units)"
+          % result["scale"])
 
     if args.declare:
         if path is None:

@@ -77,6 +77,15 @@ LUMP_CAR_MODELS = 28
 LUMP_TEXTUREINFO = 34
 LUMP_CAR_DATA = 35
 LUMP_LUMPDESC = 37
+# main.c: the old junction lump is the demo (gDemoLevel = 1). Retail writes
+# LUMP_JUNCTIONS2_NEW instead. Car vertices do not follow that split: measured
+# Aug 2000 demo HAVANA (SLUS-900.93) against retail USA HAVANA, clean lengths
+# slot 0 750/750, 1 750/750, 2 681/680, 3 692/692, 8 882/882, 9 882/882,
+# 10 1386/1386, 11 674/674. Both map headers are cell size 2048. 2048/3000 is
+# the Driver 1 cell ratio; applying it here is what makes a demo car too small.
+LUMP_JUNCTIONS2 = 42
+LUMP_JUNCTIONS2_NEW = 43
+D2_OBJ_SCALE = 1.0
 # A segment Driver 2 itself never writes. It carries the wheel MODELS a bank
 # names, one per variant, so an imported car can wear the imported wheel rather
 # than the host level's shared one. The engine reads it back by type
@@ -195,6 +204,48 @@ def d2_lump(blob, lump_type):
         if typ == lump_type:
             return body, size
     return None
+
+
+def level_lump_types(blob):
+    """Every lump type in the four city containers, not only DATA1.
+
+    The demo/retail split is LUMP_JUNCTIONS2 vs LUMP_JUNCTIONS2_NEW, and those
+    live in the in-memory container, which d2_segments does not walk.
+    """
+    table = d2_citylumps(blob)
+    found = set()
+    for i in range(0, 8, 2):
+        off, size = table[i], table[i + 1]
+        if off <= 0 or size <= 0 or off + size > len(blob):
+            continue
+        end = off + size
+        p = off + 8
+        while p + 8 <= end:
+            typ, sz = struct.unpack_from("<ii", blob, p)
+            if typ == 0xFF or sz < 0 or p + 8 + sz > end:
+                break
+            found.add(typ)
+            p += 8 + align(sz, 4)
+    return found
+
+
+def source_kind(blob):
+    """'driver2-demo' when the level is the alpha-1.6 junction format, else
+    'driver2'. A label for the bank; the bake does not branch on it."""
+    types = level_lump_types(blob)
+    if LUMP_JUNCTIONS2 in types and LUMP_JUNCTIONS2_NEW not in types:
+        return "driver2-demo"
+    return "driver2"
+
+
+def populated_slots(offsets):
+    """Slots whose clean model is present.
+
+    Slot 0 is the cop. A negative clean offset is an empty slot (the Aug 2000
+    demo HAVANA really has no model in 4 and 12; it does have the cop). Do not
+    treat 0 itself as empty.
+    """
+    return [i for i, tri in enumerate(offsets) if tri[0] >= 0]
 
 
 def d2_page_base(blob):
@@ -600,8 +651,13 @@ def _normal_key(n):
     return (round(n[0], 6), round(n[1], 6), round(n[2], 6))
 
 
-def write_obj(path, model, name, mtl_name):
-    """OBJ + per-material groups; the material name carries set and texture id."""
+def write_obj(path, model, name, mtl_name, scale=D2_OBJ_SCALE):
+    """OBJ + per-material groups; the material name carries set and texture id.
+
+    `scale` multiplies vertex positions. Driver 2 demo and retail are already
+    in engine units (`D2_OBJ_SCALE`, 1). Passing the Driver 1 ratio 2048/3000
+    shrinks the car.
+    """
     verts = model.vertices
     vt = []
     vn = []
@@ -656,7 +712,13 @@ def write_obj(path, model, name, mtl_name):
         f.write("mtllib %s\n" % mtl_name)
         f.write("o %s\n" % name)
         for x, y, z in verts:
-            f.write("v %d %d %d\n" % (x, y, z))
+            if scale == 1 or scale == 1.0:
+                sx, sy, sz = int(x), int(y), int(z)
+            else:
+                sx = int(round(x * scale))
+                sy = int(round(y * scale))
+                sz = int(round(z * scale))
+            f.write("v %d %d %d\n" % (sx, sy, sz))
         for u, v in vt:
             f.write("vt %.6f %.6f\n" % (u, v))
         for nx, ny, nz in vn:
@@ -826,7 +888,7 @@ def write_rebake(city_dir, name, donor_city="CHICAGO"):
 
 
 def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
-                    extras=None, name=None):
+                    extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE):
     """bank.json with a `declare` block shaped like banks/firebird/bank.json:
     every car points at its OBJs, PNG pages (+ recovered paints/protect),
     WAVs, and the first car in order owns the bank's one wheel set."""
@@ -910,7 +972,13 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
             "name": name,
             # a label for people: which city the car came from. The bake
             # reads no file of it.
-            "donor": {"city": city},
+            # scale is the bake multiplier. The OBJ is already in engine units
+            # (obj_scale was applied at export; 1 for demo and retail D2).
+            # Leaving this unset makes carbank_bake use 2048/3000 and shrink
+            # the car. The bake does not read donor.
+            "donor": {"city": city, "source": source or "driver2",
+                      "obj_scale": obj_scale},
+            "scale": 1,
             "order": bank_order,
             # pages are re-baked to ONE CLUT each, so the bank's palette rows
             # must come from those pages (as banks/firebird does); the source's
@@ -923,7 +991,8 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
 
 
 def export_one(lev_path, out_root, models_filter, variants, make_bank,
-               dir_name=None, bank_name=None, slot_override=None):
+               dir_name=None, bank_name=None, slot_override=None,
+               obj_scale=None):
     with open(lev_path, "rb") as f:
         blob = f.read()
     kind = level_game(blob)
@@ -946,6 +1015,12 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         if not 0 <= dest_slot < MAX_CAR_MODELS:
             raise SystemExit("slot %d is outside 0..%d"
                              % (dest_slot, MAX_CAR_MODELS - 1))
+
+    # Demo and retail D2 cars are already engine-sized (D2_OBJ_SCALE). A caller
+    # can pass another factor; it is applied once, here, so the bake stays at 1.
+    kind_name = source_kind(blob)
+    if obj_scale is None:
+        obj_scale = D2_OBJ_SCALE
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
     # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
@@ -975,6 +1050,10 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         os.makedirs(d, exist_ok=True)
 
     warnings = []
+    if obj_scale != 1 and obj_scale != 1.0:
+        warnings.append("obj scale %s applied at export; handling.json is still "
+                        "the source LCF (engine units). Bake at declare.scale 1"
+                        % obj_scale)
     source = {"path": os.path.abspath(lev_path),
               "size": len(blob), "sha256": _sha256(blob)}
     table = d2_model_table(blob)
@@ -988,12 +1067,10 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
     cars = []
     materials = {}
     used_sets = set()
-    for m in range(MAX_CAR_MODELS):
+    for m in populated_slots(table["offsets"]):
         if models_filter is not None and m not in models_filter:
             continue
         c, d, l = table["offsets"][m]
-        if c < 0:
-            continue
         car_id = "%s_model%d" % (city, dest_slot if dest_slot is not None else m)
         car = {"id": car_id, "model": m, "variants": {}, "sets": [],
                "cosmetics": m}
@@ -1025,7 +1102,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
             raw_path = os.path.join(city_dir, raw_rel)
 
             write_obj(obj_path, model, "%s_%s" % (car_id, variant),
-                      "%s.mtl" % car_id)
+                      "%s.mtl" % car_id, scale=obj_scale)
             rec = geom_record(city, m, variant, car_id, source, model)
             _write_json(geom_path, rec)
             if variant in blocks:
@@ -1254,7 +1331,8 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
 
     write_rebake(city_dir, name, city)
     write_bank_json(city_dir, city, cars, included_sets, bank_order,
-                    os.path.basename(lev_path), extras, name=name)
+                    os.path.basename(lev_path), extras, name=name,
+                    source=kind_name, obj_scale=obj_scale)
 
     # The bank is baked the way every rebake bakes it: generatively, from
     # bank.json + cars/ alone (carbank_bake). Then the scratch goes.
@@ -1276,6 +1354,12 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
              len(pal["records"])))
     for cid in sorted(covered):
         print("  %-18s sets %s" % (cid, covered[cid]))
+    if any(c["model"] == 0 for c in cars):
+        print("  model 0 (cop): exported")
+    else:
+        print("  model 0 (cop): empty in this level (clean offset -1)")
+    print("  source: %s  obj scale: %s  bake scale: 1"
+          % (kind_name, obj_scale))
     for w in warnings:
         print("  warning: %s" % w)
     if make_bank:
@@ -2536,7 +2620,15 @@ def main(argv=None):
     ap.add_argument("--all", action="store_true",
                     help="process every .LEV in a directory")
     ap.add_argument("--models", default="0-12",
-                    help="model slots to export (e.g. 0-12 or 1,2,3)")
+                    help="model slots to export (default 0-12). Slot 0 is the "
+                         "cop and is exported when the level has one; do not "
+                         "drop it as unused")
+    ap.add_argument("--obj-scale", type=float, default=None,
+                    help="multiply exported OBJ vertices by this. Default 1: "
+                         "demo and retail Driver 2 HAVANA cars already match "
+                         "(do not pass 2048/3000, that is the Driver 1 ratio "
+                         "and shrinks these cars). The bake then uses "
+                         "declare.scale 1")
     ap.add_argument("--variants", default="clean,damaged,low",
                     help="variants to export (default: clean,damaged,low)")
     ap.add_argument("--no-bank", action="store_true",
@@ -2581,7 +2673,8 @@ def main(argv=None):
         if not args.bank_per_car:
             try:
                 entry = export_one(path, out_root, models_filter, variants,
-                                   not args.no_bank, bank_name=args.name)
+                                   not args.no_bank, bank_name=args.name,
+                                   obj_scale=args.obj_scale)
             except SystemExit as e:
                 print("skip %s: %s" % (os.path.basename(path), e))
                 continue
@@ -2594,7 +2687,8 @@ def main(argv=None):
             name = "%s_model%d" % (city, m)
             try:
                 entry = export_one(path, out_root, {m}, variants,
-                                   not args.no_bank, dir_name=name)
+                                   not args.no_bank, dir_name=name,
+                                   obj_scale=args.obj_scale)
             except SystemExit as e:
                 print("skip %s model %d: %s" % (os.path.basename(path), m, e))
                 entry = None
