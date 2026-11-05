@@ -33,6 +33,7 @@ if not exist "%CAR%\carbank_bake.py" (echo FAILED: no bake tools at %CAR% & exit
 if not exist "%OUT%" mkdir "%OUT%"
 if exist "%OUT%\@NAME@.LEV" del /q "%OUT%\@NAME@.LEV"
 if exist "%OUT%\@NAME@.LCF" del /q "%OUT%\@NAME@.LCF"
+if exist "%OUT%\@NAME@.RAW" del /q "%OUT%\@NAME@.RAW"
 echo.
 echo  ==== @NAME@ rebake [%MODE%] ====
 python "%CAR%\carbank_bake.py" "%BANK%\bank.json" -o "%OUT%" @ARGS@ %FLIP% > "%LOG%" 2>&1
@@ -42,6 +43,11 @@ findstr /i "warning" "%LOG%"
 for /f "usebackq delims=" %%L in (`findstr /i /c:"bank ok" "%LOG%"`) do echo   %%L
 copy /Y "%OUT%\@NAME@.LEV" "%BANK%\" >nul
 copy /Y "%OUT%\@NAME@.LCF" "%BANK%\" >nul
+if exist "%OUT%\@NAME@.RAW" (
+    copy /Y "%OUT%\@NAME@.RAW" "%BANK%\" >nul
+) else (
+    if exist "%BANK%\@NAME@.RAW" del /q "%BANK%\@NAME@.RAW"
+)
 if exist "%OUT%\@NAME@.portraits\" (
     xcopy /E /I /Y "%OUT%\@NAME@.portraits" "%BANK%\@NAME@.portraits\" >nul
 )
@@ -49,6 +55,11 @@ if not "%MIRROR%"=="" (
     if not exist "%MIRROR%" mkdir "%MIRROR%"
     copy /Y "%OUT%\@NAME@.LEV" "%MIRROR%\" >nul
     copy /Y "%OUT%\@NAME@.LCF" "%MIRROR%\" >nul
+    if exist "%OUT%\@NAME@.RAW" (
+        copy /Y "%OUT%\@NAME@.RAW" "%MIRROR%\" >nul
+    ) else (
+        if exist "%MIRROR%\@NAME@.RAW" del /q "%MIRROR%\@NAME@.RAW"
+    )
     if exist "%OUT%\@NAME@.portraits\" (
         xcopy /E /I /Y "%OUT%\@NAME@.portraits" "%MIRROR%\@NAME@.portraits\" >nul
     )
