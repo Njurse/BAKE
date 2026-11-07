@@ -240,13 +240,30 @@ def _declared_bank(bank, bank_root):
     return bankjson.Bank(os.path.join(bank_root, "bank.json"), bank)
 
 
-def build_pages(bank_root, bank, obj_path, groups, mats, car=None, variant=0):
+def _wheel_page(model, setid, sprites, bank_root, warnings):
+    """A synthesized wheel page, through the bake's own helper."""
+    import carbank_bake
+
+    raw = getattr(model, "raw", {}) or {}
+    build_dir = (os.path.join(bank_root, raw["build_dir"])
+                 if raw.get("build_dir") else bank_root)
+    result = carbank_bake.bake_wheel_page(model, setid, sprites,
+                                          bank_dir=build_dir,
+                                          warnings=warnings)
+
+    return ProcessedSet(setid, result.rows, result.indices, result.cleared,
+                        result.mask, result.pieces, "synthesised wheel page")
+
+
+def build_pages(bank_root, bank, obj_path, groups, mats, car=None, variant=0,
+                wheel_root=None):
     """PreviewPages for every page set the OBJ's materials (or wheels) name.
 
     `groups`/`mats` are what preview_mesh.load_obj returned, so the mesh is
     parsed once. `car` adds the declared wheel sets, which no body material
-    names but the wheel sprites draw from. `variant` is the civ_clut paint
-    column (0 = base colours).
+    names but the wheel sprites draw from; `wheel_root` is where that car's
+    wheel `png` paths are relative to. `variant` is the civ_clut paint column
+    (0 = base colours).
     """
     import carbank_bake
 
@@ -271,11 +288,36 @@ def build_pages(bank_root, bank, obj_path, groups, mats, car=None, variant=0):
         materials[name] = (setid, tex_id)
         wanted.setdefault(setid, set()).add(tex_id)
 
-    # Wheel sprites are declared on a set no body material names; bake it too,
-    # or there is no processed page for the wheels to sample.
-    for wheel in ((car or {}).get("wheels") or {}).values():
-        if isinstance(wheel, dict) and wheel.get("set") is not None:
-            wanted.setdefault(int(wheel["set"]), set())
+    # Wheel sprites are declared on a set no body material names. Bake that set
+    # too: the same synthesized page the bank bake writes, so the preview shows
+    # the wheel art the game will use. One set, one or three sprite variants.
+    sprites_by_set = {}
+
+    for wheel_variant, wheel in ((car or {}).get("wheels") or {}).items():
+        if not isinstance(wheel, dict) or wheel.get("set") is None:
+            continue
+
+        setid = int(wheel["set"])
+        wanted.setdefault(setid, set())
+        path = wheel.get("png")
+        island = wheel.get("island")
+
+        if path and wheel_root:
+            path = os.path.join(wheel_root, path)
+
+        if not path or not island:
+            pages.warnings.append(
+                "wheels.%s: no png/island, so its wheel page cannot be "
+                "previewed" % wheel_variant)
+            continue
+
+        if not os.path.exists(path):
+            pages.warnings.append("wheels.%s: %s does not exist"
+                                  % (wheel_variant, path))
+            continue
+
+        sprites_by_set.setdefault(setid, []).append(
+            (wheel_variant, path, island))
 
     textures = {}
 
@@ -285,6 +327,9 @@ def build_pages(bank_root, bank, obj_path, groups, mats, car=None, variant=0):
         if declaration is not None:
             processed, _result = _declared_page(model, setid, declaration,
                                                 variant, pages.warnings)
+        elif setid in sprites_by_set:
+            processed = _wheel_page(model, setid, sprites_by_set[setid],
+                                    bank_root, pages.warnings)
         else:
             processed = _legacy_page(bank_root, setid)
 

@@ -58,6 +58,30 @@ import pages1
 # magenta instead of a black texel the art actually owns.
 TRANSPARENT_RGB = (255, 0, 255)
 
+# The opaque stand-in for ART black. RGB555 has no "almost transparent": the
+# engine's marker is exactly 0x0000, so a page that paints #000000 with that word
+# draws a hole (this is what hid BIGRIG's black windows). Black art is stored one
+# step up, at (8, 8, 8) -> 0x0421, which is the darkest opaque entry.
+OPAQUE_BLACK = (8, 8, 8)
+
+
+def opaque_black(colours, keep=()):
+    """Colours with non-transparent black nudged to OPAQUE_BLACK.
+
+    `keep` names the indices that are the page's transparent marker; those must
+    stay 0x0000. Every other 0x0000 entry is ART, and the engine would draw it
+    as a hole. A fixed palette the caller stated is never passed through here -
+    an explicit 0x000000 is the caller's choice, not a quantiser accident.
+    """
+    keep = set(keep)
+    out = list(colours)
+
+    for i, colour in enumerate(out):
+        if i not in keep and tuple(colour) == (0, 0, 0):
+            out[i] = OPAQUE_BLACK
+
+    return out
+
 
 def preview_rgba(rows, idx, transparent=None, regions=None,
                  marker=TRANSPARENT_RGB, clear_rgb=None, cleared=None):
@@ -424,6 +448,12 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
     raw = fourbpp.encode_indices(bytes(indices))
     # decomp_asm fills the buffer from the end, so the stream is the page reversed
     stream = fourbpp.encode_literal(raw[::-1])
+
+    if palette is None:
+        # a genuine 0x000000 ART entry must not share the engine's transparent
+        # word; the keyed entry is the only one allowed to stay 0x0000
+        colours = opaque_black(colours, {background["index"]} if background else ())
+
     row = bytearray(fourbpp.rgb_to_clut(colours[:fourbpp.CLUT_ROW_ENTRIES]))
 
     if background is not None:
@@ -1126,6 +1156,12 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
 
             if _key_matches(colour, key, tolerance, chroma):
                 cleared.setdefault(tex_id, set()).add(at)
+
+    # A black ART entry must not be written as 0x0000: that is the engine's
+    # transparent word, and a page carrying it draws holes. The keyed entry is
+    # the only one that may stay 0x0000.
+    for tex_id, colours in enumerate(ordered):
+        ordered[tex_id] = opaque_black(colours, cleared.get(tex_id, ()))
 
     raw = fourbpp.encode_indices(bytes(indices))
     stream = fourbpp.encode_literal(raw[::-1])

@@ -123,11 +123,28 @@ backdrop is bright magenta (`#ff00ff`) with alpha 0; real PNG alpha keeps the
 page's colour with alpha 0. The baked `.bin` still writes `0x0000` at the keyed
 entry, which is what the engine reads.
 
+## 6. Wheel sets without a page image, and black art
+
+A wheel declaration names `{png, set, island}` but not always a page image. If
+the set has no `textures` entry the bake now **synthesizes** that page: the
+page already on disk for the set is reused (so other content survives), else an
+opaque blank one is used, and every declared sprite is composited into its
+island. The page is added to the manifest and `textureinfo`, so the wheel
+model's set is carried by the bank; a set that body polys also sample is
+refused with a warning rather than blanked. The preview builds the same page
+through the same helper.
+
+`#000000` that is ART is stored as `OPAQUE_BLACK` (8,8,8) -> `0x0421`, never
+`0x0000`: the latter is the engine's transparent word, so black windows and
+grilles baked as holes. Only the page's keyed transparent entry may remain
+`0x0000`; a fixed `palette` the caller states is left verbatim.
+
 ## Verification
 
 ```text
 python3 -m unittest test_page_split test_preview_scale test_carbank_page \
-    test_fourbpp_palette test_bankjson test_sound_knobs test_preview_pages -q
+    test_fourbpp_palette test_bankjson test_sound_knobs test_preview_pages \
+    test_preview_bank test_wheel_page -q
 python3 -m unittest test_vag test_fourbpp -q          # from tools/common
 ```
 

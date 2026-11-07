@@ -1143,6 +1143,188 @@ def bake_declared_page(bank, setid, page=None, sprites=None, uv_islands=None,
                             use_split, key, mask)
 
 
+def _wheel_page_base(bank, setid, bank_dir=None):
+    """The pixels a synthesized wheel page starts from, or None.
+
+    A page already on disk is reused so anything else sharing the set survives;
+    otherwise the page is a blank opaque one. A wheel sprite only samples its
+    island, so the rest of a blank page is never drawn.
+    """
+    candidates = []
+
+    if bank_dir:
+        candidates.append(os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid))
+
+    base = getattr(bank, "base", None)
+
+    if base:
+        candidates.append(os.path.join(base, "build", "pages",
+                                      "PAGE_%d.bin" % setid))
+        candidates.append(os.path.join(base, "pages", "PAGE_%d.bin" % setid))
+
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+
+        with open(path, "rb") as f:
+            blob = f.read()
+
+        try:
+            rows, raw = pages1.read_page(blob, 0, len(blob))
+        except ValueError:
+            continue
+
+        if not rows:
+            continue
+
+        indices = fourbpp.decode_indices(raw)
+        palette = fourbpp.clut_rgb(rows[0])
+        return [palette[v] if v < len(palette) else carbank_page.OPAQUE_BLACK
+                for v in indices]
+
+    return None
+
+
+def _wheel_page_source_hash(setid, sprites):
+    """What a synthesized wheel page was baked from, for the skip check."""
+    return {"mode": "wheel-page", "set": setid,
+            "wheels": [{"variant": variant,
+                        "image": os.path.basename(path),
+                        "sha256": _file_sha256(path),
+                        "island": [int(v) for v in island]}
+                       for variant, path, island in sprites]}
+
+
+def bake_wheel_page(bank, setid, sprites, bank_dir=None, warnings=None):
+    """A declared wheel set with no `textures` entry -> DeclaredPageBake.
+
+    The wheel declaration names a sprite and an island but often no page image.
+    The engine still needs a page at that set - a wheel model names it - so the
+    page is built here: the set's existing page if one is on disk (so other
+    content survives), else an opaque blank, with every sprite carved into its
+    island. Sprites with real alpha are composited onto bright magenta, never
+    black, so the bake clears a backdrop entry that cannot be art.
+    """
+    if warnings is None:
+        warnings = []
+
+    pixels = _wheel_page_base(bank, setid, bank_dir)
+
+    if pixels is None:
+        pixels = [carbank_page.OPAQUE_BLACK] * (fourbpp.PAGE_W * fourbpp.PAGE_H)
+
+    mask = [False] * len(pixels)
+
+    for variant, sprite_path, island in sprites:
+        width, height, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
+        transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+        has_alpha = (sprite_alpha is not None
+                     and any(a < 128 for a in sprite_alpha))
+        backdrop = (carbank_page.TRANSPARENT_RGB if has_alpha
+                    else (sprite[0] if sprite else carbank_page.OPAQUE_BLACK))
+        masked = carbank_page.composite(
+            pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, width, height,
+            island, transparent, backdrop)
+
+        for index in masked:
+            mask[index] = True
+
+        warnings.append("page set %d: synthesised a wheel page, composited the "
+                        "%s wheel from %s into island %s"
+                        % (setid, variant, os.path.basename(sprite_path),
+                           tuple(island)))
+
+    blob, _colours, indices, _error, background = carbank_page.bake_page(
+        pixels, mask=mask)
+    rows, raw = pages1.read_page(blob, 0, len(blob))
+    indices = bytearray(fourbpp.decode_indices(raw)) if raw else bytearray(indices)
+    cleared = {0: {background["index"]}} if background else {}
+
+    return DeclaredPageBake(blob, rows, indices, cleared, None, background,
+                            False, None, mask)
+
+
+def _store_page(by_set, bank_dir, setid, result, source, warnings):
+    """Write one baked page and its preview, then record it in the manifest."""
+    entry = by_set.setdefault(setid, {"set": setid})
+    want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+    os.makedirs(os.path.dirname(want), exist_ok=True)
+
+    with open(want, "wb") as f:
+        f.write(result.blob)
+
+    # The preview, right here, so it can never describe a page it was not baked
+    # from. The transparent indices come from the bake, not the CLUT: black art
+    # is also 0x0000, and guessing it is what hid black paint.
+    try:
+        regions = None
+
+        if result.pieces:
+            regions = [(p["rect"][0], p["rect"][1],
+                        p["rect"][2] - p["rect"][0],
+                        p["rect"][3] - p["rect"][1], p["id"])
+                       for p in result.pieces]
+
+        exportd2.page_png(os.path.join(bank_dir, "pages", "PAGE_%d.png" % setid),
+                          result.rows, result.indices,
+                          transparent=result.transparent(0),
+                          regions=regions, cleared=result.cleared,
+                          marker=carbank_page.TRANSPARENT_RGB)
+    except (ValueError, struct.error) as exc:
+        warnings.append("page set %d: preview not written (%s)" % (setid, exc))
+
+    entry.update({"set": setid, "size": len(result.blob),
+                  "ncluts": len(result.rows),
+                  "bin": "pages/PAGE_%d.bin" % setid,
+                  "source": source})
+    by_set[setid] = entry
+    return entry
+
+
+def _body_uses_set(bank, setid):
+    """True when a body OBJ names this page set, declared or not.
+
+    A wheel set normally has no body polys; if one does, a synthesized blank
+    wheel page would erase them, so the caller refuses instead.
+    """
+    import obj2geom
+
+    cache = getattr(uv_islands_for, "_cache", None)
+
+    if cache is None:
+        cache = {}
+        uv_islands_for._cache = cache
+
+    for car in bank.cars.values():
+        for path in (car.clean, car.damaged, car.low):
+            if not path:
+                continue
+
+            if path not in cache:
+                try:
+                    cache[path] = obj2geom.parse_obj(path, with_materials=True)
+                except OSError:
+                    cache[path] = None
+
+            parsed = cache[path]
+
+            if not parsed:
+                continue
+
+            _verts, _uvs, _faces, names = parsed
+
+            for name in names:
+                try:
+                    page = obj2geom.material_to_page(name, path)
+                except ValueError:
+                    continue
+
+                if page is not None and page[0] == setid:
+                    return True
+
+    return False
+
+
 def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                          force=False):
     """Bake every declared page whose IMAGE, or whose bake options, changed.
@@ -1184,7 +1366,6 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         result = bake_declared_page(bank, setid, page=page,
                                     sprites=islands.get(setid),
                                     uv_islands=uv_islands, warnings=warnings)
-        blob = result.blob
 
         if result.pieces:
             entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"],
@@ -1198,39 +1379,7 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         else:
             entry.pop("clut_rects", None)
 
-        os.makedirs(os.path.dirname(want), exist_ok=True)
-
-        with open(want, "wb") as f:
-            f.write(blob)
-
-        # The preview, right here, so it can never describe a page it was not
-        # baked from. The transparent indices come from the bake, not from the
-        # CLUT: a black art entry is also 0x0000, and guessing it is what hid
-        # black paint. A keyed texel is stood out in magenta as well as alpha 0.
-        try:
-            regions = None
-
-            if result.pieces:
-                regions = [(p["rect"][0], p["rect"][1],
-                            p["rect"][2] - p["rect"][0],
-                            p["rect"][3] - p["rect"][1], p["id"])
-                           for p in result.pieces]
-
-            exportd2.page_png(os.path.join(bank_dir, "pages",
-                                           "PAGE_%d.png" % setid),
-                              result.rows, result.indices,
-                              transparent=result.transparent(0),
-                              regions=regions, cleared=result.cleared,
-                              marker=carbank_page.TRANSPARENT_RGB)
-        except (ValueError, struct.error) as exc:
-            warnings.append("page set %d: preview not written (%s)"
-                            % (setid, exc))
-
-        entry.update({"set": setid, "size": len(blob),
-                      "ncluts": len(result.rows),
-                      "bin": "pages/PAGE_%d.bin" % setid,
-                      "source": source})
-        by_set[setid] = entry
+        _store_page(by_set, bank_dir, setid, result, source, warnings)
 
         background = result.background
 
@@ -1267,6 +1416,35 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                            key[2], stray))
             except (ValueError, struct.error):
                 pass
+
+    # A wheel declaration names a page set but not always a page IMAGE. The
+    # engine's wheel model still names that set, so bake one here: an existing
+    # page (other content survives) or an opaque blank, with the declared
+    # sprites carved into their islands. Without this the bank had no set 20 at
+    # all and the imported wheel drew the host city's texture.
+    for setid, sprites in sorted(islands.items()):
+        if setid in declared:
+            continue
+
+        if _body_uses_set(bank, setid):
+            warnings.append(
+                "page set %d: wheel sprites declare it but no textures entry "
+                "does, and body polys sample it too; declare its page image "
+                "instead of leaving the bake to synthesize a blank one" % setid)
+            continue
+
+        entry = by_set.setdefault(setid, {"set": setid})
+        source = _wheel_page_source_hash(setid, sprites)
+        want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
+
+        if (not force and entry.get("source") == source
+                and os.path.isfile(want)
+                and entry.get("bin") == "pages/PAGE_%d.bin" % setid):
+            continue
+
+        result = bake_wheel_page(bank, setid, sprites, bank_dir=bank_dir,
+                                 warnings=warnings)
+        _store_page(by_set, bank_dir, setid, result, source, warnings)
 
     manifest["pages"] = [by_set[k] for k in sorted(by_set)]
 
@@ -1510,10 +1688,12 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
     """pallet.bin (and palette.json) from the pages' own row 0."""
     import carbank_palette
 
-    # the DECLARED pages, not every entry the manifest has accumulated: a stale
-    # page for a set this bank no longer carries must not add a palette row
+    # the DECLARED pages, plus a synthesized wheel page (a wheel set names a
+    # page but not a textures entry); a stale page for a set this bank no longer
+    # carries must not add a palette row
     sets = {texture.set for car in bank.cars.values()
             for texture in car.textures}
+    sets.update(p.get("set") for p in (manifest.get("pages") or []))
     regions = {p["set"]: p.get("clut_rects") or []
                for p in (manifest.get("pages") or [])}
     rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank),

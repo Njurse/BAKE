@@ -198,9 +198,45 @@ class PreviewPngTests(unittest.TestCase):
 
         img, background = self._preview(pixels, key=MAGENTA)
 
-        self.assertEqual(img.getpixel((x, y)), (0, 0, 0, 255),
-                         "black art must not become transparent")
+        black = img.getpixel((x, y))
+        self.assertLessEqual(max(black[:3]), 8,
+                             "black art must stay visible (near-black is opaque)")
+        self.assertEqual(black[3], 255, "black art must not become transparent")
         self.assertEqual(img.getpixel((0, 0))[3], 0)
+
+    def test_black_art_is_written_as_opaque_near_black(self):
+        # 0x0000 is the engine's transparent word; art black must not use it or
+        # the page draws a hole (BIGRIG's black windows did exactly that).
+        pixels = _page()
+        x, y = 8, 0
+        pixels[_index_of(None, x, y)] = (0, 0, 0)
+
+        blob, _colours, indices, _error, background = carbank_page.bake_page(
+            pixels)
+        rows, _raw = pages1.read_page(blob, 0, len(blob))
+        palette = fourbpp.clut_rgb(rows[0])
+        got = palette[indices[_index_of(None, x, y)]]
+
+        self.assertIsNone(background)
+        self.assertNotIn((0, 0, 0), palette,
+                         "art black must not be stored as 0x0000")
+        self.assertEqual(got, carbank_page.OPAQUE_BLACK)
+
+    def test_a_keyed_black_backdrop_still_uses_the_transparent_word(self):
+        pixels = [(0, 0, 0)] * len(_page())
+
+        for y in range(8, 24):
+            for x in range(8, 24):
+                pixels[_index_of(None, x, y)] = (128, 128, 128)
+
+        blob, _colours, _indices, _error, background = carbank_page.bake_page(
+            pixels, key=(0, 0, 0))
+        rows, _raw = pages1.read_page(blob, 0, len(blob))
+        at = background["index"]
+
+        self.assertEqual(
+            struct.unpack_from("<H", rows[0], at * 2)[0], 0,
+            "the keyed black entry is the one entry that stays 0x0000")
 
     def test_the_baked_clut_keeps_the_engine_marker(self):
         # Magenta is the PREVIEW's stand-in only. The .bin must still carry

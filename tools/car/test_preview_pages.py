@@ -135,8 +135,10 @@ class PreviewPagesTests(unittest.TestCase):
             i = y * stride + x * 4
             return tuple(image.rgba[i:i + 4])
 
-        self.assertEqual(pixel(6, 6), (0, 0, 0, 255),
-                         "black art must stay visible in the preview")
+        self.assertLessEqual(max(pixel(6, 6)[:3]), 8,
+                             "black art must stay visible (near-black is opaque)")
+        self.assertEqual(pixel(6, 6)[3], 255,
+                         "black art must be opaque in the preview")
         self.assertEqual(pixel(1, 1)[3], 0, "the keyed backdrop is see-through")
 
     def test_the_preview_uses_the_baked_sixteen_colours(self):
@@ -194,7 +196,10 @@ class PreviewPagesTests(unittest.TestCase):
         self.assertGreater(body[0], body[2],
                            "the body should take the paint's hue")
         self.assertEqual(body[3], 255)
-        self.assertEqual(pixel(6, 6), (0, 0, 0, 255),
+        black = pixel(6, 6)
+        self.assertLessEqual(max(black[:3]), 8,
+                             "a paint must not make black art transparent")
+        self.assertEqual(black[3], 255,
                          "a paint must not make black art transparent")
         self.assertEqual(pixel(1, 1)[3], 0)
 

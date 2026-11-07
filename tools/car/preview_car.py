@@ -121,7 +121,7 @@ def main():
     # through the same helper the bank bake writes, so the preview shows the
     # 16-colour rows the game will draw, not the authored 8-bit art.
     pages = preview_pages.build_pages(bank_root, bank, objp, groups, mats,
-                                      wcar, a.palette)
+                                      wcar, a.palette, wheel_root=wroot)
 
     for line in pages.report:
         print("  " + line)
