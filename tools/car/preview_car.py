@@ -81,7 +81,7 @@ def main():
         print("preview_car: no declare.cars in bank.json")
         return 0
 
-    wroot, wcar = preview_bank.resolve_wheels(root, bank, car, root)
+    wroot, wcar = preview_bank.resolve_wheels(bank_root, bank, car, root)
     objp = preview_bank.clean_model(root, car)
 
     if not os.path.exists(objp):
