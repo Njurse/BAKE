@@ -17,20 +17,18 @@ except Exception:                       # pragma: no cover
     np = None
 
 
-def gl_texture(path, transparent=None):
-    """A GL texture from a page PNG. `transparent` names RGB triples to clear.
+def gl_texture(path, transparent=()):
+    """A GL texture from an image, optionally clearing named RGB triples.
 
-    Step 15 keeps the old behaviour: a fully black texel becomes alpha 0. The
-    post-processed path replaces that guess with the bake's own transparency,
-    because a genuinely black texel is art.
+    The preview no longer asks this to clear black: a page's transparency is
+    the bake's cleared indices, uploaded as real alpha by gl_texture_rgba. This
+    stays for a raw fallback, where nothing is guessed away.
     """
     surface = pygame.image.load(path).convert_alpha()
     width, height = surface.get_size()
+    transparent = tuple(tuple(c) for c in (transparent or ()))
 
-    if transparent is None:
-        transparent = ((0, 0, 0),)
-
-    if np is not None:
+    if transparent and np is not None:
         rgb = pygame.surfarray.pixels3d(surface)
         alpha = pygame.surfarray.pixels_alpha(surface)
 
@@ -39,7 +37,7 @@ def gl_texture(path, transparent=None):
                   & (rgb[:, :, 2] == colour[2])] = 0
 
         del rgb, alpha
-    else:
+    elif transparent:
         for x in range(width):
             for y in range(height):
                 pixel = surface.get_at((x, y))
@@ -68,22 +66,32 @@ def gl_texture_rgba(width, height, data):
     return texture
 
 
-def build_body(verts, uvs, groups, mats, center, scale):
-    """Compile the car's triangles into one display list."""
-    textures, display = {}, glGenLists(1)
+def build_body(verts, uvs, groups, mats, center, scale, textures=None):
+    """Compile the car's triangles into one display list.
+
+    `textures` maps a material name to an already-uploaded GL texture - the
+    post-processed page path. When it is None the old MTL map_Kd path runs, for
+    a caller that has no processed pages.
+    """
+    uploaded, display = {}, glGenLists(1)
     glNewList(display, GL_COMPILE)
     light = (0.4, 0.8, 0.45)
 
     for name, tris in groups.items():
         material = mats.get(name, {"kd": (0.7, 0.7, 0.7), "tex": None})
-        tex = material["tex"]
+        bound = textures.get(name) if textures is not None else None
 
-        if tex:
-            if tex not in textures:
-                textures[tex] = gl_texture(tex)
+        if bound is None and textures is None and material["tex"]:
+            tex = material["tex"]
 
+            if tex not in uploaded:
+                uploaded[tex] = gl_texture(tex)
+
+            bound = uploaded[tex]
+
+        if bound is not None:
             glEnable(GL_TEXTURE_2D)
-            glBindTexture(GL_TEXTURE_2D, textures[tex])
+            glBindTexture(GL_TEXTURE_2D, bound)
             base = (1.0, 1.0, 1.0)
         else:
             glDisable(GL_TEXTURE_2D)

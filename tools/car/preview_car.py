@@ -4,9 +4,12 @@
     python preview_car.py <bank.json | bank dir> [--car 1_BASE2] [--timeout S]
                           [--stop-file PATH] [--mute]
 
-Reads what declare.cars.<car> names in bank.json (the clean OBJ + its MTL
-textures, the wheel PNGs, and sounds/engine|idle wav) - NOT the baked LEV, so
-it shows the art as authored, not the 16-colour pages.
+Reads what declare.cars.<car> names in bank.json (the clean OBJ, its declared
+pages, the wheel sprites and sounds/engine|idle wav). The pages are baked IN
+MEMORY through the same helper the bank bake writes, so what is on screen is
+what the game draws: 4bpp indices, one 16-colour CLUT row per texture id, the
+declared wheel sprites composited into their islands, and the page's own
+transparency (never "black is clear").
 
 Loop (repeats):  idle ~2s  ->  rev through 4 gears (clean wheel, then fast
 wheel once speed is up)  ->  coast back to idle on the damaged wheel.
@@ -20,6 +23,7 @@ This file is the CLI and the frame loop. The parts live in:
 
     preview_bank.py    the declaration -> paths, car and wheel layout
     preview_mesh.py    OBJ/MTL parsing and material -> (set, texture id)
+    preview_pages.py   declared pages baked to post-processed RGBA images
     preview_gl.py      texture uploads, body display list, tyre and wheels
     preview_audio.py   the idle/rev soundtrack and gear timeline
 """
@@ -42,6 +46,7 @@ import preview_audio
 import preview_bank
 import preview_gl
 import preview_mesh
+import preview_pages
 
 
 def main():
@@ -51,6 +56,9 @@ def main():
     ap.add_argument("--timeout", type=float, default=0)
     ap.add_argument("--stop-file")
     ap.add_argument("--mute", action="store_true")
+    ap.add_argument("--palette", type=int, default=0, metavar="N",
+                    help="civ_clut paint column to show: 0 = the page's own "
+                         "colours, 1.. = the declared paints (default 0)")
     ap.add_argument("--bake-scale", type=float,
                     help="rebake --scale (OBJ->engine units); default: 1 if the "
                          "OBJ is already engine-sized, else 265")
@@ -108,7 +116,27 @@ def main():
     center = [(lo[k] + hi[k]) / 2 for k in range(3)]
     ext = [hi[k] - lo[k] for k in range(3)]
     scale = 2.0 / (max(ext) or 1)
-    body = preview_gl.build_body(verts, uvs, groups, mats, center, scale)
+
+    # Post-process BEFORE uploading: the declared pages are baked in memory
+    # through the same helper the bank bake writes, so the preview shows the
+    # 16-colour rows the game will draw, not the authored 8-bit art.
+    pages = preview_pages.build_pages(bank_root, bank, objp, groups, mats,
+                                      wcar, a.palette)
+
+    for line in pages.report:
+        print("  " + line)
+
+    for warning in pages.warnings:
+        print("  warning: " + warning)
+
+    textures = {}
+
+    for name, image in pages.images.items():
+        textures[name] = preview_gl.gl_texture_rgba(image.width, image.height,
+                                                    image.rgba)
+
+    body = preview_gl.build_body(verts, uvs, groups, mats, center, scale,
+                                 textures=textures)
     # the up axis is the smallest extent; long axis is the largest
     up = ext.index(min(ext))
     long_axis = ext.index(max(ext))
@@ -116,11 +144,18 @@ def main():
     wheels = {}
 
     for variant, wheel in (wcar.get("wheels") or {}).items():
+        image = (pages.wheel_image(wheel.get("set"), wheel.get("island"))
+                 if isinstance(wheel, dict) else None)
         path = (os.path.join(wroot, wheel.get("png", ""))
                 if isinstance(wheel, dict) else "")
 
-        if path and os.path.exists(path):
-            wheels[variant] = preview_gl.gl_texture(path)
+        if image is None and path and os.path.exists(path):
+            # no processed page for this set: still quantise, never raw art
+            image = preview_pages.quantise_texture(path)
+
+        if image is not None:
+            wheels[variant] = preview_gl.gl_texture_rgba(
+                image.width, image.height, image.rgba)
 
     audio = preview_audio.CarAudio(root, car, a.mute)
 
@@ -166,8 +201,8 @@ def main():
 
         texture = wheels.get(wheel_key) or wheels.get("clean")
         spin -= speed * 60.0
-        title = ("BAKE preview  %s  |  %s  |  wheel: %s  |  Esc closes"
-                 % (key, phase, wheel_key))
+        title = ("BAKE preview  %s  |  %s  |  wheel: %s  |  %d page(s)  |  "
+                 "Esc closes" % (key, phase, wheel_key, len(pages.sets)))
 
         if title != last_title:
             pygame.display.set_caption(title)

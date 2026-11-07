@@ -335,7 +335,66 @@ def _rect_mask(rects, length):
     return mask
 
 
+def paint_rows_for(spec, rows, indices, pieces, variant):
+    """The page's CLUT rows as civ_clut column `variant` shows them.
+
+    `variant` 0 is the page's own colours; variant k (1..) applies
+    `spec["paints"][k-1]`. Returns (rows, paint name, touched tex ids), where
+    `touched` names the texture ids that actually changed - an image paint with
+    an `id`, or a row the paint's panel does not cover, keeps its own colours
+    and must not be emitted as a variant record.
+
+    This is the one implementation behind both LUMP_PALLET rows and the vehicle
+    preview's --palette column, so the preview cannot show a colour the bake
+    would not write.
+    """
+    paints = (spec or {}).get("paints") or []
+
+    if variant is None or variant <= 0 or not paints:
+        return list(rows), None, set()
+
+    variant = min(int(variant), len(paints))
+    name, paint = paints[variant - 1]
+    want_id = paint.get("id") if isinstance(paint, dict) else None
+    protect = (spec or {}).get("protect") or ()
+    out = list(rows)
+    touched = set()
+
+    for texnum, row in enumerate(rows):
+        if want_id is not None and texnum != want_id:
+            continue
+
+        if isinstance(paint, dict) and paint.get("image"):
+            if indices is None:
+                raise ValueError("an image paint needs the page's index image")
+
+            width, height, src, _alpha = carbank_page.load_pixels(paint["image"])
+            laid = _fit_paint_image(src, width, height, paint.get("panel"))
+            rects = [p["rect"] for p in pieces or [] if p.get("id") == texnum]
+
+            if paint.get("panel") and not rects:
+                rects = [paint["panel"]]
+
+            # A split page's index N means a different colour on each row.
+            # Voting every texel into a row that does not own those texels
+            # mixes the panels. A gap row (no island) keeps its own colours.
+            if not rects and len(rows) > 1 and want_id is None:
+                continue
+
+            mask = _rect_mask(rects, len(indices)) if rects else None
+            out[texnum] = paint_from_image(row, indices, laid, mask, protect)
+        else:
+            colour = paint["rgb"] if isinstance(paint, dict) else paint
+            out[texnum], _count = paint_row(row, colour,
+                                            (spec or {}).get("body"), protect)
+
+        touched.add(texnum)
+
+    return out, name, touched
+
+
 def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
+
     """Palette rows built from the PAGES themselves.
 
     A page that carries one CLUT row emits texnum 0, as before. A page that was
@@ -382,46 +441,21 @@ def rows_from_pages(bank_dir, sets=None, paints=None, regions=None):
 
         # Paint variants: lump palette p fills civ_clut column p+1, column 0 is
         # the page's own CLUT (the original colours), so variant k -> palette k.
-        for k, (name, paint) in enumerate(spec["paints"]):
-            if isinstance(paint, (tuple, list)) and len(paint) == 3 and not isinstance(paint[0], dict):
-                paint = {"rgb": tuple(paint)}
+        needs_indices = any(isinstance(one, dict) and one.get("image")
+                            for _name, one in spec["paints"])
 
-            want_id = paint.get("id") if isinstance(paint, dict) else None
+        if needs_indices:
+            import fourbpp
+            indices = fourbpp.decode_indices(raw)
 
-            for texnum, row in enumerate(rows):
-                if want_id is not None and texnum != want_id:
-                    continue
+        for k, (name, _one) in enumerate(spec["paints"]):
+            painted_rows, _paint_name, touched = paint_rows_for(
+                spec, rows, indices, pieces, k + 1)
 
-                if isinstance(paint, dict) and paint.get("image"):
-                    if indices is None:
-                        import fourbpp
-                        indices = fourbpp.decode_indices(raw)
-
-                    import carbank_page
-                    width, height, src, _alpha = carbank_page.load_pixels(paint["image"])
-                    laid = _fit_paint_image(src, width, height, paint.get("panel"))
-                    rects = [p["rect"] for p in pieces if p.get("id") == texnum]
-
-                    if paint.get("panel") and not rects:
-                        rects = [paint["panel"]]
-
-                    # A split page's index N means a different colour on each
-                    # row. Voting every texel into a row that does not own
-                    # those texels mixes the panels. A gap row (no island)
-                    # keeps the page's own colours.
-                    if not rects and len(rows) > 1 and want_id is None:
-                        continue
-
-                    mask = _rect_mask(rects, len(indices)) if rects else None
-                    painted = paint_from_image(row, indices, laid, mask,
-                                               spec.get("protect") or ())
-                else:
-                    colour = paint["rgb"] if isinstance(paint, dict) else paint
-                    painted, _n = paint_row(row, colour, spec.get("body"),
-                                            spec.get("protect") or ())
-
-                out.append({"palette": k, "texnum": texnum, "tpageindex": page_set,
-                            "clut_number": -1, "clut": painted, "paint": name})
+            for texnum in sorted(touched):
+                out.append({"palette": k, "texnum": texnum,
+                            "tpageindex": page_set, "clut_number": -1,
+                            "clut": painted_rows[texnum], "paint": name})
 
     return out
 
