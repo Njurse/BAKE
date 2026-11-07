@@ -95,11 +95,39 @@ the nibble order was what made a clean encode play back destroyed.
 texels that already use that index. Indices are not rewritten. `id` restricts
 the paint to one texture row (Firebird lamps). See `bank-schema.md`.
 
+## 5. The vehicle preview shows the baked page
+
+`preview_car.py` used to upload the MTL's authored page image and clear every
+black texel to alpha 0. That showed colours the game cannot draw (an 8-bit
+atlas, not a 4bpp page) and made genuinely black paint invisible. The preview
+now runs the page bake in memory before it uploads anything:
+
+- per (set, texture id) it draws the page's index image painted by THAT id's
+  CLUT row - the row `texture_cluts[set][id]` selects - so a split page and its
+  colour crush are visible in the preview;
+- pages come from `carbank_bake.bake_declared_page`, the same helper
+  `_sync_declared_pages` writes, including the wheel-sprite composite;
+- alpha 0 is only for the bake's cleared CLUT entries (or the source PNG's
+  real alpha). A black texel the bake did not clear is opaque black;
+- `--palette N` shows a `civ_clut` paint column (0 = the page's own colours)
+  through `carbank_palette.paint_rows_for`, shared with LUMP_PALLET;
+- a legacy bank with no declaration falls back to `pages/PAGE_N.bin`, then to a
+  16-colour quantise of the material image - never the raw authored art.
+
+The startup report names each processed page, its row count and its keyed-texel
+count, so "the preview looks different" can be traced to a page bake rather
+than guessed at.
+
+`PAGE_<set>.png` and the preview use the same convention: a COLOUR-KEYED
+backdrop is bright magenta (`#ff00ff`) with alpha 0; real PNG alpha keeps the
+page's colour with alpha 0. The baked `.bin` still writes `0x0000` at the keyed
+entry, which is what the engine reads.
+
 ## Verification
 
 ```text
 python3 -m unittest test_page_split test_preview_scale test_carbank_page \
-    test_fourbpp_palette test_bankjson test_sound_knobs -q
+    test_fourbpp_palette test_bankjson test_sound_knobs test_preview_pages -q
 python3 -m unittest test_vag test_fourbpp -q          # from tools/common
 ```
 

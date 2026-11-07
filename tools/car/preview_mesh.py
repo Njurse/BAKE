@@ -20,20 +20,21 @@ def load_mtl(path):
 
     base = os.path.dirname(path)
 
-    for line in open(path, encoding="utf-8", errors="replace"):
-        parts = line.strip().split(None, 1)
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.strip().split(None, 1)
 
-        if not parts:
-            continue
+            if not parts:
+                continue
 
-        if parts[0] == "newmtl":
-            current = mats.setdefault(parts[1].strip(),
-                                      {"kd": (0.7, 0.7, 0.7), "tex": None})
-        elif current is not None and parts[0] == "Kd":
-            current["kd"] = tuple(float(x) for x in parts[1].split()[:3])
-        elif current is not None and parts[0] == "map_Kd":
-            tex = os.path.join(base, parts[1].strip())
-            current["tex"] = tex if os.path.exists(tex) else None
+            if parts[0] == "newmtl":
+                current = mats.setdefault(parts[1].strip(),
+                                          {"kd": (0.7, 0.7, 0.7), "tex": None})
+            elif current is not None and parts[0] == "Kd":
+                current["kd"] = tuple(float(x) for x in parts[1].split()[:3])
+            elif current is not None and parts[0] == "map_Kd":
+                tex = os.path.join(base, parts[1].strip())
+                current["tex"] = tex if os.path.exists(tex) else None
 
     return mats
 
@@ -48,38 +49,41 @@ def load_obj(path):
     mats, current = {}, None
     base = os.path.dirname(path)
 
-    for line in open(path, encoding="utf-8", errors="replace"):
-        parts = line.split()
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.split()
 
-        if not parts:
-            continue
+            if not parts:
+                continue
 
-        if parts[0] == "v":
-            verts.append(tuple(float(x) for x in parts[1:4]))
-        elif parts[0] == "vt":
-            uvs.append((float(parts[1]), float(parts[2]) if len(parts) > 2 else 0.0))
-        elif parts[0] == "mtllib":
-            mats.update(load_mtl(os.path.join(base, line.split(None, 1)[1].strip())))
-        elif parts[0] == "usemtl":
-            current = line.split(None, 1)[1].strip()
-        elif parts[0] == "f":
-            corners = []
+            if parts[0] == "v":
+                verts.append(tuple(float(x) for x in parts[1:4]))
+            elif parts[0] == "vt":
+                uvs.append((float(parts[1]),
+                            float(parts[2]) if len(parts) > 2 else 0.0))
+            elif parts[0] == "mtllib":
+                mats.update(load_mtl(os.path.join(
+                    base, line.split(None, 1)[1].strip())))
+            elif parts[0] == "usemtl":
+                current = line.split(None, 1)[1].strip()
+            elif parts[0] == "f":
+                corners = []
 
-            for token in parts[1:]:
-                fields = token.split("/")
-                vi = int(fields[0])
-                vi = vi - 1 if vi > 0 else len(verts) + vi
-                ti = None
+                for token in parts[1:]:
+                    fields = token.split("/")
+                    vi = int(fields[0])
+                    vi = vi - 1 if vi > 0 else len(verts) + vi
+                    ti = None
 
-                if len(fields) > 1 and fields[1]:
-                    ti = int(fields[1])
-                    ti = ti - 1 if ti > 0 else len(uvs) + ti
+                    if len(fields) > 1 and fields[1]:
+                        ti = int(fields[1])
+                        ti = ti - 1 if ti > 0 else len(uvs) + ti
 
-                corners.append((vi, ti))
+                    corners.append((vi, ti))
 
-            for i in range(1, len(corners) - 1):
-                groups.setdefault(current, []).append(
-                    (corners[0], corners[i], corners[i + 1]))
+                for i in range(1, len(corners) - 1):
+                    groups.setdefault(current, []).append(
+                        (corners[0], corners[i], corners[i + 1]))
 
     return verts, uvs, groups, mats
 

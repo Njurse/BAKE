@@ -24,6 +24,14 @@ forced onto one palette index and that entry is written 0x0000 in every row.
 KEY is a hex colour (ff00ff), "auto" (the image's own top-left pixel) or
 "alpha" (the PNG's alpha channel, for art exported with one).
 
+The preview PNG beside the page shows the SAME bytes as a human-readable image.
+A colour-keyed backdrop is painted bright magenta (#ff00ff) with alpha 0, so a
+viewer that drops the alpha channel still reads "not drawn" - and re-baking the
+preview with --transparent auto keys the magenta, never a black texel the art
+owns. A page keyed by its PNG's own alpha keeps that colour and only the alpha
+marks it. The baked .bin is untouched by this: it still writes 0x0000, which is
+the marker the engine reads.
+
 --protect keeps colours the 16 must hold (a headlight grey the quantiser would
 otherwise fold into the body); --palette states all 16 outright and quantises
 nothing; --report N prints the N worst-crushed source colours, which is the
