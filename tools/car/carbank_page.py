@@ -44,6 +44,73 @@ import fourbpp
 import pages1
 
 
+# The page preview's stand-in for a COLOUR-KEYED backdrop. Bright magenta is not
+# a colour car art uses, so a preview whose alpha channel is dropped still reads
+# as "not drawn" - and re-baking that preview with --transparent auto keys the
+# magenta instead of a black texel the art actually owns.
+TRANSPARENT_RGB = (255, 0, 255)
+
+
+def preview_rgba(rows, idx, transparent=None, regions=None,
+                 marker=TRANSPARENT_RGB, clear_rgb=None):
+    """RGBA bytes for a page: the transparent texels, and how to spot them.
+
+    This is the ONE renderer behind PAGE_<set>.png (write_page and
+    exportd2.page_png), because two previews that disagree about which texels
+    are transparent are worse than none.
+
+    `transparent` names the indices the bake keyed out. A colour-keyed texel is
+    painted `marker` - bright magenta by default - with alpha 0: the alpha is
+    the truth, and the marker is what a viewer that ignored alpha still shows as
+    "not drawn". A page whose transparency came from the PNG's own alpha passes
+    marker=None, so those texels keep their colour and only the alpha says so.
+
+    A texel the bake did NOT key stays opaque even when its colour is black -
+    black is art, not a hole. That is the bug this signature exists to prevent:
+    guessing "CLUT word is 0x0000" turned every black paint entry into a hole.
+
+    `regions` = [(x, y, w, h, row_index)] repaints each sprite with its own CLUT
+    row; a Driver 2 page carries one row per texture id.
+    """
+    transparent = set(transparent or ())
+    width, height = fourbpp.PAGE_W, fourbpp.PAGE_H
+    base = (fourbpp.clut_rgb(rows[0]) if rows
+            else [(0, 0, 0)] * fourbpp.CLUT_ROW_ENTRIES)
+    pal = base
+    pix = bytearray(width * height * 4)
+
+    def put(i, v, palette):
+        rgb = palette[v] if v < len(palette) else (0, 0, 0)
+        clear = v in transparent
+
+        if clear:
+            # a colour key leaves the magenta stand-in; real alpha keeps the
+            # colour the art had (the baked CLUT stores 0x0000 there, so the
+            # caller supplies it rather than reading black back out)
+            if marker is not None:
+                rgb = marker
+            elif clear_rgb is not None:
+                rgb = clear_rgb
+
+        pix[i * 4:i * 4 + 4] = bytes((rgb[0], rgb[1], rgb[2],
+                                      0 if clear else 255))
+
+    for i, v in enumerate(idx):
+        put(i, v, base)
+
+    for x0, y0, w, h, ri in regions or ():
+        if not (0 <= ri < len(rows)):
+            continue
+
+        row_pal = fourbpp.clut_rgb(rows[ri])
+
+        for y in range(max(0, y0), min(height, y0 + h)):
+            for x in range(max(0, x0), min(width, x0 + w)):
+                put(y * width + x, idx[y * width + x], row_pal)
+
+    return bytes(pix)
+
+
 def _load_rgb(path):
     """(RGB texels, alpha or None) for a 256x256 page image."""
     from PIL import Image
@@ -335,6 +402,12 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
                       "keyed": sum(1 for m in mask if m),
                       "stray": sum(1 for i, v in enumerate(indices)
                                    if v == at and not mask[i]),
+                      # the colour key this backdrop was matched by, or None
+                      # when the transparency came from a per-texel mask (a PNG
+                      # alpha channel). The page preview needs the difference:
+                      # a keyed backdrop gets a magenta stand-in, real alpha
+                      # keeps the art's own colour.
+                      "key": key,
                       "colour": cleared}
 
     raw = fourbpp.encode_indices(bytes(indices))
@@ -371,7 +444,16 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
     return blob, colours, indices, errors, background
 
 
-def write_page(bank_dir, setid, blob, indices, colours, preview=True):
+def write_page(bank_dir, setid, blob, indices, colours=None, preview=True,
+               background=None):
+    """Write pages/PAGE_<set>.bin, and beside it a preview of the SAME bytes.
+
+    `background` is what bake_page() reported: its index is the transparent
+    texel set, and its `key` says whether the art was colour-keyed (preview it
+    as bright magenta) or came with real alpha (keep the colour, alpha 0). The
+    preview never guesses from the CLUT: a 0x0000 entry can just be black paint,
+    and turning that into a hole is the bug this parameter removes.
+    """
     pages_dir = os.path.join(bank_dir, "pages")
     os.makedirs(pages_dir, exist_ok=True)
 
@@ -381,32 +463,21 @@ def write_page(bank_dir, setid, blob, indices, colours, preview=True):
         f.write(blob)
 
     if preview:
-        import math
-
         from PIL import Image
 
         png = os.path.join(pages_dir, "PAGE_%d.png" % setid)
-        pal = fourbpp.clut_rgb(fourbpp.rgb_to_clut(colours[:16]))
         rows, _raw = pages1.read_page(blob, 0, len(blob))
-        transparent = set()
-
-        # The transparent index is whichever entry the page writes as 0x0000.
-        # Its preview pixel must be FULLY TRANSPARENT rather than the colour
-        # 0x0000 happens to paint - painting it black is what made a preview
-        # look like art, and re-baking one re-introduced the backdrop colour.
-        for index in range(16):
-            word = struct.unpack_from("<H", rows[0], index * 2)[0] if rows else 1
-
-            if word == 0:
-                transparent.add(index)
-
-        pix = bytearray()
-
-        for i in indices:
-            r, g, b = pal[i]
-            pix.extend((r, g, b, 0 if i in transparent else 255))
-
-        img = Image.frombytes("RGBA", (fourbpp.PAGE_W, fourbpp.PAGE_H), bytes(pix))
+        transparent = {background["index"]} if background else set()
+        # A colour key leaves a magenta stand-in; real alpha only needs alpha,
+        # and keeps the colour the art had before the CLUT entry was cleared.
+        marker = (TRANSPARENT_RGB
+                  if background is not None and background.get("key") is not None
+                  else None)
+        clear_rgb = (background.get("colour")
+                     if background is not None and marker is None else None)
+        pix = preview_rgba(rows, indices, transparent, marker=marker,
+                           clear_rgb=clear_rgb)
+        img = Image.frombytes("RGBA", (fourbpp.PAGE_W, fourbpp.PAGE_H), pix)
         img.save(png)
 
     return path
@@ -1227,7 +1298,8 @@ def main(argv=None):
         chroma=args.transparent_chroma)
 
     path = write_page(os.path.abspath(args.bank), args.set, blob, indices,
-                      colours, preview=not args.no_preview)
+                      colours, preview=not args.no_preview,
+                      background=background)
     old = os.path.getsize(path) - len(blob)
 
     print("wrote %s (%d bytes: 1 CLUT row + stream)" % (path, len(blob)))

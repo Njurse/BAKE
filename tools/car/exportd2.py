@@ -588,42 +588,26 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
-def page_png(path, rows, idx, transparent=None, regions=None):
+def page_png(path, rows, idx, transparent=None, regions=None, marker=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
     It is passed in rather than guessed: a 0x0000 entry on a BODY page can just
     be black paint, and treating it as transparency makes a preview claim the
     body has holes. When nothing was keyed, nothing is transparent.
+
+    The rendering itself is `carbank_page.preview_rgba`, shared with
+    carbank_page.write_page so the two previews cannot disagree. `marker` is
+    what a keyed texel is painted before its alpha: bright magenta by default
+    for a colour key, None to keep the page's own colour for real PNG alpha.
     """
-    pal = pages1.clut_rgb(rows[0]) if rows else [(0, 0, 0)] * 16
-    transparent = set(transparent or ())
+    import carbank_page
 
-    pix = bytearray(256 * 256 * 4)
+    if marker is None and transparent is not None:
+        # a page written from the bake's colour key: stand the keyed texels out
+        # in magenta so a viewer that drops alpha cannot read them as paint
+        marker = carbank_page.TRANSPARENT_RGB
 
-    for i, v in enumerate(idx):
-        if v < len(pal):
-            r, g, b = pal[v]
-        else:
-            r = g = b = 0
-
-        pix[i * 4:i * 4 + 4] = bytes((r, g, b, 0 if v in transparent else 255))
-
-    # A Driver 2 page carries one CLUT row PER TEXTURE (detail i draws with row
-    # i); painting the whole page with row 0 is what garbled every sprite but
-    # the first. `regions` = [(x, y, w, h, row_index)] repaints each sprite
-    # with its own row.
-    for x0, y0, w, h, ri in regions or ():
-        if not (0 <= ri < len(rows)):
-            continue
-        rp = pages1.clut_rgb(rows[ri])
-        for y in range(max(0, y0), min(256, y0 + h)):
-            for x in range(max(0, x0), min(256, x0 + w)):
-                i = y * 256 + x
-                v = idx[i]
-                r, g, b = rp[v] if v < len(rp) else (0, 0, 0)
-                pix[i * 4:i * 4 + 4] = bytes(
-                    (r, g, b, 0 if v in transparent else 255))
-
+    pix = carbank_page.preview_rgba(rows, idx, transparent, regions, marker)
     write_png_rgba(path, 256, 256, pix)
 
 

@@ -158,7 +158,75 @@ class KeyTests(unittest.TestCase):
         self.assertTrue(backdrop, "the page should have a backdrop to share")
 
 
-class KeyMaskTests(unittest.TestCase):
+class PreviewPngTests(unittest.TestCase):
+    """PAGE_<set>.png must show what is NOT drawn without hiding what is.
+
+    The old writer treated every CLUT entry of 0x0000 as transparent. Black
+    art bakes to 0x0000 too, so ordinary black paint became alpha 0 - the
+    invisible-black bug. The preview now takes the transparent index from the
+    bake and stands a colour key out in bright magenta.
+    """
+
+    def _preview(self, pixels, **bake):
+        import tempfile
+
+        from PIL import Image
+
+        blob, colours, indices, _error, background = carbank_page.bake_page(
+            pixels, **bake)
+        folder = tempfile.mkdtemp()
+        carbank_page.write_page(folder, 7, blob, indices, colours,
+                                background=background)
+        with Image.open(os.path.join(folder, "pages", "PAGE_7.png")) as img:
+            return img.convert("RGBA"), background
+
+    def test_a_colour_keyed_texel_is_magenta_and_clear(self):
+        img, background = self._preview(_page(), key=MAGENTA)
+        r, g, b, a = img.getpixel((0, 0))
+
+        self.assertEqual((r, g, b), carbank_page.TRANSPARENT_RGB)
+        self.assertEqual(a, 0)
+        self.assertEqual(background["key"], MAGENTA)
+
+    def test_black_art_outside_the_key_stays_visible(self):
+        # The page has BOTH a magenta backdrop (index 0) and true black art
+        # (index 1). Both CLUT words are 0x0000, so only the bake's own index
+        # can tell them apart - and only index 0 may be transparent.
+        pixels = _page()
+        x, y = 6, 6
+        pixels[_index_of(None, x, y)] = (0, 0, 0)
+
+        img, background = self._preview(pixels, key=MAGENTA)
+
+        self.assertEqual(img.getpixel((x, y)), (0, 0, 0, 255),
+                         "black art must not become transparent")
+        self.assertEqual(img.getpixel((0, 0))[3], 0)
+
+    def test_the_baked_clut_keeps_the_engine_marker(self):
+        # Magenta is the PREVIEW's stand-in only. The .bin must still carry
+        # 0x0000 at the keyed entry: the engine's wheel-palette derivation
+        # accepts a row by that value, so changing it would change the game.
+        blob, _colours, _indices, _error, background = carbank_page.bake_page(
+            _page(), key=MAGENTA)
+        at = background["index"]
+
+        self.assertEqual(struct.unpack_from("<H", blob, 4 + at * 2)[0], 0)
+
+    def test_real_alpha_keeps_the_page_colour(self):
+        pixels = _page()
+        mask = [False] * len(pixels)
+        x, y = 8, 0                       # a grey texel, not the magenta art
+        mask[_index_of(None, x, y)] = True
+
+        img, background = self._preview(pixels, mask=mask)
+        r, g, b, a = img.getpixel((x, y))
+        want = background["colour"]
+
+        self.assertEqual((r, g, b), want,
+                         "alpha transparency keeps the art's own colour")
+        self.assertEqual(a, 0)
+        self.assertIsNone(background["key"])
+
     def test_the_mask_is_per_channel_and_inclusive(self):
         pixels = [MAGENTA, (255, 8, 255), (250, 0, 250), DARK]
 
