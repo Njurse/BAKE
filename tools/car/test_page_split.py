@@ -88,7 +88,8 @@ class SplitTests(unittest.TestCase):
 
         self.assertIn(13, rows)
         self.assertTrue(any(p["id"] == 13 and p["src"] == 13 for p in pieces))
-        blob, _ordered = carbank_page.pack_indexed(_indices, rows, pieces=pieces)
+        blob, _ordered, _cleared = carbank_page.pack_indexed(
+            _indices, rows, pieces=pieces)
         page_rows, raw = pages1.read_page(blob, 0, len(blob))
         self.assertGreaterEqual(len(page_rows), 14)
         self.assertEqual(fourbpp.decode_indices(raw), bytes(_indices))

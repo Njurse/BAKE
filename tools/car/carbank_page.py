@@ -52,7 +52,7 @@ TRANSPARENT_RGB = (255, 0, 255)
 
 
 def preview_rgba(rows, idx, transparent=None, regions=None,
-                 marker=TRANSPARENT_RGB, clear_rgb=None):
+                 marker=TRANSPARENT_RGB, clear_rgb=None, cleared=None):
     """RGBA bytes for a page: the transparent texels, and how to spot them.
 
     This is the ONE renderer behind PAGE_<set>.png (write_page and
@@ -70,18 +70,19 @@ def preview_rgba(rows, idx, transparent=None, regions=None,
     guessing "CLUT word is 0x0000" turned every black paint entry into a hole.
 
     `regions` = [(x, y, w, h, row_index)] repaints each sprite with its own CLUT
-    row; a Driver 2 page carries one row per texture id.
+    row; a Driver 2 page carries one row per texture id. `cleared` is the
+    per-row {row_index: {index}} set a split page reports, so a region is judged
+    by ITS row's cleared entries - one row's hole is another row's paint.
     """
     transparent = set(transparent or ())
     width, height = fourbpp.PAGE_W, fourbpp.PAGE_H
     base = (fourbpp.clut_rgb(rows[0]) if rows
             else [(0, 0, 0)] * fourbpp.CLUT_ROW_ENTRIES)
-    pal = base
     pix = bytearray(width * height * 4)
 
-    def put(i, v, palette):
+    def put(i, v, palette, clear_set):
         rgb = palette[v] if v < len(palette) else (0, 0, 0)
-        clear = v in transparent
+        clear = v in clear_set
 
         if clear:
             # a colour key leaves the magenta stand-in; real alpha keeps the
@@ -96,17 +97,19 @@ def preview_rgba(rows, idx, transparent=None, regions=None,
                                       0 if clear else 255))
 
     for i, v in enumerate(idx):
-        put(i, v, base)
+        put(i, v, base, transparent)
 
     for x0, y0, w, h, ri in regions or ():
         if not (0 <= ri < len(rows)):
             continue
 
         row_pal = fourbpp.clut_rgb(rows[ri])
+        clear_set = (set(cleared.get(ri, ())) if cleared and ri in cleared
+                     else transparent)
 
         for y in range(max(0, y0), min(height, y0 + h)):
             for x in range(max(0, x0), min(width, x0 + w)):
-                put(y * width + x, idx[y * width + x], row_pal)
+                put(y * width + x, idx[y * width + x], row_pal, clear_set)
 
     return bytes(pix)
 
@@ -1066,6 +1069,10 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
     A keyed backdrop is cleared (0x0000) only on the index its texels actually
     took, and only when that entry still is the key colour — a near-black shade
     is not turned into the transparent marker.
+
+    Returns (blob, ordered rows, cleared). `cleared` is {texture id: {index}},
+    the entries actually written 0x0000 in each row. A preview needs it: the
+    rows cannot be asked afterwards, because genuine black art shares that word.
     """
     if not rows_by_id:
         rows_by_id = {0: [(8, 8, 8)] * fourbpp.CLUT_ROW_ENTRIES}
@@ -1125,7 +1132,7 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
         body += row
 
     blob = struct.pack("<i", len(ordered)) + bytes(body) + stream
-    return blob, ordered
+    return blob, ordered, cleared
 
 
 def hex_colour(text):

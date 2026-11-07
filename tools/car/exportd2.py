@@ -588,7 +588,8 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
-def page_png(path, rows, idx, transparent=None, regions=None, marker=None):
+def page_png(path, rows, idx, transparent=None, regions=None, marker=None,
+             cleared=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
     It is passed in rather than guessed: a 0x0000 entry on a BODY page can just
@@ -607,7 +608,8 @@ def page_png(path, rows, idx, transparent=None, regions=None, marker=None):
         # in magenta so a viewer that drops alpha cannot read them as paint
         marker = carbank_page.TRANSPARENT_RGB
 
-    pix = carbank_page.preview_rgba(rows, idx, transparent, regions, marker)
+    pix = carbank_page.preview_rgba(rows, idx, transparent, regions, marker,
+                                    cleared=cleared)
     write_png_rgba(path, 256, 256, pix)
 
 

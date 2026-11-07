@@ -860,7 +860,7 @@ def _file_sha256(path):
         return None
 
 
-def _uv_islands(bank, setid):
+def uv_islands_for(bank, setid):
     """{texture id: [uv list, ...]} for every poly on this set, page texels.
 
     OBJ uvs are 0..1, v up. The engine's are 0..255, v down — the same conversion
@@ -869,11 +869,11 @@ def _uv_islands(bank, setid):
     import obj2geom
 
     islands = {}
-    cache = getattr(_uv_islands, "_cache", None)
+    cache = getattr(uv_islands_for, "_cache", None)
 
     if cache is None:
         cache = {}
-        _uv_islands._cache = cache
+        uv_islands_for._cache = cache
 
     for car in bank.cars.values():
         uses = any(t.set == setid for t in car.textures)
@@ -1001,6 +1001,148 @@ def wheel_islands(bank):
     return islands
 
 
+def declared_pages(bank):
+    """({set: Texture}, [(set, first owner, conflicting owner)]).
+
+    The first car in declaration order owns a page; a second car declaring the
+    same set differently is a conflict the caller reports rather than a silent
+    winner. Shared by the bake and every reader that has to know what a page
+    was meant to be.
+    """
+    declared = {}
+    owner = {}
+    conflicts = []
+
+    for carname in bank.cars:
+        for page in bank.cars[carname].textures:
+            first = declared.get(page.set)
+
+            if first is not None:
+                if first.bake_options() != page.bake_options():
+                    conflicts.append((page.set, owner[page.set], carname))
+                continue
+
+            declared[page.set] = page
+            owner[page.set] = carname
+
+    return declared, conflicts
+
+
+class DeclaredPageBake(object):
+    """One declared page, baked - the result the bank bake and the preview share.
+
+    blob / rows / indices are the page exactly as the engine reads it. `cleared`
+    maps a texture id to the CLUT indices written 0x0000 in that row; a preview
+    must use it to mark transparency, because the rows themselves cannot tell a
+    keyed backdrop from genuine black art. `pieces` is the island/rect plan
+    (None when the page fit one row), `background` is bake_page's report (None
+    for a split page), and `mask` is the final see-through texel mask.
+    """
+
+    def __init__(self, blob, rows, indices, cleared, pieces, background,
+                 split, key, mask):
+        self.blob = blob
+        self.rows = rows
+        self.indices = indices
+        self.cleared = cleared
+        self.pieces = pieces
+        self.background = background
+        self.split = split
+        self.key = key
+        self.mask = mask
+
+    def transparent(self, tex_id=0):
+        """The indices cleared in `tex_id`'s row (row 0 for a one-row page)."""
+        if tex_id in self.cleared:
+            return set(self.cleared[tex_id])
+
+        return set(self.cleared.get(0, ()))
+
+    def texture_ids(self):
+        """Every texture id the page carries a row for, ascending."""
+        if self.pieces:
+            return sorted({piece["id"] for piece in self.pieces})
+
+        return sorted(self.cleared) or [0]
+
+
+def bake_declared_page(bank, setid, page=None, sprites=None, uv_islands=None,
+                       warnings=None):
+    """A declared page -> DeclaredPageBake: THE page bake, for bake and preview.
+
+    Loads the declared image, turns its --transparent key / PNG alpha into a
+    mask, carves any declared wheel sprites into their islands, then takes the
+    split or single-row path. Every caller gets the same bytes: the bank bake
+    writes them, the vehicle preview reads them, and neither can drift from the
+    other's idea of what the page is.
+    """
+    if warnings is None:
+        warnings = []
+
+    if page is None:
+        page = declared_pages(bank)[0].get(setid)
+
+    if page is None:
+        raise SystemExit("no declared page set %d in this bank" % setid)
+
+    if uv_islands is None:
+        uv_islands = uv_islands_for(bank, setid)
+
+    if sprites is None:
+        sprites = wheel_islands(bank).get(setid) or []
+
+    pixels, alpha = carbank_page._load_rgb(page.image)
+    key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
+
+    # A wheel island is CARVED, not inherited: whatever the page art carried at
+    # the island is replaced by the declared sprite. Without this the wheel came
+    # from the page image, so a stale pink square survived every rebake.
+    if sprites:
+        mask = list(mask) if mask else [False] * len(pixels)
+
+        for variant, sprite_path, island in sprites:
+            sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
+            transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+            masked = carbank_page.composite(
+                pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
+                island, transparent, key if key is not None else sprite[0])
+
+            for index in masked:
+                mask[index] = True
+
+            warnings.append("page set %d: composited the %s wheel from %s "
+                            "into island %s"
+                            % (setid, variant, os.path.basename(sprite_path),
+                               tuple(island)))
+
+    use_split = (not page.palette and carbank_page.should_split(
+        pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
+        getattr(page, "split", "auto"), getattr(page, "max_error", None)))
+
+    pieces = None
+    background = None
+
+    if use_split:
+        indices, row_map, pieces = carbank_page.plan_islands(
+            pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands, split=True)
+        blob, _ordered, cleared = carbank_page.pack_indexed(
+            indices, row_map, mask=mask, key=key,
+            tolerance=page.transparent_tolerance,
+            chroma=page.transparent_chroma, pieces=pieces)
+    else:
+        blob, _colours, indices, _error, background = carbank_page.bake_page(
+            pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
+            palette=page.palette, protect=page.protect,
+            chroma=page.transparent_chroma)
+        cleared = {0: {background["index"]}} if background else {}
+
+    rows, raw = pages1.read_page(blob, 0, len(blob))
+    indices = bytearray(fourbpp.decode_indices(raw)) if raw else bytearray(indices)
+
+    return DeclaredPageBake(blob, rows, indices, cleared, pieces, background,
+                            use_split, key, mask)
+
+
 def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                          force=False):
     """Bake every declared page whose IMAGE, or whose bake options, changed.
@@ -1014,29 +1156,18 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
     recorded last time. An unchanged declaration still produces identical bytes:
     nothing is rewritten when the hash and the options match.
     """
-    declared = {}
-    owner = {}
+    declared, conflicts = declared_pages(bank)
 
-    for carname in bank.cars:
-        for page in bank.cars[carname].textures:
-            first = declared.get(page.set)
-
-            if first is not None:
-                if first.bake_options() != page.bake_options():
-                    warnings.append(
-                        "%s and %s declare page set %d differently; %s wins"
-                        % (owner[page.set], carname, page.set, owner[page.set]))
-                continue
-
-            declared[page.set] = page
-            owner[page.set] = carname
+    for setid, first, other in conflicts:
+        warnings.append("%s and %s declare page set %d differently; %s wins"
+                        % (first, other, setid, first))
 
     by_set = {p.get("set"): p for p in (manifest.get("pages") or [])}
     islands = wheel_islands(bank)
 
     for setid, page in sorted(declared.items()):
         entry = by_set.setdefault(setid, {"set": setid})
-        uv_islands = _uv_islands(bank, setid)
+        uv_islands = uv_islands_for(bank, setid)
         source = _page_source_hash(page, setid, islands.get(setid), uv_islands)
         want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
 
@@ -1050,63 +1181,22 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                             "on disk" % (setid, page.image))
             continue
 
-        pixels, alpha = carbank_page._load_rgb(page.image)
-        key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
+        result = bake_declared_page(bank, setid, page=page,
+                                    sprites=islands.get(setid),
+                                    uv_islands=uv_islands, warnings=warnings)
+        blob = result.blob
 
-        # A wheel island is CARVED, not inherited: whatever the page art carried
-        # at the island is replaced by the declared sprite. Without this the
-        # wheel came from the page image, so a stale pink square in the page
-        # survived every rebake no matter what sprite was declared.
-        sprites = islands.get(setid) or []
-
-        if sprites:
-            mask = list(mask) if mask else [False] * len(pixels)
-
-            for variant, sprite_path, island in sprites:
-                sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
-                transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
-                masked = carbank_page.composite(
-                    pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
-                    island, transparent, key if key is not None else sprite[0])
-
-                for index in masked:
-                    mask[index] = True
-
-                warnings.append("page set %d: composited the %s wheel from %s "
-                                "into island %s"
-                                % (setid, variant, os.path.basename(sprite_path),
-                                   tuple(island)))
-
-        pieces = None
-        background = None
-        use_split = (not page.palette and carbank_page.should_split(
-            pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
-            getattr(page, "split", "auto"), getattr(page, "max_error", None)))
-
-        if use_split:
-            indices, row_map, pieces = carbank_page.plan_islands(
-                pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
-                split=True)
-            blob, _ordered = carbank_page.pack_indexed(
-                indices, row_map, mask=mask, key=key,
-                tolerance=page.transparent_tolerance,
-                chroma=page.transparent_chroma, pieces=pieces)
-            colours = row_map.get(min(row_map)) if row_map else []
+        if result.pieces:
             entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"],
                                     "src": piece.get("src")}
-                                   for piece in pieces]
-            ncluts = (max(row_map) + 1) if row_map else 1
+                                   for piece in result.pieces]
+            ids = result.texture_ids()
             warnings.append(
                 "page set %d: %d texture id(s) %s — each has its own CLUT row "
                 "(one 16-entry row could not hold the snapped colours)"
-                % (setid, len(row_map), sorted(row_map)))
+                % (setid, len(ids), ids))
         else:
-            blob, colours, indices, _error, background = carbank_page.bake_page(
-                pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
-                palette=page.palette, protect=page.protect,
-                chroma=page.transparent_chroma)
             entry.pop("clut_rects", None)
-            ncluts = 1
 
         os.makedirs(os.path.dirname(want), exist_ok=True)
 
@@ -1114,40 +1204,44 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
             f.write(blob)
 
         # The preview, right here, so it can never describe a page it was not
-        # baked from. It is RGBA and paints the transparent index as alpha 0:
-        # an RGB preview of this page paints that index as black, and re-baking
-        # one turns the keyed backdrop back into paint.
+        # baked from. The transparent indices come from the bake, not from the
+        # CLUT: a black art entry is also 0x0000, and guessing it is what hid
+        # black paint. A keyed texel is stood out in magenta as well as alpha 0.
         try:
-            rows, _raw = pages1.read_page(blob, 0, len(blob))
-            keyed = {background["index"]} if background else set()
             regions = None
 
-            if pieces:
+            if result.pieces:
                 regions = [(p["rect"][0], p["rect"][1],
                             p["rect"][2] - p["rect"][0],
                             p["rect"][3] - p["rect"][1], p["id"])
-                           for p in pieces]
+                           for p in result.pieces]
 
             exportd2.page_png(os.path.join(bank_dir, "pages",
                                            "PAGE_%d.png" % setid),
-                              rows, fourbpp.decode_indices(_raw),
-                              transparent=keyed, regions=regions)
+                              result.rows, result.indices,
+                              transparent=result.transparent(0),
+                              regions=regions, cleared=result.cleared,
+                              marker=carbank_page.TRANSPARENT_RGB)
         except (ValueError, struct.error) as exc:
             warnings.append("page set %d: preview not written (%s)"
                             % (setid, exc))
 
-        entry.update({"set": setid, "size": len(blob), "ncluts": ncluts,
+        entry.update({"set": setid, "size": len(blob),
+                      "ncluts": len(result.rows),
                       "bin": "pages/PAGE_%d.bin" % setid,
                       "source": source})
         by_set[setid] = entry
 
-        if use_split:
+        background = result.background
+
+        if result.split:
             pass
         elif background is None:
             warnings.append("page set %d: re-baked from %s (no transparent "
                             "colour)" % (setid, os.path.basename(page.image)))
         else:
             folded = background.get("folded") or []
+            key = result.key
             warnings.append(
                 "page set %d: re-baked from %s (transparent index %d, %d "
                 "texel(s)%s)"
@@ -1159,9 +1253,8 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
             # Whatever the fold did, nothing in this row may still paint the key
             try:
-                rows, _raw = pages1.read_page(blob, 0, len(blob))
                 stray = carbank_page.stray_key_entries(
-                    rows, key, page.transparent_tolerance,
+                    result.rows, key, page.transparent_tolerance,
                     page.transparent_chroma, transparent=[background["index"]])
 
                 if stray:
