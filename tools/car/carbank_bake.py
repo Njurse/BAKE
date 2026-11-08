@@ -505,6 +505,15 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("sounds", None)
 
+    # Police radio chatter: bankjson resolved the 17 declared WAV paths against
+    # the bank folder; exportd2.build_bank encodes them into LUMP_POLICE_VOICES.
+    voices = list(getattr(bank, "police_voices", []) or [])
+
+    if voices:
+        manifest["police_voices"] = voices
+    else:
+        manifest.pop("police_voices", None)
+
     wheels = wheel_specs(bank, warnings)
 
     if any(wheels):

@@ -15,12 +15,15 @@ and loads as "nothing declared".
 import json
 import os
 
+import portrait
+
 SCHEMA = 1
 
 # One stock car-select portrait: a 256x256 4bpp page (the slot SetupExtraPoly
-# uploads from CCARS.RAW), plus an optional 16-colour RGB555 CLUT.
-PORTRAIT_BYTES = 0x8000
-PORTRAIT_CLUT_BYTES = 32
+# uploads from CCARS.RAW), plus an optional 16-colour RGB555 CLUT. The sizes live
+# in portrait.py; these names remain for callers that already import them.
+PORTRAIT_BYTES = portrait.RAW_BYTES
+PORTRAIT_CLUT_BYTES = portrait.CLUT_BYTES
 
 CAR_KEYS = {
     "clean", "damaged", "low", "atlas", "textures", "wheels",
@@ -86,6 +89,12 @@ PAINT_IMAGE_KEYS = {"image", "id", "panel"}
 PAGE_TEXELS = 256
 
 MAX_SLOT = 12
+
+# The stock cop phrase bank is 6 directional samples + 11 chatter samples
+# (VOICES2.BLK lumps 29/34/39 + a variant). A bank that overrides it must carry
+# exactly this many samples, in phrase order, or the hardcoded CopSay indices
+# would land on the wrong line.
+POLICE_VOICE_COUNT = 17
 
 
 class BankError(Exception):
@@ -243,9 +252,11 @@ class Car(object):
                           "%r -> %r is not a pair of integers" % (src, dst))
 
         # Optional car-select portrait. The game reads it from beside the built
-        # LEV, not from this path: the bake copies it. It must already be one
-        # 4bpp page — this does not quantise, so fourbpp's RGB555 rounding is
-        # not involved. A sibling "<name>.clut" of 32 bytes is the private CLUT.
+        # LEV, not from this path: the bake copies or converts it. A `.raw` is
+        # already one packed 4bpp page; a `.png`/`.bmp` is fitted to 256x219 and
+        # remapped onto the stock car-select palette (see portrait.py). A
+        # sibling "<name>.clut" of 32 bytes is the private CLUT - for a raster
+        # it also supplies the palette to remap onto.
         portrait_rel = data.get("portrait")
 
         if portrait_rel not in (None, ""):
@@ -253,26 +264,41 @@ class Car(object):
 
         self.portrait = self._file(where, "portrait", portrait_rel)
         self.portrait_clut = None
+        self.portrait_raster = False
 
         if self.portrait is not None:
-            size = os.path.getsize(self.portrait)
+            what = portrait.kind(self.portrait)
 
-            if size != PORTRAIT_BYTES:
+            if what is None:
                 _fail(where, "portrait",
-                      "%s is %d bytes; a car-select portrait is one 4bpp "
-                      "page, exactly %d bytes (256x256, the top 219 rows show)"
-                      % (os.path.basename(self.portrait), size, PORTRAIT_BYTES))
+                      "%s is not a portrait source; accepted forms are %s"
+                      % (os.path.basename(self.portrait),
+                         ", ".join(portrait.SOURCE_EXTS)))
+
+            self.portrait_raster = (what == "raster")
+
+            if what == "raw":
+                size = os.path.getsize(self.portrait)
+
+                if size != portrait.RAW_BYTES:
+                    _fail(where, "portrait",
+                          "%s is %d bytes; a car-select portrait page is one "
+                          "4bpp page, exactly %d bytes (256x256, the top 219 "
+                          "rows show). A png/bmp is fitted and packed for you"
+                          % (os.path.basename(self.portrait), size,
+                             portrait.RAW_BYTES))
 
             clut = os.path.splitext(self.portrait)[0] + ".clut"
 
             if os.path.isfile(clut):
                 csize = os.path.getsize(clut)
 
-                if csize != PORTRAIT_CLUT_BYTES:
+                if csize != portrait.CLUT_BYTES:
                     _fail(where, "portrait",
                           "%s is %d bytes; the optional CLUT beside a portrait "
                           "is %d bytes (16 little-endian RGB555 colours)"
-                          % (os.path.basename(clut), csize, PORTRAIT_CLUT_BYTES))
+                          % (os.path.basename(clut), csize,
+                             portrait.CLUT_BYTES))
 
                 self.portrait_clut = clut
 
@@ -805,7 +831,8 @@ class Bank(object):
 
         _check_keys(where, "declare", decl,
                     {"schema", "name", "donor", "order", "cars",
-                     "palette_from_pages", "clut_rows", "scale"}, "declare")
+                     "palette_from_pages", "clut_rows", "scale",
+                     "police_voices"}, "declare")
 
         if "scale" in decl:
             self.obj_scale = _bake_scale(where, "declare.scale", decl.get("scale"))
@@ -916,6 +943,36 @@ class Bank(object):
 
             self.order.append((slot, carname))
 
+        # Police radio chatter: a complete replacement phrase bank in phrase
+        # order (the 6 directions, then the 11 chatter lines). The engine loads
+        # it in place of the host city's cop phrase banks when the forced police
+        # car comes from this bank, so the count has to match exactly.
+        voices = decl.get("police_voices")
+        self.police_voices = []
+
+        if voices is not None:
+            if not isinstance(voices, list):
+                _fail(where, "declare.police_voices",
+                      "must be a list of %d WAV paths" % POLICE_VOICE_COUNT)
+
+            if len(voices) != POLICE_VOICE_COUNT:
+                _fail(where, "declare.police_voices",
+                      "%d paths; the stock cop phrase bank has %d samples"
+                      % (len(voices), POLICE_VOICE_COUNT))
+
+            for i, rel in enumerate(voices):
+                if not isinstance(rel, str) or not rel.strip():
+                    _fail(where, "declare.police_voices[%d]" % i,
+                          "must be a WAV path")
+
+                path = rel if os.path.isabs(rel) else os.path.join(self.base, rel)
+
+                if not os.path.isfile(path):
+                    _fail(where, "declare.police_voices[%d]" % i,
+                          "%s does not exist" % rel)
+
+                self.police_voices.append(os.path.normpath(path))
+
 
 def dumps_compact(obj, width=100, _ind=0):
     """JSON that stays readable: a value that fits on one line (<= width) is
@@ -934,12 +991,16 @@ def dumps_compact(obj, width=100, _ind=0):
 
 
 def install_portraits(bank, out_dir, stem):
-    """Copy declared portraits beside the LEV the game opens.
+    """Bake declared portraits beside the LEV the game opens.
 
-    Writes ``<out_dir>/<stem>.portraits/<model>.raw`` and, when the source has
-    one, ``<model>.clut``. ``stem`` is the LEV filename without its extension
-    (the same name ``build_bank`` uses). The model number is the car's slot in
-    ``order``, which is the number the frontend asks for.
+    Writes ``<out_dir>/<stem>.portraits/<model>.raw``. A `.raw` declaration is
+    copied; a `.png`/`.bmp` is converted by portrait.encode. ``<model>.clut`` is
+    written only when the source supplied one (a sibling `.clut`); a raster
+    portrait is already remapped onto the stock palette, so shipping a stale
+    CLUT from an earlier bake would paint it through the wrong colours and it is
+    removed. ``stem`` is the LEV filename without its extension (the same name
+    ``build_bank`` uses). The model number is the car's slot in ``order``, which
+    is the number the frontend asks for.
 
     Returns ``(slots, notes)``. A portrait on a car that is not in ``order``
     is skipped and named in ``notes`` — it has no model number to file it under.
@@ -964,19 +1025,30 @@ def install_portraits(bank, out_dir, stem):
                          "has no model number" % name)
             continue
 
+        try:
+            raw, clut = portrait.encode(car.portrait, car.portrait_clut)
+        except portrait.PortraitError as e:
+            raise BankError("%s: %s: %s" % (name, car.portrait, e))
+
         if not os.path.isdir(dest_dir):
             os.makedirs(dest_dir)
 
         dest = os.path.join(dest_dir, "%d.raw" % slot)
 
-        with open(car.portrait, "rb") as src, open(dest, "wb") as out:
-            out.write(src.read())
+        with open(dest, "wb") as out:
+            out.write(raw)
 
-        if car.portrait_clut:
-            cdest = os.path.join(dest_dir, "%d.clut" % slot)
+        cdest = os.path.join(dest_dir, "%d.clut" % slot)
 
-            with open(car.portrait_clut, "rb") as src, open(cdest, "wb") as out:
-                out.write(src.read())
+        if clut:
+            with open(cdest, "wb") as out:
+                out.write(clut)
+        elif getattr(car, "portrait_raster", False) and os.path.isfile(cdest):
+            # A raster page is on the stock palette and names no CLUT. A file
+            # left from an earlier bake would still be uploaded over it. A .raw
+            # source keeps the previous behaviour: no declared CLUT means the
+            # bake leaves the output folder's own file alone.
+            os.remove(cdest)
 
         written.append(slot)
 
