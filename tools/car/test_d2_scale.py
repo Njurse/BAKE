@@ -27,6 +27,38 @@ def _level(junction):
     return hdr + b"\x00" * 8 + struct.pack("<ii", junction, 0)
 
 
+class NameShimTests(unittest.TestCase):
+    def test_page_png_canonical_name_and_old_alias(self):
+        self.assertEqual(bankjson.page_png_name(7), "PAGE_7.png")
+        self.assertEqual(bankjson.page_png_aliases(7), ("PAGE_7.png", "page7.png"))
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        old = os.path.join(folder, "page7.png")
+        open(old, "wb").close()
+        self.assertEqual(bankjson.find_page_png(folder, 7), old)
+        new = os.path.join(folder, "PAGE_7.png")
+        open(new, "wb").close()
+        self.assertEqual(bankjson.find_page_png(folder, 7), new)
+
+    def test_scale_flags_are_one_multiplier(self):
+        self.assertIsNone(bankjson.same_scale(None, None))
+        self.assertEqual(bankjson.same_scale(1, None), 1.0)
+        self.assertEqual(bankjson.same_scale(None, 0.68267), 0.68267)
+        self.assertEqual(bankjson.same_scale(1, 1.0), 1.0)
+        with self.assertRaises(SystemExit):
+            bankjson.same_scale(1, 0.68267)
+
+    def test_help_lists_scale_and_the_old_name(self):
+        import subprocess
+        for script in ("carbank_bake.py", "exportd2.py"):
+            out = subprocess.check_output(
+                [sys.executable, os.path.join(HERE, script), "--help"],
+                text=True)
+            self.assertIn("--scale", out)
+            self.assertIn("--obj-scale", out)
+            self.assertIn("declare.scale", out)
+
+
 class SourceTests(unittest.TestCase):
     def test_junction_lump_42_is_the_demo(self):
         self.assertEqual(exportd2.source_kind(_level(exportd2.LUMP_JUNCTIONS2)),
