@@ -87,6 +87,22 @@ def reference_span(project=None):
     return projected_span([project(v) for v in median_box_corners()])
 
 
+def preview_bake_scale(cli_scale, declared, extents, col_box=None):
+    """OBJ units to engine units for the authoring preview.
+
+    ``cli_scale`` is ``--scale`` (``--bake-scale`` is the old name of that
+    flag). ``declared`` is ``declare.scale``. Both are the bake multiplier.
+    With neither, guess from the mesh the way ``infer_bake_scale`` does.
+    """
+    if cli_scale is not None:
+        return float(cli_scale)
+
+    if declared is not None:
+        return float(declared)
+
+    return infer_bake_scale(extents, col_box)
+
+
 def infer_bake_scale(extents, col_box=None):
     """OBJ units -> engine units, for placing handling-space wheels on the mesh.
 

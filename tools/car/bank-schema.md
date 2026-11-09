@@ -295,7 +295,8 @@ the Driver 2 median (length 752) so an unscaled mesh (~1104) draws larger
 than the car the game shows.
 
 A Driver 2 export, retail or the Aug 2000 demo, is already in engine units.
-`exportd2` writes `declare.scale: 1` and `declare.donor.obj_scale: 1`. Measured
+`exportd2` writes `declare.scale: 1` unless `--scale` says otherwise
+(`--obj-scale` is the old name of that flag) and `declare.donor.obj_scale: 1`. Measured
 on HAVANA clean models, demo length / retail length is 1 (slot 0 both 750,
 slot 10 both 1386; both map headers are cell size 2048). Baking that OBJ at
 `2048/3000` is what makes it too small. `carbank_bake` with no `--scale` uses
@@ -334,7 +335,8 @@ wrong grey on a panel. Build the rows from the pages:
 `carbank_bake --check` refuses a bank whose palette disagrees with its pages, and
 `carbank_palette.py bank.json` (without `--from-pages`) writes `pallet.bin` from
 `palette.json`, so an edited colour reaches the bank by the same path the
-donor's rows did.
+donor's rows did. `pallet.bin` is the engine lump (`LUMP_PALLET`); `palette.json`
+is the author view of those same rows.
 
 ### `wheels`
 

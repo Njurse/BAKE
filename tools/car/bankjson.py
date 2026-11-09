@@ -136,6 +136,62 @@ def _check_keys(where, field, obj, allowed, what):
                   % (what, ", ".join(sorted(allowed))))
 
 
+def page_png_name(setid):
+    """Canonical page image: ``PAGE_<set>.png``."""
+    return "PAGE_%d.png" % int(setid)
+
+
+def page_png_aliases(setid):
+    """Canonical name, then the older ``page<set>.png`` export name.
+
+    ``carbank_export`` used to write ``page<set>.png``. New exports write
+    ``PAGE_<set>.png``. A tree that still has the old file is read by the
+    second name.
+    """
+    n = int(setid)
+    return ("PAGE_%d.png" % n, "page%d.png" % n)
+
+
+def find_page_png(directory, setid):
+    """The page image on disk for this set, canonical name first.
+
+    Returns the file that exists, or the canonical path when neither does.
+    """
+    names = page_png_aliases(setid)
+
+    for name in names:
+        path = os.path.join(directory, name)
+
+        if os.path.isfile(path):
+            return path
+
+    return os.path.join(directory, names[0])
+
+
+def same_scale(scale, *old):
+    """``--scale`` and its old names are one bake multiplier (``declare.scale``).
+
+    ``None`` means that flag was not passed. Two different numbers is an error:
+    ``--scale``, ``--bake-scale`` and ``--obj-scale`` are the same knob.
+    """
+    chosen = scale
+
+    for value in old:
+        if value is None:
+            continue
+
+        if chosen is None:
+            chosen = value
+            continue
+
+        if float(value) != float(chosen):
+            raise SystemExit(
+                "--scale %s and %s are the bake multiplier (declare.scale) "
+                "and they disagree" % (chosen, value))
+
+    return None if chosen is None else float(chosen)
+
+
 def _bake_scale(where, field, value):
     """A vertex multiplier. 1 is a Driver 2 OBJ; 2048/3000 is a Driver 1 OBJ."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -335,7 +391,13 @@ class Car(object):
                             used.add(page)
 
         for page in sorted(used - have):
-            for rel in ("textures/PAGE_%d.png" % page, "PAGE_%d.png" % page):
+            rels = []
+
+            for folder in ("textures", ""):
+                for name in page_png_aliases(page):
+                    rels.append(name if not folder else "%s/%s" % (folder, name))
+
+            for rel in rels:
                 if os.path.isfile(os.path.join(self.base, rel)):
                     self.textures.append(Texture(where, page, {"png": rel},
                                                  self._file))
@@ -343,9 +405,10 @@ class Car(object):
             else:
                 _fail(where, "textures.%d" % page,
                       "a material is named PAGE_%d but there is no "
-                      "textures/PAGE_%d.png and no textures.%d entry - add "
+                      "textures/PAGE_%d.png (page%d.png is the old name) and "
+                      "no textures.%d entry - add "
                       "\"textures\": {\"%d\": \"textures/<your png>\"}"
-                      % (page, page, page, page))
+                      % (page, page, page, page, page))
 
         self.textures.sort(key=lambda t: t.set)
 

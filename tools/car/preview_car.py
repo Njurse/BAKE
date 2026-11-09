@@ -204,7 +204,12 @@ def main():
     ap.add_argument("--timeout", type=float, default=0)
     ap.add_argument("--stop-file")
     ap.add_argument("--mute", action="store_true")
-    ap.add_argument("--bake-scale", type=float, help="rebake --scale (OBJ->engine units). Default: declare.scale when the bank names one, else the same guess preview.infer_bake_scale uses")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="bake multiplier (declare.scale), OBJ to engine units. "
+                         "Default: declare.scale when the bank names one, else "
+                         "preview.infer_bake_scale")
+    ap.add_argument("--bake-scale", type=float, default=None,
+                    help="old name for --scale")
     ap.add_argument("--ride", type=float, default=30, help="rest susCompression in engine units (handling.c seeds 14; bigger = wheels hang lower, body rides higher)")
     ap.add_argument("--yaw", type=float, help="fixed yaw in degrees (no spin) - for checking shots")
     ap.add_argument("--size", default="640x400")
@@ -346,12 +351,9 @@ def main():
     # Wheel positions are engine units. Divide by the same multiplier the
     # bake applies to the OBJ (declare.scale when the bank names one).
     declared = (bank.get("declare") or {}).get("scale")
-    if a.bake_scale:
-        S = a.bake_scale
-    elif declared is not None:
-        S = float(declared)
-    else:
-        S = preview.infer_bake_scale(ext, col)
+    import bankjson
+    S = preview.preview_bake_scale(
+        bankjson.same_scale(a.scale, a.bake_scale), declared, ext, col)
     if disp:
         rad = wsize / S
         # 1) hub relative to the BODY MODEL ORIGIN, D2 engine space (Y-down),

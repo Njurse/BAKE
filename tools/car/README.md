@@ -141,7 +141,9 @@ python tools/car/exportd2.py DRIVER2DEMO/LEVELS/HAVANA.LEV \
 
 That writes `JERICHO/MODS/d2demo/HAVANA/` (`bank.json` with
 `donor.source` `driver2-demo`, `scale` 1, and `HAVANA_model0` for the cop).
-`rebake.bat` bakes at `--scale 1`. Do not pass `--obj-scale 0.68267`.
+`rebake.bat` bakes at `--scale 1`. `--obj-scale` is the old name for `--scale`
+(declare.scale). Do not pass `0.68267` for this car: that is the Driver 1
+bake multiplier and shrinks it.
 
 ## One-car banks: `make_new_bank.py`
 

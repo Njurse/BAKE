@@ -1937,9 +1937,14 @@ def main(argv=None):
                                         "(default: the bank's build_dir, or the "
                                         "bank folder in the flat layout)")
     ap.add_argument("--scale", type=float, default=None,
-                    help="OBJ to engine units. Default: declare.scale if the "
-                         "bank names one, else 0.68267 (Driver 1, 2048/3000). "
-                         "A Driver 2 export sets declare.scale 1")
+                    help="OBJ to engine units (declare.scale). Default: "
+                         "declare.scale if the bank names one, else 0.68267 "
+                         "(Driver 1, 2048/3000). A Driver 2 export sets "
+                         "declare.scale 1")
+    ap.add_argument("--bake-scale", type=float, default=None,
+                    help="old name for --scale")
+    ap.add_argument("--obj-scale", type=float, default=None,
+                    help="old name for --scale (declare.scale)")
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")
@@ -1994,7 +1999,9 @@ def main(argv=None):
     if not args.out:
         args.out = bank_layout(bankjson.load(args.bank))[1]
 
-    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
+    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out),
+                             bankjson.same_scale(args.scale, args.bake_scale,
+                                                 args.obj_scale),
                              default_page=default_page,
                              flip_y=args.flip_y, flip_winding=args.flip_winding,
                              flip_normals=args.flip_normals, flip_z=args.flip_z,
