@@ -588,6 +588,17 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
+def detail_regions(details):
+    """(x, y, w, h, clut_row) for page_png.
+
+    The row is the detail's texture id. That is the CLUT row the engine
+    draws it with (`texture_cluts[set][id]`). Numbering the details
+    0, 1, 2… paints id 13 with row 1, which is the wrong colour.
+    """
+    return [(d["x"], d["y"], d["width"], d["height"], d["id"])
+            for d in details]
+
+
 def page_png(path, rows, idx, transparent=None, regions=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
@@ -1170,8 +1181,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                     exist_ok=True)
         page_dets = [d for pi, d in details if pi == s]
         page_png(os.path.join(city_dir, png_rel), rows, idx,
-                 regions=[(d["x"], d["y"], d["width"], d["height"], i)
-                          for i, d in enumerate(page_dets)])
+                 regions=detail_regions(page_dets))
         with open(os.path.join(raw_dir, "pages", "PAGE_%d.bin" % s), "wb") as f:
             f.write(blob[off:off + size])
         page_json.append({

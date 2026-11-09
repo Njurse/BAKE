@@ -46,6 +46,7 @@ import fourbpp                  # noqa: F401  (the page codec lives there now)
 import bake
 import bankjson
 import lev1
+import pages1
 
 
 def _levels_scale():
@@ -58,23 +59,27 @@ def _levels_scale():
     return exportd2.D2_OBJ_SCALE
 
 
-def _page_indices(blob, off, size, where):
-    """One page's indices. d2_page_entries' offsets are ABSOLUTE in the blob."""
+def _page_image(blob, off, size, where, setid):
+    """The page's own CLUT rows and index map.
+
+    The entry is `[npalettes][rows][decomp]`. Decompressing from byte 0, or
+    painting the indices with LUMP_PALLET, uses a different palette than the
+    one the engine draws with, so the preview PNG's colours do not match the
+    car.
+    """
     raw = blob[off:off + size]
 
     if not raw:
-        raise SystemExit("%s: page runs past the end of the bank" % where)
+        raise SystemExit("%s: page set %d runs past the end of the bank"
+                         % (where, setid))
 
-    if len(raw) == 32768:
-        return exportd2.page_indexes(raw)
+    try:
+        rows, page = pages1.read_page(blob, off, size)
+    except (ValueError, struct.error) as exc:
+        raise SystemExit("%s: page set %d cannot be read (%s)"
+                         % (where, setid, exc))
 
-    idx, _n = fourbpp.decomp_asm(raw, 32768)
-
-    if len(idx) != 32768:
-        raise SystemExit("%s: a compressed page decoded to %d bytes, expected 32768"
-                         % (where, len(idx)))
-
-    return idx
+    return rows, exportd2.page_indexes(page)
 
 
 def _mtl_materials(model):
@@ -255,6 +260,7 @@ def export(path, outdir, declare=False):
 
     included = sorted(entries)
     scale = _levels_scale()
+    tex_details = exportd2.texinfo_details(ti, exportd2.texture_names(blob))
     cars = {}
     order = []
 
@@ -265,10 +271,12 @@ def export(path, outdir, declare=False):
 
     for setid in included:
         off, size, _kind = entries[setid]
-        idx = _page_indices(blob, off, size, path)
+        rows, idx = _page_image(blob, off, size, path, setid)
+        page_dets = [d for pi, d in tex_details if pi == setid]
 
         png = os.path.join(pages_dir, "page%d.png" % setid)
-        exportd2.page_png(png, _page_rows(blob, pal, setid), idx)
+        exportd2.page_png(png, rows, idx,
+                          regions=exportd2.detail_regions(page_dets))
         page_files[setid] = os.path.relpath(png, outdir)
 
         strip = os.path.join(pages_dir, "palettes%d.png" % setid)
@@ -326,11 +334,6 @@ def export(path, outdir, declare=False):
 
     return {"cars": cars, "order": order, "pages": page_files,
             "wheels": wheels, "wheel_pngs": wheel_pngs, "scale": scale}
-
-
-def _page_rows(blob, pal, setid):
-    return [r["clut"] for r in pal["records"]
-            if r["tpageindex"] == setid and r["clut"] is not None]
 
 
 PATH_KEYS = ("clean", "damaged", "low", "atlas")

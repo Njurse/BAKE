@@ -934,7 +934,10 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
               "tolerance": page.transparent_tolerance,
               "chroma": page.transparent_chroma,
               "split": getattr(page, "split", "auto"),
-              "max_error": getattr(page, "max_error", None)}
+              "max_error": getattr(page, "max_error", None),
+              # non-key black stays opaque (0x0421). Bumping this rebakes
+              # pages that were quantised when black was the transparent word.
+              "opaque_black": 1}
 
     if sprites:
         record["wheels"] = [{"variant": variant,
@@ -1050,7 +1053,20 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                             "on disk" % (setid, page.image))
             continue
 
-        pixels, alpha = carbank_page._load_rgb(page.image)
+        # A TIM, an indexed PNG, or a sibling .clut already has the author's
+        # palette. Quantising would replace it. An explicit `palette` list
+        # is the author overriding that file, so it still quantises onto
+        # those 16 colours.
+        embedded = None if page.palette else carbank_page.load_embedded(page.image)
+
+        if embedded:
+            indices0, clut_rows = embedded
+            pixels = carbank_page.pixels_from_indices(indices0, clut_rows[0])
+            alpha = None
+        else:
+            pixels, alpha = carbank_page._load_rgb(page.image)
+            indices0 = None
+
         key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
 
         # A wheel island is CARVED, not inherited: whatever the page art carried
@@ -1064,7 +1080,14 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
             for variant, sprite_path, island in sprites:
                 sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
-                transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+                # A named colour keys the sprite too. "auto" is the PAGE's
+                # top-left, which is often body paint, so a sprite keeps its
+                # own corner (black meaning magenta, not tread).
+                named = page.transparent
+                sprite_key = key if (isinstance(named, str)
+                                     and named not in ("auto", "alpha")) else None
+                transparent = carbank_page.sprite_mask(
+                    sprite, sprite_alpha, sprite_key)
                 masked = carbank_page.composite(
                     pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
                     island, transparent, key if key is not None else sprite[0])
@@ -1079,11 +1102,23 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
         pieces = None
         background = None
-        use_split = (not page.palette and carbank_page.should_split(
+        use_split = (indices0 is None and not page.palette
+                     and carbank_page.should_split(
             pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
             getattr(page, "split", "auto"), getattr(page, "max_error", None)))
 
-        if use_split:
+        if indices0 is not None:
+            blob, colours, indices, background = carbank_page.bake_embedded(
+                indices0, clut_rows, pixels, key=key, mask=mask,
+                tolerance=page.transparent_tolerance,
+                chroma=page.transparent_chroma)
+            entry.pop("clut_rects", None)
+            ncluts = len(clut_rows)
+            warnings.append(
+                "page set %d: kept the palette embedded in %s (%d CLUT row%s)"
+                % (setid, os.path.basename(page.image), ncluts,
+                   "" if ncluts == 1 else "s"))
+        elif use_split:
             indices, row_map, pieces = carbank_page.plan_islands(
                 pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
                 split=True)
@@ -1119,7 +1154,15 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         # one turns the keyed backdrop back into paint.
         try:
             rows, _raw = pages1.read_page(blob, 0, len(blob))
-            keyed = {background["index"]} if background else set()
+            # 0x0000 is the key we just wrote (non-key black was lifted to
+            # 0x0421). A TIM that stored 0x0000 keeps that word, and the
+            # preview should show it see-through, which is what the engine does.
+            keyed = set()
+
+            for row in rows:
+                for index in range(min(16, len(row) // 2)):
+                    if struct.unpack_from("<H", row, index * 2)[0] == 0:
+                        keyed.add(index)
             regions = None
 
             if pieces:
