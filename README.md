@@ -41,8 +41,12 @@ enumerates every one.
 | `bake_module.c` | the module wrapper — `jer_module_bake_entry` |
 | `mod.toml` | module metadata (compiled-in / deep mod, off by default) |
 | `docs/DRIVER1.md` | the format work and the roadmap |
-| `tools/car/` | the offline car extractor + bake |
-| `tools/ped/` | the JMPPED pedestrian toolkit |
+| `tools/car/pool-bake.py` | Driver 1 pool (`d1pool.py`, `bake.py`) |
+| `tools/car/d2-export.py` | Driver 2 export and rebuild (`exportd2.py`, `make_new_bank.py`) |
+| `tools/car/bank-bake.py` | declared bank (`carbank_bake.py`) |
+| `tools/ped/ped-bake.py` | JMPPED pedestrians (`jmpped.py`) |
+| `tools/car/` | the rest of the car scripts |
+| `tools/ped/` | the rest of the JMPPED toolkit |
 | `tools/common/` | shared helpers |
 
 ## Building

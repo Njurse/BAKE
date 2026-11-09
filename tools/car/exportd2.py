@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """exportd2.py - export Driver 2 cars and everything needed to rebuild them.
 
+Public command: d2-export.py (same arguments, including --rebuild-bank).
+
 This is the Driver 2 car suite.  It reads one D2 ``LEVELS/*.LEV`` (or a directory
 of them), writes editable assets and a self-contained source package, and builds
 a carhacks-loadable car-data bank (``<CITY>.LEV`` + ``<CITY>.LCF``).

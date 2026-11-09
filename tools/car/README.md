@@ -4,6 +4,14 @@ The offline pipeline: read the Driver 1 disc, extract the traffic shapes, bake
 them into an engine-shaped blob, and preview the result. Everything is read-only
 against the game data and runs from the repo root. `tools/car/out/` is gitignored.
 
+Public commands (the scripts below are the implementation and still run):
+
+| command | pipeline |
+| --- | --- |
+| `python tools/car/pool-bake.py` | Driver 1 pool. `--levels` runs `d1pool.py`. `--pool` or `--city` runs `bake.py` |
+| `python tools/car/d2-export.py` | Driver 2 export and `--rebuild-bank` (`exportd2.py`). `--model` / `--slot` / `--lev` runs `make_new_bank.py` |
+| `python tools/car/bank-bake.py` | declared bank (`carbank_bake.py`) |
+
 | tool | what it does |
 |---|---|
 | `lev1.py` | reads a Driver 1 `LEVELS/*.LEV` — `--lumps` the section table, `--names` the level-model names, `--models` every car-model variant, `--verify` its invariants |

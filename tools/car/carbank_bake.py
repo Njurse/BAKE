@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """carbank_bake.py - bake an edited bank back into a Driver 2-shaped .LEV.
 
+Public command: bank-bake.py (same arguments).
+
     python carbank_bake.py banks/firebird/bank.json -o banks/firebird/newbank
     python carbank_bake.py banks/firebird/bank.json -o ... --variants clean,damaged
 

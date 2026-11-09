@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """make_new_bank.py - scaffold a one-car Driver 2 car-data bank.
 
+Public command: d2-export.py with --model / --slot / --lev (same arguments).
+
 The output is the SAME bank shape the full exporter writes (and any exported bank
 uses), so a bank started here can be edited, re-baked and installed exactly
 like one produced by exportd2:

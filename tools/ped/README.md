@@ -4,9 +4,11 @@ The JMPPED authoring toolkit (archive bake, character import, preview and
 tests) lives here. Its runtime consumer is the compiled-in pedhacks module;
 `JMPPED.LEV` is copied into the runtime by `JERICHO/build.py`.
 
-Quick start from this folder:
+Quick start from this folder. `ped-bake.py` is `jmpped.py`; `JMPPED.bat` still runs it.
 
 ```sh
+python ped-bake.py status
+python ped-bake.py bake --copy
 JMPPED.bat status
 JMPPED.bat bake --copy
 python jmpped_selftest.py --selftest
