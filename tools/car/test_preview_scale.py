@@ -36,6 +36,14 @@ class ScaleTests(unittest.TestCase):
         self.assertEqual(preview.infer_bake_scale((752, 284, 176)), 1.0)
         self.assertEqual(preview.infer_bake_scale((4.2, 1.5, 1.8)), 265.0)
 
+    def test_uv_one_samples_the_last_texel_not_the_wrap(self):
+        # engine texel 255 is exported as 1.0. GL u=1 wraps to texel 0.
+        u, v = preview.gl_uv(1.0, 0.0, 256, 256)
+        self.assertAlmostEqual(u, 255.5 / 256.0)
+        self.assertAlmostEqual(v, 0.5 / 256.0)
+        mid, _ = preview.gl_uv(128 / 255.0, 0.0, 256, 256)
+        self.assertAlmostEqual(mid, 128.5 / 256.0, places=4)
+
     def test_unscaled_d1_draws_larger_than_the_d2_reference(self):
         d2 = preview.reference_span()
         d1 = preview.projected_span(

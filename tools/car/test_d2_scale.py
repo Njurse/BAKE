@@ -43,6 +43,13 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(exportd2.D2_OBJ_SCALE, 1.0)
         self.assertNotAlmostEqual(exportd2.D2_OBJ_SCALE, 2048.0 / 3000.0)
 
+    def test_a_detail_region_uses_the_texture_id_as_its_clut_row(self):
+        regions = exportd2.detail_regions([
+            {"x": 0, "y": 0, "width": 60, "height": 60, "id": 0},
+            {"x": 64, "y": 8, "width": 16, "height": 16, "id": 13},
+        ])
+        self.assertEqual(regions, [(0, 0, 60, 60, 0), (64, 8, 16, 16, 13)])
+
     def test_slot_0_is_kept_when_the_level_has_a_cop(self):
         offsets = [(4, 10, 20)] + [(-1, -1, -1)] * 12
         self.assertEqual(exportd2.populated_slots(offsets), [0])

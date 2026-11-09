@@ -90,25 +90,23 @@ def load_obj(path):
 
 
 def gl_texture(path):
+    """Upload a page. Alpha already in the file is the keyed backdrop.
+
+    Black texels stay opaque: the bake only writes alpha 0 for the key, and
+    punching every (0, 0, 0) here was the swiss-cheese tread. The vertical
+    flip matches OBJ v-up with GL's bottom-left origin.
+    """
     surf = pygame.image.load(path).convert_alpha()
     w, h = surf.get_size()
-    if np is not None:
-        rgb = pygame.surfarray.pixels3d(surf); al = pygame.surfarray.pixels_alpha(surf)
-        al[(rgb[:, :, 0] == 0) & (rgb[:, :, 1] == 0) & (rgb[:, :, 2] == 0)] = 0
-        del rgb, al
-    else:
-        for x in range(w):
-            for y in range(h):
-                c = surf.get_at((x, y))
-                if c.r == 0 and c.g == 0 and c.b == 0:
-                    surf.set_at((x, y), (0, 0, 0, 0))
     data = pygame.image.tobytes(surf, "RGBA", True)
     tid = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, tid)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
-    return tid
+    return tid, w, h
 
 
 def build_list(vs, vts, groups, mats, center, scale):
@@ -118,10 +116,14 @@ def build_list(vs, vts, groups, mats, center, scale):
     for name, tris in groups.items():
         m = mats.get(name, {"kd": (0.7, 0.7, 0.7), "tex": None})
         tex = m["tex"]
+        tw = th = 0
         if tex:
             if tex not in texcache:
                 texcache[tex] = gl_texture(tex)
-            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, texcache[tex])
+            tid, tw, th = texcache[tex]
+            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, tid)
+            # White times the shade. A Kd tint here was painting the page
+            # the material colour instead of the texels.
             base = (1.0, 1.0, 1.0)
         else:
             glDisable(GL_TEXTURE_2D); base = m["kd"]
@@ -135,8 +137,9 @@ def build_list(vs, vts, groups, mats, center, scale):
             s = 0.55 + 0.45 * abs(sum(n[k] * light[k] for k in range(3)) / ln)
             glColor3f(base[0] * s, base[1] * s, base[2] * s)
             for (v, t), p in zip(tri, P):
-                if t is not None and t < len(vts):
-                    glTexCoord2f(*vts[t])
+                if t is not None and t < len(vts) and tw:
+                    import preview
+                    glTexCoord2f(*preview.gl_uv(vts[t][0], vts[t][1], tw, th))
                 glVertex3f(*p)
         glEnd()
     glDisable(GL_TEXTURE_2D)
@@ -201,7 +204,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=0)
     ap.add_argument("--stop-file")
     ap.add_argument("--mute", action="store_true")
-    ap.add_argument("--bake-scale", type=float, help="rebake --scale (OBJ->engine units); default: 1 if the OBJ is already engine-sized, else 265")
+    ap.add_argument("--bake-scale", type=float, help="rebake --scale (OBJ->engine units). Default: declare.scale when the bank names one, else the same guess preview.infer_bake_scale uses")
     ap.add_argument("--ride", type=float, default=30, help="rest susCompression in engine units (handling.c seeds 14; bigger = wheels hang lower, body rides higher)")
     ap.add_argument("--yaw", type=float, help="fixed yaw in degrees (no spin) - for checking shots")
     ap.add_argument("--size", default="640x400")
@@ -271,7 +274,7 @@ def main():
     for k, w in (wcar.get("wheels") or {}).items():
         p = os.path.join(wroot, w.get("png", "")) if isinstance(w, dict) else ""
         if p and os.path.exists(p):
-            wheels[k] = gl_texture(p)
+            wheels[k] = gl_texture(p)  # (tid, w, h)
 
     snd = car.get("sounds") or {}
     def wav(n):
@@ -340,7 +343,15 @@ def main():
     # is why the same car is normal in game.
     import preview
     col = (hd.get("colBox") if hd else None)
-    S = a.bake_scale if a.bake_scale else preview.infer_bake_scale(ext, col)
+    # Wheel positions are engine units. Divide by the same multiplier the
+    # bake applies to the OBJ (declare.scale when the bank names one).
+    declared = (bank.get("declare") or {}).get("scale")
+    if a.bake_scale:
+        S = a.bake_scale
+    elif declared is not None:
+        S = float(declared)
+    else:
+        S = preview.infer_bake_scale(ext, col)
     if disp:
         rad = wsize / S
         # 1) hub relative to the BODY MODEL ORIGIN, D2 engine space (Y-down),
@@ -393,16 +404,18 @@ def main():
     glEndList()
 
     def draw_wheel(tex, pos, spin):
+        tid, tw, th = tex
         out = 1.0 if pos[0] >= 0 else -1.0
         glPushMatrix(); glTranslatef(*pos)
         glScalef(out, 1, 1)                  # local +X points away from the car
         glRotatef(spin, 1, 0, 0)
         glCallList(tyre)                     # tyre sits inboard of the rim
-        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, tex)
+        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, tid)
         glColor3f(1, 1, 1)
         glBegin(GL_QUADS)
         for u, v in ((0, 0), (1, 0), (1, 1), (0, 1)):
-            glTexCoord2f(u, v); glVertex3f(0.004, (v - .5) * 2 * rad, (u - .5) * 2 * rad * out)
+            glTexCoord2f(*preview.gl_uv(u, v, tw, th))
+            glVertex3f(0.004, (v - .5) * 2 * rad, (u - .5) * 2 * rad * out)
         glEnd(); glDisable(GL_TEXTURE_2D); glPopMatrix()
 
     clock = pygame.time.Clock()

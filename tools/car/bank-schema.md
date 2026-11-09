@@ -372,7 +372,10 @@ wheel. Reusing one sprite for `damaged` is a legitimate placeholder
 
 The page's own pixels at the island are **replaced** by the declared sprite, and
 the sprite's own see-through texels (its alpha channel if it has one, else its
-top-left colour) are masked transparent. So:
+top-left colour) are masked transparent. A black top-left is tread, not a
+backdrop: that sprite keys magenta (`ff00ff`), the colour the page examples
+already use, so the tyre stays and a magenta cutout still drops out. Name
+`transparent` on the page when the backdrop is some other colour. So:
 
 - whatever the page art carried at that rectangle cannot reach the bank;
 - the declared sprite is the only thing that can end up in the wheel;
