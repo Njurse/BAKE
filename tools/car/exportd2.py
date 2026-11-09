@@ -889,17 +889,19 @@ def find_lcf(lev_path):
 # ---------------------------------------------------------------------------
 # one city
 # ---------------------------------------------------------------------------
-def write_rebake(city_dir, name, donor_city="CHICAGO"):
+def write_rebake(city_dir, name, donor_city="CHICAGO", scale=1):
     """rebake.bat next to bank.json, only if missing - rendered from the
     canonical tools/car/template_rebake.bat (see make_write_scripts.py)."""
     import make_write_scripts
-    # exportd2 OBJs are in engine units: bake at 1:1 (the bake's default
-    # 0.68267 is the D1->D2 cell ratio and shrinks the car)
-    return make_write_scripts.write(city_dir, name, donor_city, args="--scale 1")
+    # exportd2 OBJs are in engine units. scale is declare.scale, the bake
+    # multiplier (1 for a Driver 2 export). 2048/3000 shrinks the car.
+    return make_write_scripts.write(city_dir, name, donor_city,
+                                    args="--scale %s" % scale)
 
 
 def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
-                    extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE):
+                    extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE,
+                    bake_scale=1):
     """bank.json with a `declare` block shaped like banks/firebird/bank.json:
     every car points at its OBJs, PNG pages (+ recovered paints/protect),
     WAVs, and the first car in order owns the bank's one wheel set."""
@@ -983,13 +985,14 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
             "name": name,
             # a label for people: which city the car came from. The bake
             # reads no file of it.
-            # scale is the bake multiplier. The OBJ is already in engine units
-            # (obj_scale was applied at export; 1 for demo and retail D2).
-            # Leaving this unset makes carbank_bake use 2048/3000 and shrink
-            # the car. The bake does not read donor.
+            # scale is the bake multiplier (--scale / declare.scale). The OBJ
+            # is already in engine units for demo and retail D2, so this is 1
+            # unless the export was given another multiplier. donor.obj_scale
+            # is the factor already applied to the OBJ vertices (1 when the
+            # OBJ was not pre-shrunk). The bake does not read donor.
             "donor": {"city": city, "source": source or "driver2",
                       "obj_scale": obj_scale},
-            "scale": 1,
+            "scale": bake_scale,
             "order": bank_order,
             # pages are re-baked to ONE CLUT each, so the bank's palette rows
             # must come from those pages (as banks/firebird does); the source's
@@ -1003,7 +1006,7 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
 
 def export_one(lev_path, out_root, models_filter, variants, make_bank,
                dir_name=None, bank_name=None, slot_override=None,
-               obj_scale=None):
+               obj_scale=None, bake_scale=None):
     with open(lev_path, "rb") as f:
         blob = f.read()
     kind = level_game(blob)
@@ -1028,10 +1031,14 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                              % (dest_slot, MAX_CAR_MODELS - 1))
 
     # Demo and retail D2 cars are already engine-sized (D2_OBJ_SCALE). A caller
-    # can pass another factor; it is applied once, here, so the bake stays at 1.
+    # can still pre-multiply the OBJ (obj_scale); the bake multiplier is
+    # bake_scale, written as declare.scale. The CLI --scale / --obj-scale
+    # flags set bake_scale and leave the OBJ at 1.
     kind_name = source_kind(blob)
     if obj_scale is None:
         obj_scale = D2_OBJ_SCALE
+    if bake_scale is None:
+        bake_scale = 1
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
     # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
@@ -1339,17 +1346,18 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         assets.write_handling(city_dir, cars, cos_records, cosmetics_fields)
     _write_json(manifest_path, manifest)   # warnings may have grown
 
-    write_rebake(city_dir, name, city)
+    write_rebake(city_dir, name, city, bake_scale)
     write_bank_json(city_dir, city, cars, included_sets, bank_order,
                     os.path.basename(lev_path), extras, name=name,
-                    source=kind_name, obj_scale=obj_scale)
+                    source=kind_name, obj_scale=obj_scale,
+                    bake_scale=bake_scale)
 
     # The bank is baked the way every rebake bakes it: generatively, from
     # bank.json + cars/ alone (carbank_bake). Then the scratch goes.
     if make_bank:
         import carbank_bake
         ok, _bake_warnings = carbank_bake.bake_bank(
-            os.path.join(city_dir, "bank.json"), bank_dir, scale=1)
+            os.path.join(city_dir, "bank.json"), bank_dir, scale=bake_scale)
         manifest["bank"] = {"lev": os.path.join(bank_dir, name + ".LEV"),
                             "lcf": os.path.join(bank_dir, name + ".LCF")}
         if not ok:
@@ -1368,8 +1376,8 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         print("  model 0 (cop): exported")
     else:
         print("  model 0 (cop): empty in this level (clean offset -1)")
-    print("  source: %s  obj scale: %s  bake scale: 1"
-          % (kind_name, obj_scale))
+    print("  source: %s  obj scale: %s  bake scale: %s"
+          % (kind_name, obj_scale, bake_scale))
     for w in warnings:
         print("  warning: %s" % w)
     if make_bank:
@@ -2633,12 +2641,14 @@ def main(argv=None):
                     help="model slots to export (default 0-12). Slot 0 is the "
                          "cop and is exported when the level has one; do not "
                          "drop it as unused")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="bake multiplier, written as declare.scale. Default "
+                         "1: demo and retail Driver 2 cars are already in "
+                         "engine units (do not pass 2048/3000, that shrinks "
+                         "them at bake time)")
     ap.add_argument("--obj-scale", type=float, default=None,
-                    help="multiply exported OBJ vertices by this. Default 1: "
-                         "demo and retail Driver 2 HAVANA cars already match "
-                         "(do not pass 2048/3000, that is the Driver 1 ratio "
-                         "and shrinks these cars). The bake then uses "
-                         "declare.scale 1")
+                    help="old name for --scale (declare.scale, the bake "
+                         "multiplier). It does not pre-shrink the OBJ")
     ap.add_argument("--variants", default="clean,damaged,low",
                     help="variants to export (default: clean,damaged,low)")
     ap.add_argument("--no-bank", action="store_true",
@@ -2658,6 +2668,7 @@ def main(argv=None):
 
     if args.selftest:
         return selftest()
+    bake_scale = bankjson.same_scale(args.scale, args.obj_scale)
     if args.rebuild_bank:
         return rebuild_cli(args.rebuild_bank, args.out, args.city, args.order)
     if not args.path:
@@ -2684,7 +2695,7 @@ def main(argv=None):
             try:
                 entry = export_one(path, out_root, models_filter, variants,
                                    not args.no_bank, bank_name=args.name,
-                                   obj_scale=args.obj_scale)
+                                   bake_scale=bake_scale)
             except SystemExit as e:
                 print("skip %s: %s" % (os.path.basename(path), e))
                 continue
@@ -2698,7 +2709,7 @@ def main(argv=None):
             try:
                 entry = export_one(path, out_root, {m}, variants,
                                    not args.no_bank, dir_name=name,
-                                   obj_scale=args.obj_scale)
+                                   bake_scale=bake_scale)
             except SystemExit as e:
                 print("skip %s model %d: %s" % (os.path.basename(path), m, e))
                 entry = None

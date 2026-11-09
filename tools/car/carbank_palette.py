@@ -7,7 +7,8 @@
 The bank bake reads `raw.pallet` (a binary LUMP_PALLET body) and never the
 `palette.json` beside it, so editing a colour in the JSON used to change
 nothing. This is the missing half of that pair: it writes the body the bake
-reads, from the rows the JSON describes.
+reads, from the rows the JSON describes. `pallet.bin` is the engine lump;
+`palette.json` is the author view of those same rows.
 
 `palette.json` carries each row twice - `clut` (the 32 raw bytes, hex) and `rgb`
 (the same 16 colours as 8-bit triples). `rgb` WINS, because it is the one a

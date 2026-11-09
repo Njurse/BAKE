@@ -10,7 +10,8 @@ What it writes, per car slot the bank carries:
     cars/<slot>_<name>/damaged.obj    when the bank has one
     cars/<slot>_<name>/low.obj        when the bank has one
     cars/<slot>_<name>/<name>.mtl     one material per (set, id), or "flat"
-    pages/page<set>.png               one PNG per 4bpp page
+    pages/PAGE_<set>.png              one PNG per 4bpp page
+                                      (page<set>.png is the old name, still read)
     pages/palettes<set>.png           that page's CLUT rows, as a strip
     wheels/wheels.json                which variants the car carries
 
@@ -274,7 +275,7 @@ def export(path, outdir, declare=False):
         rows, idx = _page_image(blob, off, size, path, setid)
         page_dets = [d for pi, d in tex_details if pi == setid]
 
-        png = os.path.join(pages_dir, "page%d.png" % setid)
+        png = os.path.join(pages_dir, bankjson.page_png_name(setid))
         exportd2.page_png(png, rows, idx,
                           regions=exportd2.detail_regions(page_dets))
         page_files[setid] = os.path.relpath(png, outdir)
