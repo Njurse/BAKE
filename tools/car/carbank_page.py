@@ -34,6 +34,7 @@ measurement behind "the greys survived".
 """
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -927,8 +928,16 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
 
         if group["quantize"]:
             owned = [pixels[t] for t in texels]
-            side = max(1, int(len(owned) ** 0.5))
-            pad = side * side - len(owned)
+            # Ceiling of the square root, in integers. int(sqrt(n)) floors, and
+            # when n is not a square the pad is negative. [x] * negative is
+            # empty, so the grid stays longer than side*side and paletteize
+            # raises (CIVICOPS leftover: 59972 texels, 244*244 = 59536).
+            count = len(owned)
+            side = math.isqrt(count)
+            if side * side < count:
+                side += 1
+            side = max(1, side)
+            pad = side * side - count
             grid = owned + [owned[0]] * pad
             colours, local_idx = fourbpp.paletteize(grid, side, side)
 

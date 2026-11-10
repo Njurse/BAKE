@@ -10,6 +10,7 @@ Run from this directory:
     python -m unittest test_carbank_page -v
 """
 
+import math
 import os
 import struct
 import sys
@@ -217,6 +218,59 @@ class PaletteControlTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows, sorted(rows, key=lambda r: (-r["error"], -r["texels"])))
         self.assertIn("source", rows[0])
+
+
+class LeftoverQuantizeTests(unittest.TestCase):
+    """A leftover sprite that does not fit in 16 colours is quantised on a
+    square grid. The side must be the ceiling of the square root: flooring it
+    makes the pad negative, and a negative pad drops the padding so paletteize
+    sees more pixels than side*side (CIVICOPS: 59972 vs 244*244)."""
+
+    def _cols(self, n):
+        cols = [fourbpp.snap555((i * 15, 20 + i * 11, 220 - i * 9)) for i in range(n)]
+        self.assertEqual(len(set(cols)), n)
+        return cols
+
+    def _run(self, count):
+        cols = self._cols(count)
+        width = 32
+        height = (count // width) + 2
+        pixels = [(8, 8, 8)] * (width * height)
+        texels = list(range(count))
+
+        for n, t in enumerate(texels):
+            pixels[t] = cols[n % len(cols)]
+
+        indices = bytearray(len(pixels))
+        rows = {}
+        pieces = carbank_page._paginate_leftovers(
+            indices, pixels, width, height,
+            [{"texels": texels, "cols": cols}], rows, 1)
+        return indices, rows, pieces, texels
+
+    def test_a_non_square_leftover_quantises_without_raising(self):
+        # 17 is not a square: int(sqrt(17)) == 4 and 4*4 == 16 < 17.
+        count = 17
+        self.assertNotEqual(int(count ** 0.5) ** 2, count)
+        indices, rows, pieces, texels = self._run(count)
+
+        self.assertEqual(len(pieces), 1)
+        self.assertEqual(len(rows[1]), fourbpp.CLUT_ROW_ENTRIES)
+
+        for t in texels:
+            self.assertGreaterEqual(indices[t], 0)
+            self.assertLess(indices[t], fourbpp.CLUT_ROW_ENTRIES)
+
+    def test_the_civicops_count_needs_a_larger_square_than_the_floor(self):
+        # The reported blob. Do not quantise it; pin the side the packer uses.
+        count = 59972
+        side = math.isqrt(count)
+        self.assertEqual(side * side, 59536)
+        self.assertLess(side * side, count)
+        if side * side < count:
+            side += 1
+        self.assertEqual(side, 245)
+        self.assertGreaterEqual(side * side, count)
 
 
 class BlackTreadTests(unittest.TestCase):
