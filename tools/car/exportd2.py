@@ -99,6 +99,11 @@ LUMP_CAR_WHEELS = 200
 # straight to LoadSoundBankDynamic; SIRENS is 13 cop flags.
 LUMP_CAR_SOUNDS = 201
 LUMP_CAR_SIRENS = 202
+# JERICHO: a complete replacement cop-phrase bank (6 directions + 11 chatter
+# lines). Standard dynamic-bank body, so gamesnd can LoadSoundBankDynamic it
+# into SOUND_BANK_VOICES in place of the host city's phrase banks.
+LUMP_POLICE_VOICES = 203
+POLICE_VOICE_COUNT = 17
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
@@ -1836,6 +1841,76 @@ def _load_sounds(manifest):
     return specs
 
 
+def build_police_voices_body(paths, warnings):
+    """LUMP_POLICE_VOICES: a complete replacement cop-phrase bank.
+
+    The body is the standard Driver 2 dynamic-bank shape: int num_samples, one
+    16-byte SAMPLE_DATA per sample, then the VAG payload with payload-relative
+    addresses. gamesnd hands it straight to LoadSoundBankDynamic into
+    SOUND_BANK_VOICES, so the samples must stay in phrase order: 6 directions,
+    then the 11 chatter lines.
+    """
+    if not paths:
+        return None
+
+    if len(paths) != POLICE_VOICE_COUNT:
+        raise SystemExit("bank: police_voices has %d paths; the stock cop "
+                         "phrase bank has %d samples"
+                         % (len(paths), POLICE_VOICE_COUNT))
+
+    samples = []
+
+    for i, path in enumerate(paths):
+        spec = {
+            "wav": path,
+            "loop": False,
+            "rate": None,
+            "rate_pct": 100,
+            "pitch": 1.0,
+            "level": 0.999,
+            "rms": 0.34,
+            "normalise": True,
+            "gain_db": 0.0,
+            "trim": None,
+            "fade_out": 0.0,
+            "max_rate": SOUND_MAX_RATE,
+            "sample_bytes": SOUND_SAMPLE_BYTES,
+        }
+        sample = _sound_sample(spec, warnings, "police voice %d" % (i + 1))
+
+        if sample is None:
+            raise SystemExit("bank: police_voices[%d] could not be encoded: %s"
+                             % (i, path))
+
+        samples.append(sample)
+
+    body = bytearray(struct.pack("<i", len(samples)))
+    payload = bytearray()
+
+    for sample in samples:
+        body += struct.pack("<IIII", len(payload), len(sample["data"]),
+                            0, sample["rate_field"])
+        payload += sample["data"]
+
+        while len(payload) % 4:
+            payload.append(0)
+
+    body += payload
+    warnings.append("police voices: %d samples, %d bytes"
+                    % (len(samples), sum(len(s["data"]) for s in samples)))
+    return bytes(body)
+
+
+def _load_police_voices(manifest):
+    """The manifest's `police_voices` list, or [] when the bank declares none."""
+    paths = manifest.get("police_voices") or []
+
+    if not isinstance(paths, list):
+        raise SystemExit("bank: `police_voices` must be a list of WAV paths")
+
+    return paths
+
+
 def _load_wheels(manifest):
     """The manifest's `wheels` list, normalised to one entry per variant.
 
@@ -1885,7 +1960,8 @@ def _load_wheels(manifest):
 
 def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
-                  wheels_body=None, sounds_body=None, sirens_body=None):
+                  wheels_body=None, sounds_body=None, sirens_body=None,
+                  police_voices_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -1901,6 +1977,8 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
         add(LUMP_CAR_SOUNDS, sounds_body)
     if sirens_body:
         add(LUMP_CAR_SIRENS, sirens_body)
+    if police_voices_body:
+        add(LUMP_POLICE_VOICES, police_voices_body)
     add(LUMP_TEXTUREINFO, texinfo_body)
     add(LUMP_PALLET, pallet_body)
     if texture_names_body:
@@ -2122,10 +2200,13 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     sound_specs = _load_sounds(manifest)
     sounds_body, sirens = build_sounds_body(sound_specs, warnings)
     sirens_body = build_sirens_body(sirens)
+    police_voices_body = build_police_voices_body(
+        _load_police_voices(manifest), warnings)
 
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
-                              wheels_body, sounds_body, sirens_body)
+                              wheels_body, sounds_body, sirens_body,
+                              police_voices_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -2150,6 +2231,9 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
                                      for spec in (sound_specs.get("models") or [])),
                                     key=lambda m: (m is None, m)),
                    "sirens": sirens} if sounds_body else {},
+        "police_voices": ({"samples": struct.unpack_from("<i", police_voices_body, 0)[0],
+                           "bytes": len(police_voices_body)}
+                          if police_voices_body else {}),
         "palette_records": palette_records,
         "page_base": d2_page_base(bank_blob),
         "warnings": warnings,
@@ -2157,6 +2241,11 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
                                    sound_specs)
+    voice_problems = verify_police_voices(lev_path)
+
+    if voice_problems:
+        report["checks"]["problems"].extend(voice_problems)
+        report["checks"]["ok"] = False
     # bank.json is the AUTHOR'S input (the declaration) and the bake must never
     # write it: when out_dir is the bank folder itself, the old name overwrote
     # a hand-written declaration with this computed report. Everything the bake
@@ -2403,6 +2492,30 @@ def verify_sounds(blob, specs):
                             % (flagged, wanted))
 
     return problems
+
+
+def verify_police_voices(lev_path):
+    """The optional police voices segment must hold the stock phrase count."""
+    with open(lev_path, "rb") as f:
+        blob = f.read()
+
+    got = d2_lump(blob, LUMP_POLICE_VOICES)
+
+    if got is None:
+        return []
+
+    body, size = got
+
+    if size < 4:
+        return ["police voices: segment is too short"]
+
+    count = struct.unpack_from("<i", blob, body)[0]
+
+    if count != POLICE_VOICE_COUNT:
+        return ["police voices: %d samples, expected %d"
+                % (count, POLICE_VOICE_COUNT)]
+
+    return []
 
 
 def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,

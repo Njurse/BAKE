@@ -63,6 +63,18 @@ class LoadTests(BankFixture):
         self.assertEqual(bank.cars, {})
         self.assertEqual(bank.order, [])
 
+    def test_police_voices_load_when_all_seventeen_exist(self):
+        names = ["voice_%02d.wav" % i for i in range(bankjson.POLICE_VOICE_COUNT)]
+
+        for name in names:
+            with open(os.path.join(self.dir, name), "w") as handle:
+                handle.write("x")
+
+        bank = bankjson.load(self.write(self.declare(police_voices=names)))
+
+        self.assertEqual(len(bank.police_voices), bankjson.POLICE_VOICE_COUNT)
+        self.assertTrue(all(os.path.isfile(path) for path in bank.police_voices))
+
     def test_a_full_declaration_loads(self):
         bank = bankjson.load(self.write(self.declare()))
 

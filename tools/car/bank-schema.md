@@ -468,6 +468,8 @@ bank - and `cop` also sets `LUMP_CAR_SIRENS` (202). Both are verified the way
 the segment), because that reader answers a bad bank with "no sounds" and the car
 then plays the host city's engine without a word.
 
+`declare.police_voices` is optional: exactly 17 WAV paths, in phrase order (the 6 directions, then the 11 chatter lines). The bake writes them as `LUMP_POLICE_VOICES` (203), a complete replacement for the host city's cop phrase bank. `register_city.py --force-slot MODEL` points `carhacks.ini` at that bank's cop slot (`force_slot = 3:<city>:<MODEL>`).
+
 Byte budget: `sample_bytes` per sample (16 KiB) at `max_rate` (16000 Hz). This is
 not taste - `LoadSoundBankDynamic` writes the payload to a running SPU address
 with no bounds check, so an oversized bank writes past the end of SPU RAM and
