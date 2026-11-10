@@ -533,11 +533,15 @@ def build_wheel_record(geom, scale):
 
 
 def build_wheel_lump(wheels):
-    """LUMP_CAR_WHEELS body: count, 3 offsets, then the wheel blocks.
+    """LUMP_CAR_WHEELS v1 body: count, 3 offsets, then the wheel blocks.
 
     `wheels` is a 3-entry list of geom records (or None). Offsets are relative to
     the segment body start, and -1 means that variant is absent - the engine then
     keeps the host level's wheel for it.
+
+    This is the whole segment an old engine reads. Per-car wheels are appended
+    after these blocks by exportd2.build_wheel_body (magic WHLX, version 1,
+    13 slots × 3 offsets). See tools/car/bank-schema.md for the byte layout.
     """
     if len(wheels) > MAX_CAR_MODELS:
         raise SystemExit("too many wheel variants")

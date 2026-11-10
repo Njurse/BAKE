@@ -158,7 +158,7 @@ bake writes `-1` for them.
 | `atlas` | one of | a single atlas PNG covering every page, in page order |
 | `textures` | one of | `{set id: image}` per texture page. Use this instead of `atlas` when the pages are separate images |
 | `wheels.clean` | no | the road wheel: `{png, set, island}` — see below |
-| `wheels.damaged` | no | the buckled wheel — **omit it cleanly** when the car has none; the bank writes `-1` and the engine keeps the host wheel texture for that variant (`models.c:2743`) |
+| `wheels.damaged` | no | the buckled wheel. Omit it and that kind is `-1`: this car uses the bank default for it. `-1` in the v1 header (the default car has none either) still means the host level's wheel (`models.c`) |
 | `wheels.fast` | no | the high-speed blur wheel |
 | `sounds` | no | see below |
 | `palette` | no | a CLUT source for a car whose colours are not its pages' own |
@@ -359,16 +359,91 @@ That is why a wheel needs more than an image:
 The whole entry may also be a plain path (`"clean": "source/wheelclean.png"`),
 which is an image with no page: valid, and it bakes no wheel record.
 
-A bank carries **one** wheel set for the whole import - the segment has three
-variants, not three per model slot - so the first car in slot order that declares
-wheels owns it, and another car's wheels are reported rather than silently
-merged.
+Each car's wheels are written. The **bank default** is the first car in
+`declare.order` that produces a wheel model. That default is the v1 header,
+which is all an old engine reads. Every other car's clean/damaged/fast model
+is named from the per-slot extension at that car's `order` slot. A car with
+no wheels is `-1,-1,-1` in the extension, so it wears the default. A kind
+this car omits is `-1` for that kind only.
 
-**Declare all three variants.** `clean`, `damaged`, `fast` - an undeclared
-variant is written as offset -1, which means "keep the HOST level's wheel", and
-the host's is a retail sprite baked opaque: a pink square around a damaged car's
-wheel. Reusing one sprite for `damaged` is a legitimate placeholder
+**Declare all three variants** on the car that owns the default. `clean`,
+`damaged`, `fast` — an undeclared kind is `-1` in the v1 header, which means
+"keep the HOST level's wheel", and the host's is a retail sprite baked
+opaque: a pink square around a damaged car's wheel. Reusing one sprite for
+`damaged` is a legitimate placeholder
 (`"damaged": {"png": "textures/wheelclean.png", "set": 2, "island": [0, 0, 60, 60]}`).
+A later car that omits `damaged` does not fall through to the host; `-1` in
+its extension slot means "use the bank default's damaged wheel".
+
+### Per-car wheels (LUMP_CAR_WHEELS, type 200)
+
+One segment for the bank. Old engines read the v1 header and use it for every
+car. They bounds-check the count, the three offsets, and the model blocks
+those offsets name, and they ignore bytes after those blocks. A newer engine
+reads the extension and, per model slot, uses that car's wheel or the default
+when the offset is `-1`.
+
+All integers are little-endian. Every offset is a byte offset from the first
+byte of the segment body. `-1` means absent.
+
+**v1, at byte 0.** This prefix is exactly `bake.build_wheel_lump` of the bank
+default, so it is byte-identical to a bake from before per-car wheels.
+
+| offset | type | meaning |
+| --- | --- | --- |
+| 0 | int32 | `count` = 3 |
+| 4 | int32 | CLEAN offset, kind 0. The bank default. `-1` = absent (host wheel) |
+| 8 | int32 | DAMAGED offset, kind 1 |
+| 12 | int32 | FAST offset, kind 2 |
+| 16 | bytes | the MODEL + POLYFT4 blocks those offsets name. A `-1` kind has no block |
+
+Each wheel MODEL is what `bake.build_wheel_record` writes: a 36-byte MODEL
+header, `num_vertices` × 8 bytes of vertices, then `num_polys` POLYFT4
+records (`id & 0x1f == 21`, 20 bytes each). The engine requires 8..24 polys
+and the first 8 FT4. It reads the face rect from poly 2, the hub/tread rect
+from poly 4, and `texture_set` / `texture_id` (the CLUT row) from those
+polys. This bake writes 8 FT4 quads that all name the same page and island.
+
+The v1 payload ends at the highest byte any of those blocks occupies. Pad
+with `0x00` up to a multiple of 4. The extension starts on that byte. Call
+it `N`.
+
+**Extension.**
+
+| offset | size | meaning |
+| --- | --- | --- |
+| N | 4 | magic ASCII `WHLX` (bytes `57 48 4C 58`) |
+| N+4 | int32 | version = 1 |
+| N+8 | int32 | slot_count = 13 (`CAR_IMPORT_MODEL_SLOTS`) |
+| N+12 | 156 | `int32 offset[13][3]`. Slot 0..12, then kind clean=0, damaged=1, fast=2. Index `(slot * 3 + kind)`. `-1` = use the v1 offset for that kind. A slot with no car, and a car that declares no wheels, is `-1,-1,-1` |
+| after the table | bytes | MODEL blocks for variants that are not already in the v1 payload. An offset may point back at a v1 block when the bytes would be the same. The default car's slot does this; those models are not copied |
+
+A declared kind's offset points at a MODEL whose poly 2 `texture_set` is that
+car's wheel page, after any page-set remap below. `texture_set` must be
+greater than 0 and less than 128 or the variant is left out.
+
+### Page set collisions
+
+Two cars may both declare set 1 for different art: a body page and a wheel
+page, or the same donor id reused across cities. Identical declarations —
+the same image, the same bake options, the same paints, and the same wheel
+sprites composited onto that page — share one set id. A different declaration
+of a taken id is moved to the lowest free id in 1..127, and that car's model
+polys and wheel records are rewritten to the new id.
+
+The bake warns with the mapping (`remapped 1 -> 4`). `<CITY>.report.json`
+lists every move under `page_set_remaps` and each car's baked wheel pages
+under `model_wheels`. A remap entry is `car`, `from`, `to`, `kept_by`,
+`same`. `kept_by` is the car that already held `from`, or the car whose
+identical page this one joined. `same` is true when the art matched and only
+the number changed.
+
+Set 0 is never assigned. It is the engine's no-page sentinel. A wheel
+`texture_set` must be greater than 0 and less than 128. This bake's
+TextureInfo lump refuses a set of 128 or above, so body pages use the same
+1..127 range. `page_set_range.assumption` in the report says so: a higher
+body-page limit in the engine, if one exists, is not used here. A declared
+id outside 1..127 is moved into that range the same way a collision is.
 
 #### The island is carved from the sprite
 
@@ -497,7 +572,7 @@ accepted and ignored.
 
 ## Preview
 
-`preview_car.py <bank.json|dir>` renders `declare.cars.<car>` authoring art (clean OBJ+MTL, wheel PNGs, engine/idle WAVs) with a slow yaw and an idle -> gears -> damaged-wheel coast loop. Options: `--car`, `--timeout`, `--stop-file`, `--mute`, `--flip-y` (Y-down art), `--shot DIR`. Copy the Firebird `rebake.bat` preview block (`STOPF` + `start /b python preview_car.py`) into other banks' rebake scripts.
+`preview_car.py <bank.json|dir>` renders `declare.cars.<car>` authoring art (clean OBJ+MTL, that car's wheel PNGs, engine/idle WAVs) with a slow yaw and an idle -> gears -> damaged-wheel coast loop. A car with no wheels shows the bank default (the first car in `declare.order` that declares wheels), which is what a `-1` extension slot draws. Options: `--car`, `--timeout`, `--stop-file`, `--mute`, `--flip-y` (Y-down art), `--shot DIR`. Copy the Firebird `rebake.bat` preview block (`STOPF` + `start /b python preview_car.py`) into other banks' rebake scripts.
 
 
 ## Material names

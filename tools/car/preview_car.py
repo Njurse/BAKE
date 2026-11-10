@@ -5,8 +5,10 @@
                           [--stop-file PATH] [--mute]
 
 Reads what declare.cars.<car> names in bank.json (the clean OBJ + its MTL
-textures, the wheel PNGs, and sounds/engine|idle wav) - NOT the baked LEV, so
-it shows the art as authored, not the 16-colour pages.
+textures, that car's own wheel PNGs, and sounds/engine|idle wav) - NOT the
+baked LEV, so it shows the art as authored, not the 16-colour pages. A car
+with no wheels shows the bank default: the first car in declare.order that
+declares wheels, which is the v1 lump a -1 extension slot draws.
 
 Loop (repeats):  idle ~2s  ->  rev through 4 gears (clean wheel, then fast
 wheel once speed is up)  ->  coast back to idle on the damaged wheel.
@@ -19,13 +21,83 @@ Missing pygame / PyOpenGL: prints a note and exits 0, never blocks a bake.
 import argparse, json, math, os, sys, time
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
+
+def resolve_car(bank_root, entry):
+    """(directory, car dict) for an inline car or a handling.json path."""
+    if isinstance(entry, str):
+        path = os.path.normpath(os.path.join(bank_root, entry))
+
+        with open(path, encoding="utf-8") as handle:
+            return os.path.dirname(path), json.load(handle)
+
+    return bank_root, entry or {}
+
+
+def car_declares_wheels(car):
+    """True when this car names wheel art of its own."""
+    wheels = (car or {}).get("wheels") or {}
+
+    if not isinstance(wheels, dict):
+        return False
+
+    for entry in wheels.values():
+        if isinstance(entry, str) and entry:
+            return True
+
+        if isinstance(entry, dict) and (entry.get("png") or entry.get("set") is not None):
+            return True
+
+    return False
+
+
+def wheel_png(entry):
+    """The sprite path a wheels.<kind> entry names, or ''."""
+    if isinstance(entry, str):
+        return entry
+
+    if isinstance(entry, dict):
+        return entry.get("png") or ""
+
+    return ""
+
+
+def preview_wheel_car(bank_root, bank, car_key):
+    """(root, car dict) of the wheels this preview draws.
+
+    The selected car, when it declares wheels. Otherwise the bank default:
+    the first car in declare.order that declares wheels. That is the v1 set,
+    which is what the engine draws for a slot whose extension offsets are -1.
+    """
+    declare = bank.get("declare") or {}
+    cars = declare.get("cars") or {}
+    order = declare.get("order") or []
+    root, car = resolve_car(bank_root, cars.get(car_key) or {})
+
+    if car_declares_wheels(car):
+        return root, car
+
+    for entry in order:
+        name = entry.get("car") if isinstance(entry, dict) else entry
+
+        if name not in cars:
+            continue
+
+        other_root, other = resolve_car(bank_root, cars[name])
+
+        if car_declares_wheels(other):
+            return other_root, other
+
+    return root, car
+
+
 try:
     import pygame
     from OpenGL.GL import *  # noqa
     from OpenGL.GLU import gluPerspective
+    _PREVIEW_IMPORT_ERROR = None
 except Exception as e:  # pragma: no cover
-    print("preview_car: skipped (%s) - pip install pygame-ce PyOpenGL numpy" % e)
-    sys.exit(0)
+    pygame = None
+    _PREVIEW_IMPORT_ERROR = e
 try:
     import numpy as np
 except Exception:
@@ -198,6 +270,11 @@ def state(t):
 
 
 def main():
+    if pygame is None:
+        print("preview_car: skipped (%s) - pip install pygame-ce PyOpenGL numpy"
+              % _PREVIEW_IMPORT_ERROR)
+        return 0
+
     ap = argparse.ArgumentParser()
     ap.add_argument("bank")
     ap.add_argument("--car")
@@ -234,13 +311,9 @@ def main():
         return bank_root, entry or {}
 
     root, car = resolve(cars[key])
-    wroot, wcar = root, car
-    if not car.get("wheels"):   # the bank's one wheel set lives on one car
-        for other in cars.values():
-            r, c = resolve(other)
-            if c.get("wheels"):
-                wroot, wcar = r, c
-                break
+    # This car's wheels. A car that declares none shows the bank default,
+    # matching a -1 slot in the wheel extension.
+    wroot, wcar = preview_wheel_car(bank_root, bank, key)
     objp = os.path.join(root, car.get("clean", ""))
     if not os.path.exists(objp):
         print("preview_car: no clean model %s" % objp); return 0
@@ -277,7 +350,8 @@ def main():
 
     wheels = {}
     for k, w in (wcar.get("wheels") or {}).items():
-        p = os.path.join(wroot, w.get("png", "")) if isinstance(w, dict) else ""
+        rel = wheel_png(w)
+        p = os.path.join(wroot, rel) if rel else ""
         if p and os.path.exists(p):
             wheels[k] = gl_texture(p)  # (tid, w, h)
 

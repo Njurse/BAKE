@@ -17,9 +17,12 @@ What comes from the declaration (bank.json's `declare` half):
   * each car's clean/damaged/low OBJ, read back with its real texture materials
   * the slot order
   * the wheel variants that name a page: each becomes a wheel MODEL in the bank
-    (LUMP_CAR_WHEELS, type 200). The engine keeps the host level's wheel MESH and
-    reads the imported record only for its page and crop rect, so a wheel with
-    no page is left out of the segment (-1) and keeps the host texture.
+    (LUMP_CAR_WHEELS, type 200). The v1 header is the bank default (the first
+    car in declare.order). Each later car's clean/damaged/fast model is named
+    from the per-slot extension at that car's slot; -1 there means "use the
+    default". The engine keeps the host level's wheel MESH and reads the
+    imported record only for its page and crop rect, so a wheel with no page
+    is left out (-1 in the v1 header keeps the host texture).
 
 A car that declares fewer than the three variants a Driver 2 model needs gets a
 WARNING and has the missing ones filled with the CLEAN model. A Driver 2 model
@@ -56,6 +59,23 @@ VARIANTS = ("clean", "damaged", "low")
 # the wheel variants the ENGINE carries, in the order LUMP_CAR_WHEELS holds them
 # (models.c CAR_IMPORT_WHEEL_CLEAN / _DAMAGED / _FAST)
 WHEELS = bankjson.WHEEL_VARIANTS
+
+# Set ids this bake will assign. 0 is the engine's "no page" sentinel
+# (bake.PAGE_SET_BASE). A wheel texture_set must be >0 and <128. The
+# TextureInfo lump written here refuses a set >= 128 (generated_textureinfo),
+# so body pages share that range. Stated again on the report as
+# page_set_range.assumption — a higher body-page limit in the engine, if one
+# exists, is not visible from this repo and is not used.
+PAGE_SET_MIN = 1
+PAGE_SET_LIMIT = 128
+PAGE_SET_ASSUMPTION = (
+    "Free page sets are the lowest unused id in 1..127. "
+    "Set 0 is the engine's no-page sentinel and is never assigned. "
+    "A wheel texture_set must be >0 and <128 (models.c, as given to this bake). "
+    "generated_textureinfo refuses a set of 128 or above, so body pages use "
+    "that same 1..127 range. If the engine allows a body page above 127, "
+    "this bake does not: the TextureInfo lump written here cannot carry it."
+)
 
 
 def _warn(msg):
@@ -138,7 +158,7 @@ def _id_at(poly, rects):
 
 
 def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, colors=None,
-               flip_normals=False, flip_z=False, clut_plans=None):
+               flip_normals=False, flip_z=False, clut_plans=None, set_remap=None):
     """{variant: block bytes} for one declared car, plus the warnings it earned.
 
     A missing damaged or low is filled with the CLEAN model rather than left
@@ -163,12 +183,17 @@ def car_blocks(car, scale, default_page=None, flip_y=False, flip_winding=False, 
     # poly on the row its UV centroid landed in — id 13 stays 13 when that row
     # was built for it. Collapsing those ids onto 0 is what painted the lights
     # with the body palette.
-    rebaked = {t.set for t in car.textures}
+    # A colliding page set was given a free id (plan_page_sets). The OBJ still
+    # says the author's number; the bank's polys have to say the id the page
+    # was actually baked under, or the car draws someone else's art.
+    mapping = set_remap or {}
+    rebaked = {mapping.get(t.set, t.set) for t in car.textures}
     plans = clut_plans or {}
 
     for geom in geoms.values():
         for poly in geom["polys"]:
-            page_set = poly.get("set")
+            page_set = mapping.get(poly.get("set"), poly.get("set"))
+            poly["set"] = page_set
 
             if page_set not in rebaked:
                 continue
@@ -404,36 +429,31 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     name = bank.raw.get("city") or bank.name
     manifest = {"city": name, "bank_name": name, "pages": [], "raw": {}}
 
-    # Every DECLARED page has to exist in the manifest: the assembler carves a
-    # page only when something names it, so a declared-but-unlisted set is baked
-    # to disk and pruned straight back out ("1 sets").
-    # The manifest's pages[] is COMPUTED from the declaration's textures map:
-    # the images in the car json are the source of truth and the pages record is
-    # what they produced (its png is a preview, never an input).
-    for carname in bank.cars:
-        for texture in bank.cars[carname].textures:
-            if not any(p.get("set") == texture.set
-                       for p in (manifest.get("pages") or [])):
-                manifest.setdefault("pages", []).append({"set": texture.set})
-
-    # and a set the declaration no longer names stops being carried
-    declared = {texture.set for car in bank.cars.values()
-                for texture in car.textures}
-    manifest["pages"] = [p for p in (manifest.get("pages") or [])
-                         if p.get("set") in declared]
-
     warnings = []
+    # Colliding set numbers are moved here, before any page or model is
+    # written, so the file name, the poly's texture_set and the wheel model
+    # all use the id that won.
+    plan = plan_page_sets(bank, warnings)
+    manifest["page_set_remaps"] = plan.remaps
+    manifest["page_set_range"] = {"min": PAGE_SET_MIN,
+                                  "max": PAGE_SET_LIMIT - 1,
+                                  "assumption": plan.assumption}
+
+    # Every baked page has to exist in the manifest: the assembler carves a
+    # page only when something names it. The id is the one plan_page_sets
+    # assigned, which is the author's number when nothing collided.
+    manifest["pages"] = [{"set": job["set"]} for job in plan.pages]
 
     # ...and the declaration owns each page's BAKE, not just its image
     _sync_declared_pages(manifest, bank, gen_dir, warnings,
-                         out_dir=out_dir, force=force_pages)
+                         out_dir=out_dir, force=force_pages, plan=plan)
 
     # With palette_from_pages the pages ARE the palette, so the rows are rebuilt
     # from them after the page step. Without it a re-baked page silently keeps a
     # palette row chosen for the old colour set, and every texel on that index
     # paints the wrong colour - the stray-magenta / wrong-grey failure.
     if bank.palette_from_pages:
-        _sync_palette_from_pages(manifest, bank, gen_dir, warnings)
+        _sync_palette_from_pages(manifest, bank, gen_dir, warnings, plan=plan)
 
     # the DECLARATION owns the slot order
     manifest["bank_order"] = [{"slot": slot, "car": carname}
@@ -450,7 +470,8 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
             flip_normals, flip_z,
             clut_plans={p["set"]: p["clut_rects"]
                         for p in (manifest.get("pages") or [])
-                        if p.get("clut_rects")})
+                        if p.get("clut_rects")},
+            set_remap=plan.by_car.get(carname))
         warnings.extend(car_warnings)
 
         by_car[carname] = {"id": carname, "model": slot, "sets": [],
@@ -473,6 +494,12 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     for model in manifest["models"]:
         car = bank.cars[model["id"]]
         geom = _geom_for(car.clean, scale, default_page, flip_y, flip_winding, None, flip_z)
+        mapping = plan.by_car.get(model["id"]) or {}
+
+        for poly in geom["polys"]:
+            if poly.get("set") in mapping:
+                poly["set"] = mapping[poly["set"]]
+
         # an untextured flat poly (F3) samples no page; obj2geom parks it on
         # set 1, which a Driver 2 export does not carry
         model["sets"] = sorted({p["set"] for p in geom["polys"]
@@ -487,10 +514,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     for model in manifest["models"]:
         body_sets.update(model.get("sets") or [])
 
-    declared_sets = set()
-    for carname in bank.cars:
-        for texture in bank.cars[carname].textures:
-            declared_sets.add(texture.set)
+    declared_sets = {job["set"] for job in plan.pages}
 
     wheel_sets = set(declared_sets - body_sets)
 
@@ -516,18 +540,31 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("police_voices", None)
 
-    wheels = wheel_specs(bank, warnings)
+    wheels, wheels_by_slot = wheel_specs(bank, warnings, plan.by_car)
+    manifest["model_wheels"] = _model_wheels(bank, wheels_by_slot)
 
     if any(wheels):
         manifest["wheels"] = wheels
+        manifest["wheels_by_slot"] = [
+            [None if spec is None else {"variant": spec["variant"],
+                                       "set": spec["set"],
+                                       "island": list(spec["island"])}
+             for spec in row]
+            for row in wheels_by_slot]
     else:
         manifest.pop("wheels", None)
+        manifest.pop("wheels_by_slot", None)
 
     # the wheel pages are part of the bank's texture info whether or not a body
-    # poly samples them, so they are named here rather than inferred later
+    # poly samples them, so they are named here rather than inferred later.
+    # Every slot, not only the v1 default: a later car's page is not in `wheels`.
     wheel_sets.update(spec["set"] for spec in wheels if spec)
 
-    _wheel_transparency_warnings(wheels, gen_dir, warnings)
+    for row in wheels_by_slot:
+        wheel_sets.update(spec["set"] for spec in row if spec)
+
+    flat_wheels = [spec for row in wheels_by_slot for spec in row if spec]
+    _wheel_transparency_warnings(flat_wheels, gen_dir, warnings)
 
     if wheel_sets:
         manifest["wheel_sets"] = sorted(wheel_sets)
@@ -771,41 +808,288 @@ def _png_size(path):
     return struct.unpack(">II", head[16:24])
 
 
-def wheel_specs(bank, warnings):
-    """One entry per wheel variant the bank should carry, or None for -1.
+def _paint_key(paints):
+    """A hashable form of a page's paint list, for the page-identity key."""
+    out = []
 
-    The declaration is per car, but a bank carries ONE wheel set for the whole
-    import (the engine reads three variants, not one per model slot), so the
-    first car in slot order that declares wheels owns it and any other car's
-    wheels are reported rather than silently merged.
+    for name, spec in paints or []:
+        if isinstance(spec, dict):
+            rgb = spec.get("rgb")
+            panel = spec.get("panel")
+            out.append((str(name), spec.get("image"), spec.get("id"),
+                        tuple(panel) if panel else None,
+                        tuple(rgb) if rgb else None))
+        else:
+            out.append((str(name), spec))
+
+    return tuple(out)
+
+
+def _wheel_sprites_on(car, setid):
+    """Wheel sprites composited onto this car's page `setid`.
+
+    The same rule wheel_islands used to apply for the one bank-wide set:
+    a variant with no image or no island is not composited, and a later
+    variant on the same rect loses to the earlier one (clean before fast).
     """
-    specs = [None] * len(WHEELS)
+    sprites = []
 
+    for variant in WHEELS:
+        wheel = car.wheels.get(variant)
+
+        if wheel is None or wheel.set != setid or not wheel.path or \
+                wheel.island is None:
+            continue
+
+        sprites.append((variant, wheel.path,
+                        tuple(int(v) for v in wheel.island)))
+
+    kept = []
+    seen = set()
+
+    for variant, path, island in sprites:
+        if island in seen:
+            continue
+
+        seen.add(island)
+        kept.append((variant, path, island))
+
+    return kept
+
+
+def _page_signature(page, wheels):
+    """Identical declarations: same image, bake, paints, and wheel sprites.
+
+    The set id is not part of this. Two cars that name the same art under
+    different numbers are one page; two cars that reuse a number for
+    different art are not.
+    """
+    opts = page.bake_options()
+    palette = opts.get("palette")
+    image = os.path.normcase(os.path.normpath(page.image or ""))
+    wheel_key = tuple(
+        (variant, os.path.normcase(os.path.normpath(path)), tuple(island))
+        for variant, path, island in wheels)
+    opt_key = (
+        opts.get("transparent"),
+        opts.get("tolerance"),
+        opts.get("chroma"),
+        tuple(tuple(c) for c in palette) if palette else None,
+        tuple(tuple(c) for c in (opts.get("protect") or ())),
+        opts.get("split"),
+        opts.get("max_error"),
+        (tuple(tuple(c) for c in page.paint_body)
+         if getattr(page, "paint_body", None) else None),
+        (tuple(page.body_rows) if getattr(page, "body_rows", None) else None),
+        _paint_key(getattr(page, "paints", None)),
+    )
+    return (image, opt_key, wheel_key)
+
+
+def _car_sequence(bank):
+    """Cars in declare.order, then any car the order does not name."""
+    ordered = []
+    seen = set()
+
+    for _slot, name in bank.order:
+        if name in bank.cars and name not in seen:
+            ordered.append(name)
+            seen.add(name)
+
+    for name in bank.cars:
+        if name not in seen:
+            ordered.append(name)
+
+    return ordered
+
+
+def _alloc_set(occupied):
+    """Lowest free id in 1..127, or a hard stop when the range is full."""
+    for n in range(PAGE_SET_MIN, PAGE_SET_LIMIT):
+        if n not in occupied:
+            return n
+
+    raise SystemExit(
+        "bank: no free page set in %d..%d. %s"
+        % (PAGE_SET_MIN, PAGE_SET_LIMIT - 1, PAGE_SET_ASSUMPTION))
+
+
+class PagePlan(object):
+    """Where each declared page landed, and which sets moved.
+
+    by_car: {carname: {declared set: baked set}}
+    remaps: one entry per declaration whose baked id is not the one it named
+    pages: the pages to bake, one per distinct declaration, under the baked id
+    """
+
+    def __init__(self):
+        self.by_car = {}
+        self.remaps = []
+        self.pages = []
+        self.assumption = PAGE_SET_ASSUMPTION
+
+
+def plan_page_sets(bank, warnings=None):
+    """Assign a baked set id to every declared texture page.
+
+    The first car in declare.order keeps the number when it is free and inside
+    1..127. An identical declaration (see _page_signature) reuses that id. A
+    different declaration of a taken number, or a number outside 1..127, is
+    moved to the lowest free id. `warnings` gets one line per move, with the
+    old id and the new one. Models and wheels are rewritten from `by_car`.
+    """
+    if warnings is None:
+        warnings = []
+
+    plan = PagePlan()
+    assigned = {}
+    occupied = {}
+    pending = []
+    declared = []
+
+    for carname in _car_sequence(bank):
+        car = bank.cars[carname]
+
+        for page in car.textures:
+            wheels = _wheel_sprites_on(car, page.set)
+            sig = _page_signature(page, wheels)
+            declared.append((carname, page, sig, wheels))
+
+            if sig in assigned:
+                continue
+
+            in_range = PAGE_SET_MIN <= page.set < PAGE_SET_LIMIT
+
+            if in_range and page.set not in occupied:
+                occupied[page.set] = {"sig": sig, "car": carname,
+                                      "declared": page.set, "page": page,
+                                      "wheels": wheels}
+                assigned[sig] = page.set
+                continue
+
+            pending.append((carname, page, sig, wheels))
+
+    for carname, page, sig, wheels in pending:
+        if sig in assigned:
+            continue
+
+        new_id = _alloc_set(occupied)
+        occupied[new_id] = {"sig": sig, "car": carname, "declared": page.set,
+                            "page": page, "wheels": wheels}
+        assigned[sig] = new_id
+
+    for carname, page, sig, _wheels in declared:
+        new_id = assigned[sig]
+        plan.by_car.setdefault(carname, {})[page.set] = new_id
+
+        if new_id == page.set:
+            continue
+
+        claim = occupied[new_id]
+        is_claim = claim["car"] == carname and claim["declared"] == page.set
+        blocker = occupied.get(page.set)
+        # kept_by is who already owned the number this car had to leave,
+        # or, when the art matches an existing page, who that page belongs to.
+        if is_claim and blocker and blocker["car"] != carname:
+            kept_by = blocker["car"]
+        elif not is_claim:
+            kept_by = claim["car"]
+        else:
+            kept_by = None
+
+        plan.remaps.append({"car": carname, "from": page.set, "to": new_id,
+                            "kept_by": kept_by, "same": not is_claim})
+
+        if is_claim:
+            blocker = occupied.get(page.set)
+
+            if blocker and blocker["car"] != carname:
+                warnings.append(
+                    "%s and %s declare page set %d differently; remapped %s "
+                    "%d -> %d" % (blocker["car"], carname, page.set, carname,
+                                  page.set, new_id))
+            else:
+                warnings.append(
+                    "%s page set %d is outside 1..127; remapped %d -> %d"
+                    % (carname, page.set, page.set, new_id))
+        else:
+            warnings.append(
+                "%s page set %d matches %s; remapped %d -> %d"
+                % (carname, page.set, claim["car"], page.set, new_id))
+
+    plan.pages = [{"set": setid, "source_set": info["declared"],
+                   "owner": info["car"], "page": info["page"],
+                   "wheels": list(info["wheels"])}
+                  for setid, info in sorted(occupied.items())]
+    return plan
+
+
+def _model_wheels(bank, by_slot):
+    """Per declared car: the wheel page set each kind was baked with, or null."""
+    names = {slot: name for slot, name in bank.order}
+    out = []
+
+    for slot, specs in enumerate(by_slot):
+        if slot not in names:
+            continue
+
+        entry = {"slot": slot, "car": names[slot]}
+
+        for variant, spec in zip(WHEELS, specs):
+            entry[variant] = (None if spec is None else
+                              {"set": spec["set"],
+                               "island": list(spec["island"])})
+
+        out.append(entry)
+
+    return out
+
+
+def wheel_specs(bank, warnings, set_maps=None):
+    """(default, by_slot) wheel specs.
+
+    `default` is the v1 header: three entries (None = -1), from the first car
+    in declare.order that produces a wheel model. That is the set an old
+    engine uses for every car.
+
+    `by_slot` is 13 lists of those same three entries. A car's models land at
+    its declare.order slot. A car with no wheels, and a slot the bank does
+    not fill, is [None, None, None] — the extension writes -1, and the engine
+    uses the bank default for that kind. A set id outside 1..127 is not
+    written (the engine would reject the wheel). `set_maps` is the per-car
+    declared-set -> baked-set table from plan_page_sets.
+    """
+    set_maps = set_maps or {}
+    by_slot = [[None, None, None] for _ in range(exportd2.MAX_CAR_MODELS)]
+    default = None
     owner = None
 
-    for _slot, carname in bank.order:
+    for slot, carname in bank.order:
         car = bank.cars[carname]
-        declared = [(variant, car.wheels.get(variant)) for variant in WHEELS]
-        declared = [(variant, wheel) for variant, wheel in declared
-                    if wheel is not None]
+        mapping = set_maps.get(carname) or {}
+        specs = [None, None, None]
 
-        if not declared:
-            continue
+        for variant in WHEELS:
+            wheel = car.wheels.get(variant)
 
-        if owner is not None:
-            warnings.append(
-                "%s declares wheels too; a bank carries one wheel set for the "
-                "whole import, and %s's is already it" % (carname, owner))
-            continue
+            if wheel is None:
+                continue
 
-        owner = carname
-
-        for variant, wheel in declared:
             if wheel.set is None:
                 warnings.append(
-                    "%s: wheels.%s has an image but no page set, so the bank "
-                    "cannot name a page for it; that variant keeps the host "
-                    "level's wheel texture" % (carname, variant))
+                    "%s: wheels.%s has an image but no page set, so that "
+                    "variant is -1 (the bank default, or the host wheel when "
+                    "the default has none either)" % (carname, variant))
+                continue
+
+            setid = mapping.get(wheel.set, wheel.set)
+
+            if not (isinstance(setid, int) and
+                    PAGE_SET_MIN <= setid < PAGE_SET_LIMIT):
+                warnings.append(
+                    "%s: wheels.%s page set %s is outside 1..127, so that "
+                    "variant is left out of the segment"
+                    % (carname, variant, setid))
                 continue
 
             island = wheel.island
@@ -817,19 +1101,29 @@ def wheel_specs(bank, warnings):
                 continue
 
             specs[WHEELS.index(variant)] = {"variant": variant,
-                                            "set": wheel.set,
-                                            "island": list(island)}
+                                            "set": int(setid),
+                                            "island": [int(v) for v in island]}
 
-    if owner is not None:
-        absent = [variant for variant, spec in zip(WHEELS, specs)
+        if 0 <= slot < exportd2.MAX_CAR_MODELS:
+            by_slot[slot] = specs
+
+        if owner is None and any(specs):
+            owner = carname
+            default = list(specs)
+
+    if default is None:
+        default = [None] * len(WHEELS)
+    else:
+        absent = [variant for variant, spec in zip(WHEELS, default)
                   if spec is None]
+
         if absent:
             _warn("%s: the bank carries no %s wheel (offset -1), so the engine "
                   "keeps the host level's wheel for %s"
                   % (owner, "/".join(absent),
                      "it" if len(absent) == 1 else "them"))
 
-    return specs
+    return default, by_slot
 
 
 def _default_island(path, carname, variant, warnings):
@@ -871,11 +1165,17 @@ def _file_sha256(path):
         return None
 
 
-def _uv_islands(bank, setid):
+def _uv_islands(bank, setid, sources=None):
     """{texture id: [uv list, ...]} for every poly on this set, page texels.
 
     OBJ uvs are 0..1, v up. The engine's are 0..255, v down — the same conversion
     obj2geom uses, so a centroid tested later lands in the rect built here.
+
+    `sources` is {carname: set of material set ids} that were baked as
+    `setid`. After a remap the OBJ still says the author's number, so the
+    lookup is by that number and only on the cars whose page this is. Without
+    it, every poly whose material says `setid` is collected — which would mix
+    a car that kept set 1 with a car whose set 1 was moved elsewhere.
     """
     import obj2geom
 
@@ -886,11 +1186,17 @@ def _uv_islands(bank, setid):
         cache = {}
         _uv_islands._cache = cache
 
-    for car in bank.cars.values():
-        uses = any(t.set == setid for t in car.textures)
+    for carname, car in bank.cars.items():
+        if sources is not None:
+            want = sources.get(carname)
 
-        if not uses:
-            continue
+            if not want:
+                continue
+        else:
+            want = {setid}
+
+            if not any(t.set == setid for t in car.textures):
+                continue
 
         for path in (car.clean, car.damaged, car.low):
             if not path:
@@ -915,7 +1221,7 @@ def _uv_islands(bank, setid):
                 except ValueError:
                     continue
 
-                if page is None or page[0] != setid:
+                if page is None or page[0] not in want:
                     continue
 
                 pts = []
@@ -977,46 +1283,28 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
     return record
 
 
-def wheel_islands(bank):
-    """{set: [(variant, image path, island)]} for every declared wheel sprite.
+def wheel_islands(bank, plan=None):
+    """{baked set: [(variant, image path, island)]} composited onto that page.
 
-    The FIRST car in slot order owns the bank's wheels (see wheel_specs), so only
-    that car's sprites are composited; another car's would be reported by
-    wheel_specs and never reach the bank anyway.
+    Keyed by the id the page was baked under, not the number the author wrote,
+    so a remapped wheel page composites onto its own PAGE_<id>.bin. Identical
+    declarations share one list; a later car's different sprite is a different
+    page (plan_page_sets) and shows up under its own id.
     """
+    if plan is None:
+        plan = plan_page_sets(bank)
+
     islands = {}
-    owner = None
 
-    for _slot, carname in bank.order:
-        car = bank.cars[carname]
-        declared = [(v, car.wheels.get(v)) for v in WHEELS]
-        declared = [(v, w) for v, w in declared if w is not None]
-
-        if not declared:
-            continue
-
-        if owner is not None:
-            continue
-
-        owner = carname
-
-        for variant, wheel in declared:
-            if wheel.set is None or wheel.island is None or not wheel.path:
-                continue
-
-            # one island, one sprite: clean wins over fast on a shared rect
-            if any(list(i) == list(wheel.island)
-                   for _v, _p, i in islands.get(wheel.set, [])):
-                continue
-
-            islands.setdefault(wheel.set, []).append(
-                (variant, wheel.path, wheel.island))
+    for job in plan.pages:
+        if job["wheels"]:
+            islands[job["set"]] = list(job["wheels"])
 
     return islands
 
 
 def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
-                         force=False):
+                         force=False, plan=None):
     """Bake every declared page whose IMAGE, or whose bake options, changed.
 
     The bank bake used to read `pages/PAGE_<set>.bin` and nothing else, so a new
@@ -1028,30 +1316,26 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
     recorded last time. An unchanged declaration still produces identical bytes:
     nothing is rewritten when the hash and the options match.
     """
-    declared = {}
-    owner = {}
-
-    for carname in bank.cars:
-        for page in bank.cars[carname].textures:
-            first = declared.get(page.set)
-
-            if first is not None:
-                if first.bake_options() != page.bake_options():
-                    warnings.append(
-                        "%s and %s declare page set %d differently; %s wins"
-                        % (owner[page.set], carname, page.set, owner[page.set]))
-                continue
-
-            declared[page.set] = page
-            owner[page.set] = carname
+    if plan is None:
+        plan = plan_page_sets(bank, warnings)
 
     by_set = {p.get("set"): p for p in (manifest.get("pages") or [])}
-    islands = wheel_islands(bank)
 
-    for setid, page in sorted(declared.items()):
+    for job in plan.pages:
+        setid = job["set"]
+        page = job["page"]
+        sources = {}
+
+        for carname, mapping in plan.by_car.items():
+            olds = {old for old, new in mapping.items() if new == setid}
+
+            if olds:
+                sources[carname] = olds
+
         entry = by_set.setdefault(setid, {"set": setid})
-        uv_islands = _uv_islands(bank, setid)
-        source = _page_source_hash(page, setid, islands.get(setid), uv_islands)
+        uv_islands = _uv_islands(bank, setid, sources)
+        sprites = job["wheels"]
+        source = _page_source_hash(page, setid, sprites, uv_islands)
         want = os.path.join(bank_dir, "pages", "PAGE_%d.bin" % setid)
 
         if (not force and entry.get("source") == source
@@ -1084,8 +1368,6 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         # at the island is replaced by the declared sprite. Without this the
         # wheel came from the page image, so a stale pink square in the page
         # survived every rebake no matter what sprite was declared.
-        sprites = islands.get(setid) or []
-
         if sprites:
             mask = list(mask) if mask else [False] * len(pixels)
 
@@ -1370,25 +1652,25 @@ def check_sources(bank, manifest, bank_dir, stale_only=True, gen_dir=None):
     """What the bake would change: a stale page source, a stale palette."""
     problems = []
     gen_dir = gen_dir or bank_dir
-    islands = wheel_islands(bank)
+    plan = plan_page_sets(bank)
 
-    for carname in bank.cars:
-        for page in bank.cars[carname].textures:
-            record = next((p for p in (manifest.get("pages") or [])
-                           if p.get("set") == page.set), None)
-            want = os.path.join(gen_dir, "pages", "PAGE_%d.bin" % page.set)
-            source = _page_source_hash(page, page.set, islands.get(page.set))
+    for job in plan.pages:
+        page = job["page"]
+        setid = job["set"]
+        record = next((p for p in (manifest.get("pages") or [])
+                       if p.get("set") == setid), None)
+        want = os.path.join(gen_dir, "pages", "PAGE_%d.bin" % setid)
+        source = _page_source_hash(page, setid, job["wheels"])
 
-            if record is None:
-                problems.append("page set %d has no record in the manifest"
-                                % page.set)
-            elif record.get("source") != source:
-                problems.append("page set %d is STALE: %s (or its bake options) "
-                                "changed since it was baked"
-                                % (page.set, os.path.basename(page.image)))
-            elif not os.path.isfile(want):
-                problems.append("page set %d has no %s"
-                                % (page.set, os.path.basename(want)))
+        if record is None:
+            problems.append("page set %d has no record in the manifest" % setid)
+        elif record.get("source") != source:
+            problems.append("page set %d is STALE: %s (or its bake options) "
+                            "changed since it was baked"
+                            % (setid, os.path.basename(page.image)))
+        elif not os.path.isfile(want):
+            problems.append("page set %d has no %s"
+                            % (setid, os.path.basename(want)))
 
     # The palette the bank carries is what PAINTS the pages' indices. If a row
     # disagrees with the page it paints, every texel on that index draws someone
@@ -1470,18 +1752,41 @@ def _paints_of(bank):
     return out
 
 
-def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
+def _paints_of_plan(plan):
+    """Paints keyed by the BAKED set id, from the car that owns that page."""
+    out = {}
+
+    for job in plan.pages:
+        t = job["page"]
+        body_rows = getattr(t, "body_rows", None)
+
+        if getattr(t, "paints", None) or body_rows:
+            out[job["set"]] = {"paints": t.paints, "body": t.paint_body,
+                               "protect": list(t.protect or []),
+                               "body_rows": body_rows}
+
+    return out
+
+
+def _sync_palette_from_pages(manifest, bank, bank_dir, warnings, plan=None):
     """pallet.bin (and palette.json) from the pages' own row 0."""
     import carbank_palette
 
-    # the DECLARED pages, not every entry the manifest has accumulated: a stale
-    # page for a set this bank no longer carries must not add a palette row
-    sets = {texture.set for car in bank.cars.values()
-            for texture in car.textures}
+    # the pages that were actually baked. A remapped set lives at its new id,
+    # and the palette row has to use that id or the rewritten polys sample a
+    # row that was never written.
+    if plan is not None:
+        sets = {job["set"] for job in plan.pages}
+        paints = _paints_of_plan(plan)
+    else:
+        sets = {texture.set for car in bank.cars.values()
+                for texture in car.textures}
+        paints = _paints_of(bank)
+
     regions = {p["set"]: p.get("clut_rects") or []
                for p in (manifest.get("pages") or [])}
     notes = []
-    rows = carbank_palette.rows_from_pages(bank_dir, sets, _paints_of(bank),
+    rows = carbank_palette.rows_from_pages(bank_dir, sets, paints,
                                            regions, notes)
     warnings.extend(notes)
 
