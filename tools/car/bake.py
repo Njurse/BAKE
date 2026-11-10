@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """bake.py - bake pooled Driver 1 shapes into an engine-shaped car-data blob.
 
+Public command: pool-bake.py (this script is the bake step; d1pool.py extracts).
+
 Phase 5 of the d1cars roadmap. The blob is what carhacks' cross-city import
 already reads, so no new loader is needed (see docs/DRIVER1.md section 4).
 

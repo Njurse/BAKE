@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """jmpped.py - the pedestrian authoring CLI.
 
+Public command: ped-bake.py (same verbs, including ``bake``).
+
 The user-facing verbs are defined in NAMING.md:
 
     extract         Driver 2 level -> out/source/<level>/

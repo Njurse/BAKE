@@ -64,6 +64,13 @@ class AutoWire(unittest.TestCase):
         self.assertEqual([t.set for t in car.textures], [10, 13])
         self.assertTrue(car.textures[0].image.endswith("PAGE_10.png"))
 
+    def test_the_old_page_png_name_still_wires(self):
+        os.remove(os.path.join(self.dir, "textures", "PAGE_10.png"))
+        open(os.path.join(self.dir, "textures", "page10.png"), "wb").close()
+        car = self.car({"13": "textures/PAGE_13.png"})
+        self.assertEqual(car.textures[0].set, 10)
+        self.assertTrue(car.textures[0].image.endswith("page10.png"))
+
     def test_no_png_is_a_clear_error(self):
         os.remove(os.path.join(self.dir, "textures", "PAGE_10.png"))
         with self.assertRaises(bankjson.BankError) as cm:

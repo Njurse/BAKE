@@ -4,6 +4,14 @@ The offline pipeline: read the Driver 1 disc, extract the traffic shapes, bake
 them into an engine-shaped blob, and preview the result. Everything is read-only
 against the game data and runs from the repo root. `tools/car/out/` is gitignored.
 
+Public commands (the scripts below are the implementation and still run):
+
+| command | pipeline |
+| --- | --- |
+| `python tools/car/pool-bake.py` | Driver 1 pool. `--levels` runs `d1pool.py`. `--pool` or `--city` runs `bake.py` |
+| `python tools/car/d2-export.py` | Driver 2 export and `--rebuild-bank` (`exportd2.py`). `--model` / `--slot` / `--lev` runs `make_new_bank.py` |
+| `python tools/car/bank-bake.py` | declared bank (`carbank_bake.py`) |
+
 | tool | what it does |
 |---|---|
 | `lev1.py` | reads a Driver 1 `LEVELS/*.LEV` — `--lumps` the section table, `--names` the level-model names, `--models` every car-model variant, `--verify` its invariants |
@@ -141,7 +149,9 @@ python tools/car/exportd2.py DRIVER2DEMO/LEVELS/HAVANA.LEV \
 
 That writes `JERICHO/MODS/d2demo/HAVANA/` (`bank.json` with
 `donor.source` `driver2-demo`, `scale` 1, and `HAVANA_model0` for the cop).
-`rebake.bat` bakes at `--scale 1`. Do not pass `--obj-scale 0.68267`.
+`rebake.bat` bakes at `--scale 1`. `--obj-scale` is the old name for `--scale`
+(declare.scale). Do not pass `0.68267` for this car: that is the Driver 1
+bake multiplier and shrinks it.
 
 ## One-car banks: `make_new_bank.py`
 
@@ -180,6 +190,26 @@ firebird/rebake.bat
 
 `bank.json` is input only: the bake writes `build/NAME.report.json`, never the
 declaration.
+
+`rebake.bat`, `playtest.bat`, `preview.bat` and `wizard.bat` call
+`resolve_paths.bat` beside them to find the bake tools and the game. It keeps
+a baked-in path when that folder exists, otherwise walks up from the bank
+looking for `bake\tools\car` and for `src_rebuild\bin\Release_dev` (a bank that
+already lives under `Release_dev` resolves to that folder, not a second copy
+inside it), otherwise the environment:
+
+| variable | meaning |
+|---|---|
+| `JERICHO_BAKE` | the `bake\tools\car` folder (`make_write_scripts.py` is in it) |
+| `JERICHO_GAME` | the `src_rebuild\bin\Release_dev` folder (`JERICHO_dev.exe` is in it) |
+
+Missing tools stop the script and name `JERICHO_BAKE`. A missing game does not
+fail the bake: `rebake.bat` still writes `build\` and skips the mirror install
+and `cities.ini` registration, with a warning that names `JERICHO_GAME`.
+Wizard option 7 (`make_write_scripts.py --force`) keeps the bank's `MODE`,
+`carbank_bake` flags and preview flags unless `--mode`, `--args` or
+`--preview` is passed, then reopens the wizard so cmd is not still reading
+the file it just rewrote.
 
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.

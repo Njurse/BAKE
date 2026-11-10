@@ -36,6 +36,29 @@ class ScaleTests(unittest.TestCase):
         self.assertEqual(preview.infer_bake_scale((752, 284, 176)), 1.0)
         self.assertEqual(preview.infer_bake_scale((4.2, 1.5, 1.8)), 265.0)
 
+    def test_preview_car_keeps_bake_scale_as_an_alias(self):
+        with open(os.path.join(HERE, "preview_car.py"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn('"--scale"', text)
+        self.assertIn('"--bake-scale"', text)
+        self.assertIn("same_scale(a.scale, a.bake_scale)", text)
+
+    def test_cli_scale_is_declare_scale(self):
+        # --scale / --bake-scale win, then declare.scale, then the mesh guess.
+        self.assertEqual(preview.preview_bake_scale(1, 0.5, (1104, 400, 254)), 1)
+        self.assertEqual(preview.preview_bake_scale(None, 1, (1104, 400, 254)), 1)
+        self.assertAlmostEqual(
+            preview.preview_bake_scale(None, None, (1104, 400, 254)),
+            preview.BAKE_SCALE)
+
+    def test_uv_one_samples_the_last_texel_not_the_wrap(self):
+        # engine texel 255 is exported as 1.0. GL u=1 wraps to texel 0.
+        u, v = preview.gl_uv(1.0, 0.0, 256, 256)
+        self.assertAlmostEqual(u, 255.5 / 256.0)
+        self.assertAlmostEqual(v, 0.5 / 256.0)
+        mid, _ = preview.gl_uv(128 / 255.0, 0.0, 256, 256)
+        self.assertAlmostEqual(mid, 128.5 / 256.0, places=4)
+
     def test_unscaled_d1_draws_larger_than_the_d2_reference(self):
         d2 = preview.reference_span()
         d1 = preview.projected_span(

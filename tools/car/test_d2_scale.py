@@ -27,6 +27,38 @@ def _level(junction):
     return hdr + b"\x00" * 8 + struct.pack("<ii", junction, 0)
 
 
+class NameShimTests(unittest.TestCase):
+    def test_page_png_canonical_name_and_old_alias(self):
+        self.assertEqual(bankjson.page_png_name(7), "PAGE_7.png")
+        self.assertEqual(bankjson.page_png_aliases(7), ("PAGE_7.png", "page7.png"))
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        old = os.path.join(folder, "page7.png")
+        open(old, "wb").close()
+        self.assertEqual(bankjson.find_page_png(folder, 7), old)
+        new = os.path.join(folder, "PAGE_7.png")
+        open(new, "wb").close()
+        self.assertEqual(bankjson.find_page_png(folder, 7), new)
+
+    def test_scale_flags_are_one_multiplier(self):
+        self.assertIsNone(bankjson.same_scale(None, None))
+        self.assertEqual(bankjson.same_scale(1, None), 1.0)
+        self.assertEqual(bankjson.same_scale(None, 0.68267), 0.68267)
+        self.assertEqual(bankjson.same_scale(1, 1.0), 1.0)
+        with self.assertRaises(SystemExit):
+            bankjson.same_scale(1, 0.68267)
+
+    def test_help_lists_scale_and_the_old_name(self):
+        import subprocess
+        for script in ("carbank_bake.py", "exportd2.py"):
+            out = subprocess.check_output(
+                [sys.executable, os.path.join(HERE, script), "--help"],
+                text=True)
+            self.assertIn("--scale", out)
+            self.assertIn("--obj-scale", out)
+            self.assertIn("declare.scale", out)
+
+
 class SourceTests(unittest.TestCase):
     def test_junction_lump_42_is_the_demo(self):
         self.assertEqual(exportd2.source_kind(_level(exportd2.LUMP_JUNCTIONS2)),
@@ -42,6 +74,13 @@ class SourceTests(unittest.TestCase):
         # 2048/3000 is the Driver 1 ratio and is not this number.
         self.assertEqual(exportd2.D2_OBJ_SCALE, 1.0)
         self.assertNotAlmostEqual(exportd2.D2_OBJ_SCALE, 2048.0 / 3000.0)
+
+    def test_a_detail_region_uses_the_texture_id_as_its_clut_row(self):
+        regions = exportd2.detail_regions([
+            {"x": 0, "y": 0, "width": 60, "height": 60, "id": 0},
+            {"x": 64, "y": 8, "width": 16, "height": 16, "id": 13},
+        ])
+        self.assertEqual(regions, [(0, 0, 60, 60, 0), (64, 8, 16, 16, 13)])
 
     def test_slot_0_is_kept_when_the_level_has_a_cop(self):
         offsets = [(4, 10, 20)] + [(-1, -1, -1)] * 12

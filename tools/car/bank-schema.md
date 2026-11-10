@@ -295,7 +295,8 @@ the Driver 2 median (length 752) so an unscaled mesh (~1104) draws larger
 than the car the game shows.
 
 A Driver 2 export, retail or the Aug 2000 demo, is already in engine units.
-`exportd2` writes `declare.scale: 1` and `declare.donor.obj_scale: 1`. Measured
+`exportd2` writes `declare.scale: 1` unless `--scale` says otherwise
+(`--obj-scale` is the old name of that flag) and `declare.donor.obj_scale: 1`. Measured
 on HAVANA clean models, demo length / retail length is 1 (slot 0 both 750,
 slot 10 both 1386; both map headers are cell size 2048). Baking that OBJ at
 `2048/3000` is what makes it too small. `carbank_bake` with no `--scale` uses
@@ -334,7 +335,8 @@ wrong grey on a panel. Build the rows from the pages:
 `carbank_bake --check` refuses a bank whose palette disagrees with its pages, and
 `carbank_palette.py bank.json` (without `--from-pages`) writes `pallet.bin` from
 `palette.json`, so an edited colour reaches the bank by the same path the
-donor's rows did.
+donor's rows did. `pallet.bin` is the engine lump (`LUMP_PALLET`); `palette.json`
+is the author view of those same rows.
 
 ### `wheels`
 
@@ -372,7 +374,10 @@ wheel. Reusing one sprite for `damaged` is a legitimate placeholder
 
 The page's own pixels at the island are **replaced** by the declared sprite, and
 the sprite's own see-through texels (its alpha channel if it has one, else its
-top-left colour) are masked transparent. So:
+top-left colour) are masked transparent. A black top-left is tread, not a
+backdrop: that sprite keys magenta (`ff00ff`), the colour the page examples
+already use, so the tyre stays and a magenta cutout still drops out. Name
+`transparent` on the page when the backdrop is some other colour. So:
 
 - whatever the page art carried at that rectangle cannot reach the bank;
 - the declared sprite is the only thing that can end up in the wheel;
@@ -462,6 +467,8 @@ bank - and `cop` also sets `LUMP_CAR_SIRENS` (202). Both are verified the way
 `CarImportSoundEntry` reads them (count exactly 3, offsets and payloads inside
 the segment), because that reader answers a bad bank with "no sounds" and the car
 then plays the host city's engine without a word.
+
+`declare.police_voices` is optional: exactly 17 WAV paths, in phrase order (the 6 directions, then the 11 chatter lines). The bake writes them as `LUMP_POLICE_VOICES` (203), a complete replacement for the host city's cop phrase bank. `register_city.py --force-slot MODEL` points `carhacks.ini` at that bank's cop slot (`force_slot = 3:<city>:<MODEL>`).
 
 Byte budget: `sample_bytes` per sample (16 KiB) at `max_rate` (16000 Hz). This is
 not taste - `LoadSoundBankDynamic` writes the payload to a running SPU address

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """d1pool.py - build the Driver 1 traffic-car pool: extract, dedupe, emit.
 
+Public command: pool-bake.py (this script is the extract step; bake.py bakes).
+
 Phase 4 of the d1cars roadmap. Reads every Driver 1 LEVELS/*.LEV, decodes each
 level's car models (lev1.py), drops the non-car outliers, dedupes the shapes
 across levels, and writes one catalogue:

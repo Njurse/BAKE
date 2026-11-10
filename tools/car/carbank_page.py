@@ -17,8 +17,9 @@ colours) and a 16-entry RGB555 CLUT - and the tool reports the quantisation
 error, because "it baked" and "it looks right" are different claims.
 
 --transparent KEY marks the art's backdrop as transparent. The engine has no
-per-texel alpha: its marker is a CLUT entry of 0x0000, which is what a black
-texel reads as. So a sprite drawn on a pink (or any flat) backdrop bakes to an
+per-texel alpha: its marker is a CLUT entry of 0x0000. A black texel is not
+that marker. Pure black is stored as the darkest opaque shade (0x0421) unless
+it is the key. So a sprite drawn on a pink (or any flat) backdrop bakes to an
 OPAQUE square unless that backdrop's entry is cleared - every keyed texel is
 forced onto one palette index and that entry is written 0x0000 in every row.
 KEY is a hex colour (ff00ff), "auto" (the image's own top-left pixel) or
@@ -33,6 +34,7 @@ measurement behind "the greys survived".
 """
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -42,6 +44,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import fourbpp
 import pages1
+
+# Darkest RGB555 colour that is not the engine's transparent word. 0x0000 is
+# black AND the marker CarImportDeriveWheelPaletteRow treats as see-through, so
+# a tread texel that quantises to pure black is a hole. (8, 8, 8) encodes as
+# 0x0421. The keyed backdrop is the only entry written 0x0000.
+OPAQUE_BLACK = (8, 8, 8)
+
+# Wheel art in this tree is keyed on magenta (the flat backdrop behind the
+# sprite). A black corner is tread, not that backdrop.
+DEFAULT_KEY = (255, 0, 255)
 
 
 def _load_rgb(path):
@@ -221,6 +233,24 @@ def crush_report(pixels, indices, colours, background=None):
     return rows
 
 
+def _lift_black(colours, keep=()):
+    """(0, 0, 0) becomes the darkest opaque shade, except indices in `keep`.
+
+    `keep` is the keyed index: that slot is about to be written 0x0000. Every
+    other pure-black entry is tread or shadow and must not share that word.
+    """
+    keep = set(keep or ())
+    out = []
+
+    for i, colour in enumerate(colours):
+        if tuple(colour) == (0, 0, 0) and i not in keep:
+            out.append(OPAQUE_BLACK)
+        else:
+            out.append(tuple(colour))
+
+    return out
+
+
 def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
               palette=None, protect=None, protect_tolerance=0, chroma=None):
     """RGB texels -> (page blob, colours, indices, error, background).
@@ -340,10 +370,13 @@ def bake_page(pixels, npal_keep=1, key=None, tolerance=0, mask=None,
     raw = fourbpp.encode_indices(bytes(indices))
     # decomp_asm fills the buffer from the end, so the stream is the page reversed
     stream = fourbpp.encode_literal(raw[::-1])
+    # Pure black would encode as 0x0000 and the engine would drop those texels.
+    # Keep it for the key index only; that word is cleared below.
+    colours = _lift_black(colours, () if background is None else (background["index"],))
     row = bytearray(fourbpp.rgb_to_clut(colours[:fourbpp.CLUT_ROW_ENTRIES]))
 
     if background is not None:
-        # 0x0000: black, and the engine's transparent marker
+        # 0x0000: the engine's transparent marker. Only the keyed index.
         struct.pack_into("<H", row, background["index"] * 2, 0x0000)
 
     row = bytes(row)
@@ -895,8 +928,16 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
 
         if group["quantize"]:
             owned = [pixels[t] for t in texels]
-            side = max(1, int(len(owned) ** 0.5))
-            pad = side * side - len(owned)
+            # Ceiling of the square root, in integers. int(sqrt(n)) floors, and
+            # when n is not a square the pad is negative. [x] * negative is
+            # empty, so the grid stays longer than side*side and paletteize
+            # raises (CIVICOPS leftover: 59972 texels, 244*244 = 59536).
+            count = len(owned)
+            side = math.isqrt(count)
+            if side * side < count:
+                side += 1
+            side = max(1, side)
+            pad = side * side - count
             grid = owned + [owned[0]] * pad
             colours, local_idx = fourbpp.paletteize(grid, side, side)
 
@@ -1043,6 +1084,8 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
     body = bytearray()
 
     for tex_id, colours in enumerate(ordered):
+        # Same rule as bake_page: a black tread entry is not the key.
+        colours = _lift_black(colours, cleared.get(tex_id, ()))
         row = bytearray(fourbpp.rgb_to_clut(colours))
 
         for index in cleared.get(tex_id, ()):
@@ -1092,13 +1135,14 @@ def load_pixels(path):
         return img.size[0], img.size[1], pixels, alpha
 
 
-def sprite_mask(texels, alpha):
-    """Which sprite texels are see-through: alpha, else the top-left colour.
+def sprite_mask(texels, alpha, key=None, tolerance=8):
+    """Which sprite texels are see-through.
 
-    A wheel sprite is authored one of two ways and both have to work: an image
-    with a real alpha channel, or a flat backdrop colour in the corner. The
-    corner is the same convention `--transparent auto` uses for a page, so a
-    sprite behaves like a little page.
+    An alpha channel wins. Otherwise the page's declared key, or the sprite's
+    top-left colour — the same convention as `--transparent auto`. A black
+    corner is tread, not a backdrop: keying it punches the tyre. That sprite
+    keys magenta (`DEFAULT_KEY`, `ff00ff`) instead, which is the backdrop the
+    page tools already document. A declared black key still keys black.
     """
     if alpha is not None and any(a < 128 for a in alpha):
         return [a < 128 for a in alpha]
@@ -1106,8 +1150,14 @@ def sprite_mask(texels, alpha):
     if not texels:
         return []
 
-    key = texels[0]
-    return [max(abs(t[c] - key[c]) for c in range(3)) <= 8 for t in texels]
+    if key is None:
+        key = texels[0]
+
+        if max(key) <= 8:
+            key = DEFAULT_KEY
+
+    return [max(abs(int(t[c]) - int(key[c])) for c in range(3)) <= tolerance
+            for t in texels]
 
 
 def composite(pixels, width, height, sprite, sprite_w, sprite_h, island,
@@ -1177,6 +1227,248 @@ def _parse_key(text, pixels, alpha):
     return rgb, None
 
 
+TIM_MAGIC = 0x10
+
+
+def read_tim(data):
+    """A 4bpp PSX TIM -> (256x256 indices, [32-byte CLUT rows]), or None.
+
+    The CLUT words are kept as stored, STP bit included. A car page is 4bpp,
+    16 colours a row; extra CLUTs in the file are further rows of that page
+    (texture id i draws row i). A sprite smaller than 256x256 sits at the
+    origin. Anything that is not a 4bpp TIM, or that does not fit one page,
+    is None so the caller quantises the image instead.
+    """
+    if len(data) < 8:
+        return None
+
+    magic, flags = struct.unpack_from("<II", data, 0)
+
+    if magic != TIM_MAGIC or (flags & 7) != 0:
+        return None
+
+    offset = 8
+    rows = []
+
+    if flags & 8:
+        if offset + 12 > len(data):
+            return None
+
+        bnum, _x, _y, colours, count = struct.unpack_from("<IHHHH", data, offset)
+
+        if bnum < 12 or offset + bnum > len(data) or colours < 1 or count < 1:
+            return None
+
+        raw = data[offset + 12:offset + bnum]
+
+        for i in range(count):
+            chunk = raw[i * colours * 2:(i + 1) * colours * 2]
+            row = bytearray(fourbpp.CLUT_ROW_BYTES)
+            take = chunk[:fourbpp.CLUT_ROW_BYTES]
+            row[:len(take)] = take
+            rows.append(bytes(row))
+
+        offset += bnum
+
+    if offset + 12 > len(data):
+        return None
+
+    bnum, _x, _y, width_words, height = struct.unpack_from("<IHHHH", data, offset)
+
+    if (bnum < 12 or offset + bnum > len(data) or width_words < 1
+            or height < 1):
+        return None
+
+    pixel_w = width_words * 4
+
+    if pixel_w > fourbpp.PAGE_W or height > fourbpp.PAGE_H:
+        return None
+
+    packed = data[offset + 12:offset + bnum]
+    need = pixel_w * height // 2
+
+    if len(packed) < need:
+        return None
+
+    small = fourbpp.decode_indices(packed[:need], pixel_w, height)
+    indices = bytearray(fourbpp.PAGE_BYTES)
+
+    for y in range(height):
+        indices[y * fourbpp.PAGE_W:y * fourbpp.PAGE_W + pixel_w] = small[
+            y * pixel_w:(y + 1) * pixel_w]
+
+    if not rows:
+        rows = [fourbpp.rgb_to_clut([OPAQUE_BLACK] * fourbpp.CLUT_ROW_ENTRIES)]
+
+    return bytes(indices), rows
+
+
+def sibling_clut(path):
+    """`<image>.clut` of N*32 RGB555 bytes, the same file a portrait uses.
+
+    One row is the page palette. Further rows are the extra body CLUTs a
+    Driver 1 page already stores (texture id i). None when the file is absent
+    or not that size.
+    """
+    candidate = os.path.splitext(path)[0] + ".clut"
+
+    if not os.path.isfile(candidate):
+        return None
+
+    with open(candidate, "rb") as handle:
+        raw = handle.read()
+
+    if not raw or len(raw) % fourbpp.CLUT_ROW_BYTES or len(raw) > 32 * fourbpp.CLUT_ROW_BYTES:
+        return None
+
+    return [raw[i:i + fourbpp.CLUT_ROW_BYTES]
+            for i in range(0, len(raw), fourbpp.CLUT_ROW_BYTES)]
+
+
+def _indexed_png(path):
+    """A 256x256 mode-P image whose indices already fit in 4bpp.
+
+    The palette order is the CLUT order. Pure black is lifted to the opaque
+    shade unless a sibling `.clut` supplies the raw words (STP included).
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(path) as img:
+            if img.mode != "P" or img.size != (fourbpp.PAGE_W, fourbpp.PAGE_H):
+                return None
+
+            data = bytes(img.getdata())
+
+            if not data or max(data) > 15:
+                return None
+
+            palette = img.getpalette() or []
+    except Exception:
+        return None
+
+    colours = []
+
+    for i in range(fourbpp.CLUT_ROW_ENTRIES):
+        origin = i * 3
+
+        if origin + 2 < len(palette):
+            colours.append((palette[origin], palette[origin + 1],
+                            palette[origin + 2]))
+        else:
+            colours.append(OPAQUE_BLACK)
+
+    sibling = sibling_clut(path)
+
+    if sibling:
+        return data, sibling
+
+    return data, [fourbpp.rgb_to_clut(_lift_black(colours))]
+
+
+def load_embedded(path):
+    """(indices, CLUT rows) when the file already carries a 4bpp palette.
+
+    A TIM keeps its CLUT words. An indexed PNG keeps its index order. A
+    sibling `.clut` beside an ordinary image is the palette, and the texels
+    are matched onto it rather than quantised. None means "quantise".
+    An explicit `palette` on the declaration still wins; the caller skips
+    this when one is set.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+
+    tim = read_tim(data)
+
+    if tim:
+        return tim
+
+    indexed = _indexed_png(path)
+
+    if indexed:
+        return indexed
+
+    rows = sibling_clut(path)
+
+    if not rows:
+        return None
+
+    try:
+        pixels, _alpha = _load_rgb(path)
+    except SystemExit:
+        return None
+
+    indices = fourbpp.reindex_to_clut(pixels, fourbpp.clut_rgb(rows[0]))
+    return indices, rows
+
+
+def pixels_from_indices(indices, row):
+    """CLUT row 0 applied to a 4bpp index map, for keying and wheel paste."""
+    palette = fourbpp.clut_rgb(row)
+    return [palette[i & 0x0F] for i in indices]
+
+
+def bake_embedded(indices, rows, pixels, key=None, mask=None, tolerance=0,
+                  chroma=None):
+    """Pack a page whose CLUT is the file's own, not a fresh quantise.
+
+    Texels a wheel paste changed are matched back onto row 0. The keyed
+    index, when the backdrop really is in that row, is written 0x0000 in
+    every row. Every other word — including a black the author stored — is
+    kept, so a paint tint later recolours a copy and column 0 stays this
+    palette.
+    """
+    indices = bytearray(indices)
+    rows = [bytearray(r) for r in rows] or [
+        bytearray(fourbpp.rgb_to_clut([OPAQUE_BLACK] * fourbpp.CLUT_ROW_ENTRIES))]
+    clut = fourbpp.clut_rgb(rows[0])
+
+    for i, pixel in enumerate(pixels):
+        shown = clut[indices[i] & 0x0F]
+
+        if tuple(pixel) != tuple(shown):
+            indices[i] = fourbpp.nearest_clut_index(tuple(pixel), clut)
+
+    background = None
+
+    if mask is not None and any(mask):
+        votes = {}
+
+        for i, flagged in enumerate(mask):
+            if flagged:
+                votes[indices[i]] = votes.get(indices[i], 0) + 1
+
+        at = max(votes, key=lambda k: (votes[k], -k))
+
+        for i, flagged in enumerate(mask):
+            if flagged:
+                indices[i] = at
+
+        colour = fourbpp.clut_rgb(bytes(rows[0]))[at]
+
+        if key is None or _key_matches(colour, key, tolerance, chroma):
+            background = {"index": at, "folded": [],
+                          "keyed": sum(1 for flagged in mask if flagged),
+                          "stray": sum(1 for i, value in enumerate(indices)
+                                       if value == at and not mask[i]),
+                          "colour": colour}
+
+            for row in rows:
+                struct.pack_into("<H", row, at * 2, 0x0000)
+
+    raw = fourbpp.encode_indices(bytes(indices))
+    stream = fourbpp.encode_literal(raw[::-1])
+    blob = (struct.pack("<i", len(rows)) + b"".join(bytes(r) for r in rows)
+            + stream)
+    return blob, fourbpp.clut_rgb(rows[0]), bytes(indices), background
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("image", help="a 256x256 atlas (any mode)")
@@ -1187,9 +1479,11 @@ def main(argv=None):
                     help="make this colour transparent: a hex colour (ff00ff), "
                          "\"auto\" (the image's top-left pixel) or \"alpha\" "
                          "(the PNG's own alpha channel)")
-    ap.add_argument("--transparent-tolerance", type=int, default=0, metavar="N",
+    ap.add_argument("--transparent-tolerance", type=int, default=None, metavar="N",
                     help="per-channel slack when matching the colour, 0..255 "
-                         "(default 0 = exact; a soft/anti-aliased edge needs more)")
+                         "(default 96 when a key is given — the same default "
+                         "bank.json uses — and 0 when there is no key; pass 0 "
+                         "for the exact colour only)")
     ap.add_argument("--transparent-chroma", type=int, default=None, metavar="N",
                     help="key by COLOUR CAST instead of per-channel distance: a "
                          "texel whose (r-g, b-g) is within N of the backdrop's. "
@@ -1208,7 +1502,21 @@ def main(argv=None):
                     help="skip pages/PAGE_<set>.png")
     args = ap.parse_args(argv)
 
-    pixels, alpha = _load_rgb(args.image)
+    embedded = None if args.palette else load_embedded(args.image)
+    tolerance = args.transparent_tolerance
+
+    if tolerance is None:
+        import bankjson
+        tolerance = bankjson.DEFAULT_KEY_TOLERANCE if args.transparent else 0
+
+    if embedded:
+        indices0, clut_rows = embedded
+        pixels = pixels_from_indices(indices0, clut_rows[0])
+        alpha = None
+    else:
+        pixels, alpha = _load_rgb(args.image)
+        indices0 = None
+
     key, mask = _parse_key(args.transparent, pixels, alpha)
 
     def colours_of(text):
@@ -1217,11 +1525,17 @@ def main(argv=None):
     protect = colours_of(args.protect) if args.protect else []
     palette = colours_of(args.palette) if args.palette else None
 
-    blob, colours, indices, error, background = bake_page(
-        pixels, key=key, tolerance=args.transparent_tolerance, mask=mask,
-        palette=palette, protect=protect,
-        protect_tolerance=args.protect_tolerance,
-        chroma=args.transparent_chroma)
+    if indices0 is not None and palette is None:
+        blob, colours, indices, background = bake_embedded(
+            indices0, clut_rows, pixels, key=key, mask=mask,
+            tolerance=tolerance, chroma=args.transparent_chroma)
+        error = (0.0, 0)
+    else:
+        blob, colours, indices, error, background = bake_page(
+            pixels, key=key, tolerance=tolerance, mask=mask,
+            palette=palette, protect=protect,
+            protect_tolerance=args.protect_tolerance,
+            chroma=args.transparent_chroma)
 
     path = write_page(os.path.abspath(args.bank), args.set, blob, indices,
                       colours, preview=not args.no_preview)

@@ -91,6 +91,12 @@ PAGE_TEXELS = 256
 
 MAX_SLOT = 12
 
+# The stock cop phrase bank is 6 directional samples + 11 chatter samples
+# (VOICES2.BLK lumps 29/34/39 + a variant). A bank that overrides it must carry
+# exactly this many samples, in phrase order, or the hardcoded CopSay indices
+# would land on the wrong line.
+POLICE_VOICE_COUNT = 17
+
 
 class BankError(Exception):
     """A bank.json that cannot be used, with the file and field named."""
@@ -134,6 +140,62 @@ def _check_keys(where, field, obj, allowed, what):
             _fail(where, field + "." + str(key),
                   "unknown %s key (allowed: %s)"
                   % (what, ", ".join(sorted(allowed))))
+
+
+def page_png_name(setid):
+    """Canonical page image: ``PAGE_<set>.png``."""
+    return "PAGE_%d.png" % int(setid)
+
+
+def page_png_aliases(setid):
+    """Canonical name, then the older ``page<set>.png`` export name.
+
+    ``carbank_export`` used to write ``page<set>.png``. New exports write
+    ``PAGE_<set>.png``. A tree that still has the old file is read by the
+    second name.
+    """
+    n = int(setid)
+    return ("PAGE_%d.png" % n, "page%d.png" % n)
+
+
+def find_page_png(directory, setid):
+    """The page image on disk for this set, canonical name first.
+
+    Returns the file that exists, or the canonical path when neither does.
+    """
+    names = page_png_aliases(setid)
+
+    for name in names:
+        path = os.path.join(directory, name)
+
+        if os.path.isfile(path):
+            return path
+
+    return os.path.join(directory, names[0])
+
+
+def same_scale(scale, *old):
+    """``--scale`` and its old names are one bake multiplier (``declare.scale``).
+
+    ``None`` means that flag was not passed. Two different numbers is an error:
+    ``--scale``, ``--bake-scale`` and ``--obj-scale`` are the same knob.
+    """
+    chosen = scale
+
+    for value in old:
+        if value is None:
+            continue
+
+        if chosen is None:
+            chosen = value
+            continue
+
+        if float(value) != float(chosen):
+            raise SystemExit(
+                "--scale %s and %s are the bake multiplier (declare.scale) "
+                "and they disagree" % (chosen, value))
+
+    return None if chosen is None else float(chosen)
 
 
 def _bake_scale(where, field, value):
@@ -335,7 +397,13 @@ class Car(object):
                             used.add(page)
 
         for page in sorted(used - have):
-            for rel in ("textures/PAGE_%d.png" % page, "PAGE_%d.png" % page):
+            rels = []
+
+            for folder in ("textures", ""):
+                for name in page_png_aliases(page):
+                    rels.append(name if not folder else "%s/%s" % (folder, name))
+
+            for rel in rels:
                 if os.path.isfile(os.path.join(self.base, rel)):
                     self.textures.append(Texture(where, page, {"png": rel},
                                                  self._file))
@@ -343,9 +411,10 @@ class Car(object):
             else:
                 _fail(where, "textures.%d" % page,
                       "a material is named PAGE_%d but there is no "
-                      "textures/PAGE_%d.png and no textures.%d entry - add "
+                      "textures/PAGE_%d.png (page%d.png is the old name) and "
+                      "no textures.%d entry - add "
                       "\"textures\": {\"%d\": \"textures/<your png>\"}"
-                      % (page, page, page, page))
+                      % (page, page, page, page, page))
 
         self.textures.sort(key=lambda t: t.set)
 
@@ -855,7 +924,8 @@ class Bank(object):
 
         _check_keys(where, "declare", decl,
                     {"schema", "name", "donor", "order", "cars",
-                     "palette_from_pages", "clut_rows", "scale"}, "declare")
+                     "palette_from_pages", "clut_rows", "scale",
+                     "police_voices"}, "declare")
 
         if "scale" in decl:
             self.obj_scale = _bake_scale(where, "declare.scale", decl.get("scale"))
@@ -966,6 +1036,36 @@ class Bank(object):
 
             self.order.append((slot, carname))
 
+        # Police radio chatter: a complete replacement phrase bank in phrase
+        # order (the 6 directions, then the 11 chatter lines). The engine loads
+        # it in place of the host city's cop phrase banks when the forced police
+        # car comes from this bank, so the count has to match exactly.
+        voices = decl.get("police_voices")
+        self.police_voices = []
+
+        if voices is not None:
+            if not isinstance(voices, list):
+                _fail(where, "declare.police_voices",
+                      "must be a list of %d WAV paths" % POLICE_VOICE_COUNT)
+
+            if len(voices) != POLICE_VOICE_COUNT:
+                _fail(where, "declare.police_voices",
+                      "%d paths; the stock cop phrase bank has %d samples"
+                      % (len(voices), POLICE_VOICE_COUNT))
+
+            for i, rel in enumerate(voices):
+                if not isinstance(rel, str) or not rel.strip():
+                    _fail(where, "declare.police_voices[%d]" % i,
+                          "must be a WAV path")
+
+                path = rel if os.path.isabs(rel) else os.path.join(self.base, rel)
+
+                if not os.path.isfile(path):
+                    _fail(where, "declare.police_voices[%d]" % i,
+                          "%s does not exist" % rel)
+
+                self.police_voices.append(os.path.normpath(path))
+
 
 def dumps_compact(obj, width=100, _ind=0):
     """JSON that stays readable: a value that fits on one line (<= width) is
@@ -1010,7 +1110,7 @@ def _write_portrait_raw(path, pages):
 
 
 def install_portraits(bank, out_dir, stem):
-    """Copy declared portraits beside the LEV the game opens.
+    """Bake declared portraits beside the LEV the game opens.
 
     Writes two products from the same pages. Neither is a lump inside the LEV.
 

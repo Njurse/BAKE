@@ -63,10 +63,44 @@ def projected_span(points):
     return max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
 
 
+def gl_uv(u, v, width, height):
+    """OBJ 0..1 → the OpenGL coordinate at the centre of that texel.
+
+    Export writes engine texel n as n/(size-1), so 0 is the first texel and
+    1 is the last. Feeding that straight to GL puts texel 0 on the left edge
+    and texel size-1 on the wrap edge (u=1 samples texel 0 under GL_REPEAT),
+    and every texel in between is n/(size-1) of a pixel off. The centre of
+    texel n is (n+0.5)/size.
+    """
+    if width > 1:
+        u = (float(u) * (width - 1) + 0.5) / float(width)
+
+    if height > 1:
+        v = (float(v) * (height - 1) + 0.5) / float(height)
+
+    return u, v
+
+
 def reference_span(project=None):
     """Projected span of the Driver 2 median car under `project` (default camera)."""
     project = project or _project
     return projected_span([project(v) for v in median_box_corners()])
+
+
+def preview_bake_scale(cli_scale, declared, extents, col_box=None):
+    """OBJ units to engine units for the authoring preview.
+
+    ``cli_scale`` is ``--scale`` (``--bake-scale`` is the old name of that
+    flag). ``declared`` is ``declare.scale``. Both are the bake multiplier.
+    With neither, guess from the mesh the way ``infer_bake_scale`` does.
+    """
+    if cli_scale is not None:
+        return float(cli_scale)
+
+    if declared is not None:
+        return float(declared)
+
+    return infer_bake_scale(extents, col_box)
 
 
 def infer_bake_scale(extents, col_box=None):

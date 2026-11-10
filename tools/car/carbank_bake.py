@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """carbank_bake.py - bake an edited bank back into a Driver 2-shaped .LEV.
 
+Public command: bank-bake.py (same arguments).
+
     python carbank_bake.py banks/firebird/bank.json -o banks/firebird/newbank
     python carbank_bake.py banks/firebird/bank.json -o ... --variants clean,damaged
 
@@ -505,6 +507,15 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("sounds", None)
 
+    # Police radio chatter: bankjson resolved the 17 declared WAV paths against
+    # the bank folder; exportd2.build_bank encodes them into LUMP_POLICE_VOICES.
+    voices = list(getattr(bank, "police_voices", []) or [])
+
+    if voices:
+        manifest["police_voices"] = voices
+    else:
+        manifest.pop("police_voices", None)
+
     wheels = wheel_specs(bank, warnings)
 
     if any(wheels):
@@ -934,7 +945,10 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
               "tolerance": page.transparent_tolerance,
               "chroma": page.transparent_chroma,
               "split": getattr(page, "split", "auto"),
-              "max_error": getattr(page, "max_error", None)}
+              "max_error": getattr(page, "max_error", None),
+              # non-key black stays opaque (0x0421). Bumping this rebakes
+              # pages that were quantised when black was the transparent word.
+              "opaque_black": 1}
 
     if sprites:
         record["wheels"] = [{"variant": variant,
@@ -1050,7 +1064,20 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                             "on disk" % (setid, page.image))
             continue
 
-        pixels, alpha = carbank_page._load_rgb(page.image)
+        # A TIM, an indexed PNG, or a sibling .clut already has the author's
+        # palette. Quantising would replace it. An explicit `palette` list
+        # is the author overriding that file, so it still quantises onto
+        # those 16 colours.
+        embedded = None if page.palette else carbank_page.load_embedded(page.image)
+
+        if embedded:
+            indices0, clut_rows = embedded
+            pixels = carbank_page.pixels_from_indices(indices0, clut_rows[0])
+            alpha = None
+        else:
+            pixels, alpha = carbank_page._load_rgb(page.image)
+            indices0 = None
+
         key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
 
         # A wheel island is CARVED, not inherited: whatever the page art carried
@@ -1064,7 +1091,14 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
             for variant, sprite_path, island in sprites:
                 sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
-                transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+                # A named colour keys the sprite too. "auto" is the PAGE's
+                # top-left, which is often body paint, so a sprite keeps its
+                # own corner (black meaning magenta, not tread).
+                named = page.transparent
+                sprite_key = key if (isinstance(named, str)
+                                     and named not in ("auto", "alpha")) else None
+                transparent = carbank_page.sprite_mask(
+                    sprite, sprite_alpha, sprite_key)
                 masked = carbank_page.composite(
                     pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
                     island, transparent, key if key is not None else sprite[0])
@@ -1079,11 +1113,23 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
         pieces = None
         background = None
-        use_split = (not page.palette and carbank_page.should_split(
+        use_split = (indices0 is None and not page.palette
+                     and carbank_page.should_split(
             pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
             getattr(page, "split", "auto"), getattr(page, "max_error", None)))
 
-        if use_split:
+        if indices0 is not None:
+            blob, colours, indices, background = carbank_page.bake_embedded(
+                indices0, clut_rows, pixels, key=key, mask=mask,
+                tolerance=page.transparent_tolerance,
+                chroma=page.transparent_chroma)
+            entry.pop("clut_rects", None)
+            ncluts = len(clut_rows)
+            warnings.append(
+                "page set %d: kept the palette embedded in %s (%d CLUT row%s)"
+                % (setid, os.path.basename(page.image), ncluts,
+                   "" if ncluts == 1 else "s"))
+        elif use_split:
             indices, row_map, pieces = carbank_page.plan_islands(
                 pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
                 split=True)
@@ -1119,7 +1165,15 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         # one turns the keyed backdrop back into paint.
         try:
             rows, _raw = pages1.read_page(blob, 0, len(blob))
-            keyed = {background["index"]} if background else set()
+            # 0x0000 is the key we just wrote (non-key black was lifted to
+            # 0x0421). A TIM that stored 0x0000 keeps that word, and the
+            # preview should show it see-through, which is what the engine does.
+            keyed = set()
+
+            for row in rows:
+                for index in range(min(16, len(row) // 2)):
+                    if struct.unpack_from("<H", row, index * 2)[0] == 0:
+                        keyed.add(index)
             regions = None
 
             if pieces:
@@ -1894,9 +1948,14 @@ def main(argv=None):
                                         "(default: the bank's build_dir, or the "
                                         "bank folder in the flat layout)")
     ap.add_argument("--scale", type=float, default=None,
-                    help="OBJ to engine units. Default: declare.scale if the "
-                         "bank names one, else 0.68267 (Driver 1, 2048/3000). "
-                         "A Driver 2 export sets declare.scale 1")
+                    help="OBJ to engine units (declare.scale). Default: "
+                         "declare.scale if the bank names one, else 0.68267 "
+                         "(Driver 1, 2048/3000). A Driver 2 export sets "
+                         "declare.scale 1")
+    ap.add_argument("--bake-scale", type=float, default=None,
+                    help="old name for --scale")
+    ap.add_argument("--obj-scale", type=float, default=None,
+                    help="old name for --scale (declare.scale)")
     ap.add_argument("--default-page", metavar="SET:ID", default=None,
                     help="page for an OBJ whose materials are not set<S>_id<T> "
                          "(an author export); without it they are refused")
@@ -1951,7 +2010,9 @@ def main(argv=None):
     if not args.out:
         args.out = bank_layout(bankjson.load(args.bank))[1]
 
-    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out), args.scale,
+    ok, warnings = bake_bank(args.bank, os.path.abspath(args.out),
+                             bankjson.same_scale(args.scale, args.bake_scale,
+                                                 args.obj_scale),
                              default_page=default_page,
                              flip_y=args.flip_y, flip_winding=args.flip_winding,
                              flip_normals=args.flip_normals, flip_z=args.flip_z,

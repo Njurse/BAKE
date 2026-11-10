@@ -10,6 +10,7 @@ Run from this directory:
     python -m unittest test_carbank_page -v
 """
 
+import math
 import os
 import struct
 import sys
@@ -200,7 +201,12 @@ class PaletteControlTests(unittest.TestCase):
         blob, colours, indices, error, _b = carbank_page.bake_page(
             pixels, palette=palette)
 
-        self.assertEqual([tuple(c) for c in colours], palette)
+        # Pure black is not kept verbatim: it would be stored as 0x0000 and
+        # the engine would drop those texels. Every other colour is.
+        self.assertEqual([tuple(c) for c in colours],
+                         carbank_page._lift_black(palette))
+        row = pages1.read_page(blob, 0, len(blob))[0][0]
+        self.assertNotEqual(struct.unpack_from("<H", row, 0)[0], 0)
         self.assertEqual(len(set(indices)), len(set(indices)))
         self.assertGreater(error[1], 0, "this palette cannot match the art")
 
@@ -212,6 +218,170 @@ class PaletteControlTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows, sorted(rows, key=lambda r: (-r["error"], -r["texels"])))
         self.assertIn("source", rows[0])
+
+
+class LeftoverQuantizeTests(unittest.TestCase):
+    """A leftover sprite that does not fit in 16 colours is quantised on a
+    square grid. The side must be the ceiling of the square root: flooring it
+    makes the pad negative, and a negative pad drops the padding so paletteize
+    sees more pixels than side*side (CIVICOPS: 59972 vs 244*244)."""
+
+    def _cols(self, n):
+        cols = [fourbpp.snap555((i * 15, 20 + i * 11, 220 - i * 9)) for i in range(n)]
+        self.assertEqual(len(set(cols)), n)
+        return cols
+
+    def _run(self, count):
+        cols = self._cols(count)
+        width = 32
+        height = (count // width) + 2
+        pixels = [(8, 8, 8)] * (width * height)
+        texels = list(range(count))
+
+        for n, t in enumerate(texels):
+            pixels[t] = cols[n % len(cols)]
+
+        indices = bytearray(len(pixels))
+        rows = {}
+        pieces = carbank_page._paginate_leftovers(
+            indices, pixels, width, height,
+            [{"texels": texels, "cols": cols}], rows, 1)
+        return indices, rows, pieces, texels
+
+    def test_a_non_square_leftover_quantises_without_raising(self):
+        # 17 is not a square: int(sqrt(17)) == 4 and 4*4 == 16 < 17.
+        count = 17
+        self.assertNotEqual(int(count ** 0.5) ** 2, count)
+        indices, rows, pieces, texels = self._run(count)
+
+        self.assertEqual(len(pieces), 1)
+        self.assertEqual(len(rows[1]), fourbpp.CLUT_ROW_ENTRIES)
+
+        for t in texels:
+            self.assertGreaterEqual(indices[t], 0)
+            self.assertLess(indices[t], fourbpp.CLUT_ROW_ENTRIES)
+
+    def test_the_civicops_count_needs_a_larger_square_than_the_floor(self):
+        # The reported blob. Do not quantise it; pin the side the packer uses.
+        count = 59972
+        side = math.isqrt(count)
+        self.assertEqual(side * side, 59536)
+        self.assertLess(side * side, count)
+        if side * side < count:
+            side += 1
+        self.assertEqual(side, 245)
+        self.assertGreaterEqual(side * side, count)
+
+
+class BlackTreadTests(unittest.TestCase):
+    """Black rubber stays opaque. Only the keyed backdrop is 0x0000."""
+
+    def test_black_texels_are_not_the_transparent_word(self):
+        pixels = []
+
+        for y in range(fourbpp.PAGE_H):
+            for x in range(fourbpp.PAGE_W):
+                if x < 32 and y < 32:
+                    pixels.append((0, 0, 0))          # tread
+                elif x < 48 and y < 48:
+                    pixels.append((40, 40, 48))       # sidewall
+                else:
+                    pixels.append(MAGENTA)            # cutout
+
+        blob, colours, indices, _e, background = carbank_page.bake_page(
+            pixels, key=MAGENTA, tolerance=8)
+        rows, _raw = pages1.read_page(blob, 0, len(blob))
+        tread = indices[0]
+        cutout = indices[fourbpp.PAGE_W * 60]
+        self.assertEqual(background["index"], cutout)
+        self.assertEqual(struct.unpack_from("<H", rows[0], cutout * 2)[0], 0)
+        self.assertNotEqual(tread, cutout)
+        self.assertNotEqual(struct.unpack_from("<H", rows[0], tread * 2)[0], 0)
+        self.assertEqual(tuple(colours[tread]), carbank_page.OPAQUE_BLACK)
+
+    def test_a_black_sprite_corner_does_not_key_the_tread(self):
+        # 4 texels: black corner, black tread, magenta cutout, grey hub
+        texels = [(0, 0, 0), (0, 0, 0), MAGENTA, (90, 90, 90)]
+        mask = carbank_page.sprite_mask(texels, None)
+
+        self.assertEqual(mask, [False, False, True, False])
+
+    def test_a_declared_black_key_still_keys_black(self):
+        texels = [(0, 0, 0), (0, 0, 0), MAGENTA]
+        mask = carbank_page.sprite_mask(texels, None, key=(0, 0, 0), tolerance=0)
+
+        self.assertEqual(mask, [True, True, False])
+
+    def test_an_alpha_cutout_is_independent_of_black(self):
+        texels = [(0, 0, 0), (0, 0, 0), MAGENTA]
+        mask = carbank_page.sprite_mask(texels, [255, 255, 0])
+
+        self.assertEqual(mask, [False, False, True])
+
+
+def _tim(indices, rows, width=16, height=4):
+    """A 4bpp TIM. `indices` is width*height bytes, each 0..15."""
+    words = width // 4
+    packed = fourbpp.encode_indices(bytes(indices), width, height)
+    clut = b"".join(rows)
+    clut_block = struct.pack("<IHHHH", 12 + len(clut), 0, 0, 16, len(rows)) + clut
+    image_block = struct.pack("<IHHHH", 12 + len(packed), 0, 0, words, height) + packed
+    return struct.pack("<II", carbank_page.TIM_MAGIC, 8) + clut_block + image_block
+
+
+class EmbeddedPaletteTests(unittest.TestCase):
+    """A TIM's CLUT is the page palette. A paint tint copies it; it does not
+    replace the row the mesh draws as column 0."""
+
+    def test_a_tim_round_trips_its_clut_and_indices(self):
+        rubber = struct.pack("<H", fourbpp.rgb555((8, 8, 8)))
+        body = struct.pack("<H", fourbpp.rgb555((40, 80, 200)) | 0x8000)
+        row = rubber + body + b"\x00" * 28
+        indices = bytes([0, 1] * 32)  # 16x4
+        got = carbank_page.read_tim(_tim(indices, [row]))
+
+        self.assertIsNotNone(got)
+        page_idx, rows = got
+        self.assertEqual(page_idx[0], 0)
+        self.assertEqual(page_idx[1], 1)
+        self.assertEqual(page_idx[256], 0)          # padded rows stay index 0
+        self.assertEqual(rows[0][:4], rubber + body)
+        # STP on the body entry survived
+        self.assertEqual(struct.unpack_from("<H", rows[0], 2)[0] & 0x8000, 0x8000)
+
+    def test_a_paint_tint_does_not_replace_the_tim_row(self):
+        import os
+        import tempfile
+
+        import carbank_palette
+
+        rubber = struct.pack("<H", fourbpp.rgb555((16, 16, 16)))
+        body = struct.pack("<H", fourbpp.rgb555((40, 80, 200)))
+        row = rubber + body + b"\x00" * 28
+        indices = bytes([1] * 64)
+        full, clut_rows = carbank_page.read_tim(_tim(indices, [row]))
+        pixels = carbank_page.pixels_from_indices(full, clut_rows[0])
+        blob, _colours, _idx, background = carbank_page.bake_embedded(
+            full, clut_rows, pixels)
+        self.assertIsNone(background)
+        stored, _raw = pages1.read_page(blob, 0, len(blob))
+        self.assertEqual(stored[0], clut_rows[0])
+
+        folder = tempfile.mkdtemp()
+        os.makedirs(os.path.join(folder, "pages"))
+
+        with open(os.path.join(folder, "pages", "PAGE_2.bin"), "wb") as handle:
+            handle.write(blob)
+
+        paints = {2: {"paints": [("red", {"rgb": (200, 20, 20)})],
+                     "body": None, "protect": []}}
+        emitted = carbank_palette.rows_from_pages(folder, {2}, paints)
+        self.assertTrue(emitted)
+        self.assertEqual(emitted[0]["palette"], 0)   # lump column 1, not column 0
+        self.assertNotEqual(emitted[0]["clut"], stored[0])
+        # the page row itself is still the TIM
+        again, _ = pages1.read_page(blob, 0, len(blob))
+        self.assertEqual(again[0], clut_rows[0])
 
 
 if __name__ == "__main__":

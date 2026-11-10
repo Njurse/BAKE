@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """exportd2.py - export Driver 2 cars and everything needed to rebuild them.
 
+Public command: d2-export.py (same arguments, including --rebuild-bank).
+
 This is the Driver 2 car suite.  It reads one D2 ``LEVELS/*.LEV`` (or a directory
 of them), writes editable assets and a self-contained source package, and builds
 a carhacks-loadable car-data bank (``<CITY>.LEV`` + ``<CITY>.LCF``).
@@ -97,6 +99,11 @@ LUMP_CAR_WHEELS = 200
 # straight to LoadSoundBankDynamic; SIRENS is 13 cop flags.
 LUMP_CAR_SOUNDS = 201
 LUMP_CAR_SIRENS = 202
+# JERICHO: a complete replacement cop-phrase bank (6 directions + 11 chatter
+# lines). Standard dynamic-bank body, so gamesnd can LoadSoundBankDynamic it
+# into SOUND_BANK_VOICES in place of the host city's phrase banks.
+LUMP_POLICE_VOICES = 203
+POLICE_VOICE_COUNT = 17
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
@@ -588,6 +595,17 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
+def detail_regions(details):
+    """(x, y, w, h, clut_row) for page_png.
+
+    The row is the detail's texture id. That is the CLUT row the engine
+    draws it with (`texture_cluts[set][id]`). Numbering the details
+    0, 1, 2… paints id 13 with row 1, which is the wrong colour.
+    """
+    return [(d["x"], d["y"], d["width"], d["height"], d["id"])
+            for d in details]
+
+
 def page_png(path, rows, idx, transparent=None, regions=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
@@ -878,17 +896,19 @@ def find_lcf(lev_path):
 # ---------------------------------------------------------------------------
 # one city
 # ---------------------------------------------------------------------------
-def write_rebake(city_dir, name, donor_city="CHICAGO"):
+def write_rebake(city_dir, name, donor_city="CHICAGO", scale=1):
     """rebake.bat next to bank.json, only if missing - rendered from the
     canonical tools/car/template_rebake.bat (see make_write_scripts.py)."""
     import make_write_scripts
-    # exportd2 OBJs are in engine units: bake at 1:1 (the bake's default
-    # 0.68267 is the D1->D2 cell ratio and shrinks the car)
-    return make_write_scripts.write(city_dir, name, donor_city, args="--scale 1")
+    # exportd2 OBJs are in engine units. scale is declare.scale, the bake
+    # multiplier (1 for a Driver 2 export). 2048/3000 shrinks the car.
+    return make_write_scripts.write(city_dir, name, donor_city,
+                                    args="--scale %s" % scale)
 
 
 def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
-                    extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE):
+                    extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE,
+                    bake_scale=1):
     """bank.json with a `declare` block shaped like banks/firebird/bank.json:
     every car points at its OBJs, PNG pages (+ recovered paints/protect),
     WAVs, and the first car in order owns the bank's one wheel set."""
@@ -972,13 +992,14 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
             "name": name,
             # a label for people: which city the car came from. The bake
             # reads no file of it.
-            # scale is the bake multiplier. The OBJ is already in engine units
-            # (obj_scale was applied at export; 1 for demo and retail D2).
-            # Leaving this unset makes carbank_bake use 2048/3000 and shrink
-            # the car. The bake does not read donor.
+            # scale is the bake multiplier (--scale / declare.scale). The OBJ
+            # is already in engine units for demo and retail D2, so this is 1
+            # unless the export was given another multiplier. donor.obj_scale
+            # is the factor already applied to the OBJ vertices (1 when the
+            # OBJ was not pre-shrunk). The bake does not read donor.
             "donor": {"city": city, "source": source or "driver2",
                       "obj_scale": obj_scale},
-            "scale": 1,
+            "scale": bake_scale,
             "order": bank_order,
             # pages are re-baked to ONE CLUT each, so the bank's palette rows
             # must come from those pages (as banks/firebird does); the source's
@@ -992,7 +1013,7 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
 
 def export_one(lev_path, out_root, models_filter, variants, make_bank,
                dir_name=None, bank_name=None, slot_override=None,
-               obj_scale=None):
+               obj_scale=None, bake_scale=None):
     with open(lev_path, "rb") as f:
         blob = f.read()
     kind = level_game(blob)
@@ -1017,10 +1038,14 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                              % (dest_slot, MAX_CAR_MODELS - 1))
 
     # Demo and retail D2 cars are already engine-sized (D2_OBJ_SCALE). A caller
-    # can pass another factor; it is applied once, here, so the bake stays at 1.
+    # can still pre-multiply the OBJ (obj_scale); the bake multiplier is
+    # bake_scale, written as declare.scale. The CLI --scale / --obj-scale
+    # flags set bake_scale and leave the OBJ at 1.
     kind_name = source_kind(blob)
     if obj_scale is None:
         obj_scale = D2_OBJ_SCALE
+    if bake_scale is None:
+        bake_scale = 1
 
     city = os.path.splitext(os.path.basename(lev_path))[0].upper()
     # ONE name for the bank: its folder, build/<NAME>.LEV/.LCF, the manifest,
@@ -1170,8 +1195,7 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
                     exist_ok=True)
         page_dets = [d for pi, d in details if pi == s]
         page_png(os.path.join(city_dir, png_rel), rows, idx,
-                 regions=[(d["x"], d["y"], d["width"], d["height"], i)
-                          for i, d in enumerate(page_dets)])
+                 regions=detail_regions(page_dets))
         with open(os.path.join(raw_dir, "pages", "PAGE_%d.bin" % s), "wb") as f:
             f.write(blob[off:off + size])
         page_json.append({
@@ -1329,17 +1353,18 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         assets.write_handling(city_dir, cars, cos_records, cosmetics_fields)
     _write_json(manifest_path, manifest)   # warnings may have grown
 
-    write_rebake(city_dir, name, city)
+    write_rebake(city_dir, name, city, bake_scale)
     write_bank_json(city_dir, city, cars, included_sets, bank_order,
                     os.path.basename(lev_path), extras, name=name,
-                    source=kind_name, obj_scale=obj_scale)
+                    source=kind_name, obj_scale=obj_scale,
+                    bake_scale=bake_scale)
 
     # The bank is baked the way every rebake bakes it: generatively, from
     # bank.json + cars/ alone (carbank_bake). Then the scratch goes.
     if make_bank:
         import carbank_bake
         ok, _bake_warnings = carbank_bake.bake_bank(
-            os.path.join(city_dir, "bank.json"), bank_dir, scale=1)
+            os.path.join(city_dir, "bank.json"), bank_dir, scale=bake_scale)
         manifest["bank"] = {"lev": os.path.join(bank_dir, name + ".LEV"),
                             "lcf": os.path.join(bank_dir, name + ".LCF")}
         if not ok:
@@ -1358,8 +1383,8 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         print("  model 0 (cop): exported")
     else:
         print("  model 0 (cop): empty in this level (clean offset -1)")
-    print("  source: %s  obj scale: %s  bake scale: 1"
-          % (kind_name, obj_scale))
+    print("  source: %s  obj scale: %s  bake scale: %s"
+          % (kind_name, obj_scale, bake_scale))
     for w in warnings:
         print("  warning: %s" % w)
     if make_bank:
@@ -1816,6 +1841,76 @@ def _load_sounds(manifest):
     return specs
 
 
+def build_police_voices_body(paths, warnings):
+    """LUMP_POLICE_VOICES: a complete replacement cop-phrase bank.
+
+    The body is the standard Driver 2 dynamic-bank shape: int num_samples, one
+    16-byte SAMPLE_DATA per sample, then the VAG payload with payload-relative
+    addresses. gamesnd hands it straight to LoadSoundBankDynamic into
+    SOUND_BANK_VOICES, so the samples must stay in phrase order: 6 directions,
+    then the 11 chatter lines.
+    """
+    if not paths:
+        return None
+
+    if len(paths) != POLICE_VOICE_COUNT:
+        raise SystemExit("bank: police_voices has %d paths; the stock cop "
+                         "phrase bank has %d samples"
+                         % (len(paths), POLICE_VOICE_COUNT))
+
+    samples = []
+
+    for i, path in enumerate(paths):
+        spec = {
+            "wav": path,
+            "loop": False,
+            "rate": None,
+            "rate_pct": 100,
+            "pitch": 1.0,
+            "level": 0.999,
+            "rms": 0.34,
+            "normalise": True,
+            "gain_db": 0.0,
+            "trim": None,
+            "fade_out": 0.0,
+            "max_rate": SOUND_MAX_RATE,
+            "sample_bytes": SOUND_SAMPLE_BYTES,
+        }
+        sample = _sound_sample(spec, warnings, "police voice %d" % (i + 1))
+
+        if sample is None:
+            raise SystemExit("bank: police_voices[%d] could not be encoded: %s"
+                             % (i, path))
+
+        samples.append(sample)
+
+    body = bytearray(struct.pack("<i", len(samples)))
+    payload = bytearray()
+
+    for sample in samples:
+        body += struct.pack("<IIII", len(payload), len(sample["data"]),
+                            0, sample["rate_field"])
+        payload += sample["data"]
+
+        while len(payload) % 4:
+            payload.append(0)
+
+    body += payload
+    warnings.append("police voices: %d samples, %d bytes"
+                    % (len(samples), sum(len(s["data"]) for s in samples)))
+    return bytes(body)
+
+
+def _load_police_voices(manifest):
+    """The manifest's `police_voices` list, or [] when the bank declares none."""
+    paths = manifest.get("police_voices") or []
+
+    if not isinstance(paths, list):
+        raise SystemExit("bank: `police_voices` must be a list of WAV paths")
+
+    return paths
+
+
 def _load_wheels(manifest):
     """The manifest's `wheels` list, normalised to one entry per variant.
 
@@ -1865,7 +1960,8 @@ def _load_wheels(manifest):
 
 def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
-                  wheels_body=None, sounds_body=None, sirens_body=None):
+                  wheels_body=None, sounds_body=None, sirens_body=None,
+                  police_voices_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -1881,6 +1977,8 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
         add(LUMP_CAR_SOUNDS, sounds_body)
     if sirens_body:
         add(LUMP_CAR_SIRENS, sirens_body)
+    if police_voices_body:
+        add(LUMP_POLICE_VOICES, police_voices_body)
     add(LUMP_TEXTUREINFO, texinfo_body)
     add(LUMP_PALLET, pallet_body)
     if texture_names_body:
@@ -2102,10 +2200,13 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     sound_specs = _load_sounds(manifest)
     sounds_body, sirens = build_sounds_body(sound_specs, warnings)
     sirens_body = build_sirens_body(sirens)
+    police_voices_body = build_police_voices_body(
+        _load_police_voices(manifest), warnings)
 
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
-                              wheels_body, sounds_body, sirens_body)
+                              wheels_body, sounds_body, sirens_body,
+                              police_voices_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -2130,6 +2231,9 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
                                      for spec in (sound_specs.get("models") or [])),
                                     key=lambda m: (m is None, m)),
                    "sirens": sirens} if sounds_body else {},
+        "police_voices": ({"samples": struct.unpack_from("<i", police_voices_body, 0)[0],
+                           "bytes": len(police_voices_body)}
+                          if police_voices_body else {}),
         "palette_records": palette_records,
         "page_base": d2_page_base(bank_blob),
         "warnings": warnings,
@@ -2137,6 +2241,11 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
                                    sound_specs)
+    voice_problems = verify_police_voices(lev_path)
+
+    if voice_problems:
+        report["checks"]["problems"].extend(voice_problems)
+        report["checks"]["ok"] = False
     # bank.json is the AUTHOR'S input (the declaration) and the bake must never
     # write it: when out_dir is the bank folder itself, the old name overwrote
     # a hand-written declaration with this computed report. Everything the bake
@@ -2385,6 +2494,30 @@ def verify_sounds(blob, specs):
     return problems
 
 
+def verify_police_voices(lev_path):
+    """The optional police voices segment must hold the stock phrase count."""
+    with open(lev_path, "rb") as f:
+        blob = f.read()
+
+    got = d2_lump(blob, LUMP_POLICE_VOICES)
+
+    if got is None:
+        return []
+
+    body, size = got
+
+    if size < 4:
+        return ["police voices: segment is too short"]
+
+    count = struct.unpack_from("<i", blob, body)[0]
+
+    if count != POLICE_VOICE_COUNT:
+        return ["police voices: %d samples, expected %d"
+                % (count, POLICE_VOICE_COUNT)]
+
+    return []
+
+
 def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
                 wheel_specs=None, sound_specs=None):
     problems = []
@@ -2623,12 +2756,14 @@ def main(argv=None):
                     help="model slots to export (default 0-12). Slot 0 is the "
                          "cop and is exported when the level has one; do not "
                          "drop it as unused")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="bake multiplier, written as declare.scale. Default "
+                         "1: demo and retail Driver 2 cars are already in "
+                         "engine units (do not pass 2048/3000, that shrinks "
+                         "them at bake time)")
     ap.add_argument("--obj-scale", type=float, default=None,
-                    help="multiply exported OBJ vertices by this. Default 1: "
-                         "demo and retail Driver 2 HAVANA cars already match "
-                         "(do not pass 2048/3000, that is the Driver 1 ratio "
-                         "and shrinks these cars). The bake then uses "
-                         "declare.scale 1")
+                    help="old name for --scale (declare.scale, the bake "
+                         "multiplier). It does not pre-shrink the OBJ")
     ap.add_argument("--variants", default="clean,damaged,low",
                     help="variants to export (default: clean,damaged,low)")
     ap.add_argument("--no-bank", action="store_true",
@@ -2648,6 +2783,7 @@ def main(argv=None):
 
     if args.selftest:
         return selftest()
+    bake_scale = bankjson.same_scale(args.scale, args.obj_scale)
     if args.rebuild_bank:
         return rebuild_cli(args.rebuild_bank, args.out, args.city, args.order)
     if not args.path:
@@ -2674,7 +2810,7 @@ def main(argv=None):
             try:
                 entry = export_one(path, out_root, models_filter, variants,
                                    not args.no_bank, bank_name=args.name,
-                                   obj_scale=args.obj_scale)
+                                   bake_scale=bake_scale)
             except SystemExit as e:
                 print("skip %s: %s" % (os.path.basename(path), e))
                 continue
@@ -2688,7 +2824,7 @@ def main(argv=None):
             try:
                 entry = export_one(path, out_root, {m}, variants,
                                    not args.no_bank, dir_name=name,
-                                   obj_scale=args.obj_scale)
+                                   bake_scale=bake_scale)
             except SystemExit as e:
                 print("skip %s model %d: %s" % (os.path.basename(path), m, e))
                 entry = None
