@@ -29,7 +29,9 @@ set "OUT=%BANK%\build"
 set "LOG=%OUT%\rebake.log"
 set "EXEDIR=@EXEDIR@"
 set "MIRROR=@MIRROR@"
-if not exist "%CAR%\carbank_bake.py" (echo FAILED: no bake tools at %CAR% & exit /b 1)
+call "%~dp0resolve_paths.bat" game
+if "%CAR_MISSING%"=="1" exit /b 1
+if not exist "%CAR%\carbank_bake.py" (echo FAILED: no bake tools at %CAR% & echo   Set JERICHO_BAKE to the bake\tools\car folder. & exit /b 1)
 if not exist "%OUT%" mkdir "%OUT%"
 if exist "%OUT%\@NAME@.LEV" del /q "%OUT%\@NAME@.LEV"
 if exist "%OUT%\@NAME@.LCF" del /q "%OUT%\@NAME@.LCF"
@@ -50,6 +52,10 @@ if exist "%OUT%\@NAME@.RAW" (
 )
 if exist "%OUT%\@NAME@.portraits\" (
     xcopy /E /I /Y "%OUT%\@NAME@.portraits" "%BANK%\@NAME@.portraits\" >nul
+)
+if "%GAME_MISSING%"=="1" (
+    echo   baked to %OUT% - game tree not found, skipped install and city registration
+    exit /b 0
 )
 if not "%MIRROR%"=="" (
     if not exist "%MIRROR%" mkdir "%MIRROR%"
@@ -97,7 +103,11 @@ if "%PICKC%"=="2" set "CITY=havana"
 if "%PICKC%"=="3" set "CITY=lasvegas"
 if "%PICKC%"=="4" set "CITY=rio"
 if "%CITY%"=="" (echo   exit - not launching. & exit /b 0)
-if not exist "%EXEDIR%\JERICHO_dev.exe" (echo FAILED: no game at %EXEDIR% & exit /b 1)
+if not exist "%EXEDIR%\JERICHO_dev.exe" (
+    echo   warning: no JERICHO_dev.exe at %EXEDIR% - bake is in %OUT%, not launching
+    echo   Set JERICHO_GAME to the Release_dev folder that contains JERICHO_dev.exe.
+    exit /b 0
+)
 rem point carhacks.ini's import at the picked car: resident slot 5 = this bank
 python "%CAR%\register_city.py" @NAME@ "%MIRROR%\@NAME@.LEV" "%EXEDIR%" --use !PSLOT!
 echo   launching Take a Ride in %CITY% with @NAME@ !PCAR!...

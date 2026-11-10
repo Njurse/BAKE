@@ -12,7 +12,11 @@ setlocal EnableDelayedExpansion
 set "BANK=%~dp0"
 set "BANK=%BANK:~0,-1%"
 set "CAR=@TOOLS@"
-if not exist "%CAR%\preview_car.py" (echo FAILED: no preview_car.py at %CAR% & exit /b 1)
+set "EXEDIR="
+set "MIRROR="
+call "%~dp0resolve_paths.bat"
+if "%CAR_MISSING%"=="1" exit /b 1
+if not exist "%CAR%\preview_car.py" (echo FAILED: no preview_car.py at %CAR% & echo   Set JERICHO_BAKE to the bake\tools\car folder. & exit /b 1)
 :pick
 set /a N=0
 echo.

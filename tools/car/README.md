@@ -191,6 +191,26 @@ firebird/rebake.bat
 `bank.json` is input only: the bake writes `build/NAME.report.json`, never the
 declaration.
 
+`rebake.bat`, `playtest.bat`, `preview.bat` and `wizard.bat` call
+`resolve_paths.bat` beside them to find the bake tools and the game. It keeps
+a baked-in path when that folder exists, otherwise walks up from the bank
+looking for `bake\tools\car` and for `src_rebuild\bin\Release_dev` (a bank that
+already lives under `Release_dev` resolves to that folder, not a second copy
+inside it), otherwise the environment:
+
+| variable | meaning |
+|---|---|
+| `JERICHO_BAKE` | the `bake\tools\car` folder (`make_write_scripts.py` is in it) |
+| `JERICHO_GAME` | the `src_rebuild\bin\Release_dev` folder (`JERICHO_dev.exe` is in it) |
+
+Missing tools stop the script and name `JERICHO_BAKE`. A missing game does not
+fail the bake: `rebake.bat` still writes `build\` and skips the mirror install
+and `cities.ini` registration, with a warning that names `JERICHO_GAME`.
+Wizard option 7 (`make_write_scripts.py --force`) keeps the bank's `MODE`,
+`carbank_bake` flags and preview flags unless `--mode`, `--args` or
+`--preview` is passed, then reopens the wizard so cmd is not still reading
+the file it just rewrote.
+
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.
 
