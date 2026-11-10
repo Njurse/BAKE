@@ -160,12 +160,15 @@ VARIANT_NAMES = {"CLEANWHEEL": "clean", "DAMWHEEL": "damaged",
 
 
 def _wheel_records(blob):
-    """{variant: {set, island}} for the wheels the bank carries, or {}.
+    """{variant: {set, island}} for the bank-default wheels, or {}.
 
     A bank with a LUMP_CAR_WHEELS segment says exactly what a declaration needs
-    to carry it again: the page (poly 2's texture_set) and the crop rect (poly
-    2's UVs). Writing the declaration WITHOUT that would drop the segment on the
-    next bake, because a wheel image alone cannot name a page.
+    to carry the default again: the page (poly 2's texture_set) and the crop
+    rect (poly 2's UVs). This is the v1 header. Per-car wheels live in the
+    WHLX extension after those blocks (exportd2.parse_wheel_extension); this
+    reader still returns the default, which an exported declaration gives to
+    the first car. Writing the declaration WITHOUT the page would drop the
+    segment on the next bake, because a wheel image alone cannot name a page.
     """
     body, size = bake._data1_segment(blob, bake.LUMP_CAR_WHEELS)
 
