@@ -187,27 +187,35 @@ class PoliceVoicesTests(unittest.TestCase):
         self.assertEqual(count, len(EXPECTED_SLOTS))
 
         bank1 = add_car_sounds.read_d1_voices(self.voices, 1)
-        decoded = []
+        sources = []
         for addr, length, _loop, rate in bank1["entries"]:
-            decoded.append((vag.decode(bank1["vag"][addr:addr + length]),
-                            int(rate)))
-        clips = []
-        for index, cut in EXPECTED_SLOTS:
-            samples, rate = decoded[index]
-            if cut:
-                samples = vag.trim(samples, 0.0, 1.34, rate)
-            clips.append((samples, rate))
-        expected = exportd2.build_police_voices_pcm(clips, [])
-        self.assertEqual(body, expected)
+            block = bank1["vag"][addr:addr + length]
+            block = block[:len(block) // 16 * 16]
+            sources.append((block, int(rate)))
 
         # Identical phrases share one payload address. 12 distinct sources.
+        # Every slot keeps the source rate. Nothing is resampled to 16000.
         unique = {}
-        for addr, length, loop, _rate in entries:
+        for i, (addr, length, loop, rate) in enumerate(entries):
+            index, cut = EXPECTED_SLOTS[i]
+            src, src_rate = sources[index]
             self.assertEqual(loop, 0)
+            self.assertEqual(rate, src_rate)
+            self.assertEqual(rate, 11025)
             self.assertEqual(addr % 16, 0)
             self.assertEqual(length % 16, 0)
             self.assertGreater(length, 0)
             self.assertLessEqual(addr + length, len(payload))
+            got = payload[addr:addr + length]
+            if cut:
+                blocks = int(round(1.34 * src_rate / vag.SAMPLES_PER_BLOCK))
+                self.assertEqual(length, blocks * 16)
+                self.assertLess(length, len(src))
+                self.assertEqual(got[:-16], src[:length - 16])
+                self.assertEqual(got[-16], src[length - 16])
+                self.assertEqual(got[-14:], src[length - 14:length])
+            else:
+                self.assertEqual(got, src)
             unique[addr] = length
         self.assertEqual(len(unique), 12)
         self.assertEqual(len(payload), sum(unique.values()))
@@ -243,6 +251,9 @@ class PoliceVoicesTests(unittest.TestCase):
         self.assertEqual(exportd2.verify_police_voices(out), [])
         print("police voices lump %d bytes" % len(body))
 
+        types = [typ for typ, _b, _s in exportd2.d2_segments(baked)]
+        self.assertEqual(types.count(exportd2.LUMP_CAR_SOUNDS), 1)
+
         again = os.path.join(self.dir, "AGAIN.LEV")
         add_car_sounds.main(
             ["--lev", out, "--voices", self.sbk, "--horns", self.horns,
@@ -250,7 +261,9 @@ class PoliceVoicesTests(unittest.TestCase):
         with open(again, "rb") as f:
             rerun = f.read()
         types = [typ for typ, _body, _size in exportd2.d2_segments(rerun)]
+        self.assertEqual(types.count(exportd2.LUMP_CAR_SOUNDS), 1)
         self.assertEqual(types.count(exportd2.LUMP_POLICE_VOICES), 1)
+        self.assertEqual(rerun, baked)
         self.assertEqual(_lump_body(rerun, exportd2.LUMP_POLICE_VOICES), body)
         self.assertEqual(exportd2.verify_police_voices(again), [])
         self.assertEqual(_lump_body(rerun, exportd2.LUMP_CAR_MODELS),
@@ -274,7 +287,16 @@ class PoliceVoicesTests(unittest.TestCase):
         self.assertEqual(baked, expected)
         self.assertEqual(hashlib.sha256(baked).hexdigest(), SOUND_ONLY_SHA256)
         self.assertIsNone(exportd2.d2_lump(baked, exportd2.LUMP_POLICE_VOICES))
+        self.assertEqual(
+            [typ for typ, _b, _s in exportd2.d2_segments(baked)
+             ].count(exportd2.LUMP_CAR_SOUNDS), 1)
         self.assertTrue(baked.endswith(b"PAGES"))
+
+        twice = os.path.join(self.dir, "SOUNDS2.LEV")
+        add_car_sounds.main(
+            ["--lev", out, "--voices", self.voices, "--out", twice])
+        with open(twice, "rb") as f:
+            self.assertEqual(f.read(), baked)
 
     def test_the_flag_requires_its_own_voices_path(self):
         with self.assertRaises(SystemExit):

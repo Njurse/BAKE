@@ -222,9 +222,11 @@ LEV from bank 0 of `--voices`. `--police-voices VOICES.BLK` also bakes
 slots in Driver 2 order (north, east, south, west, then the chatter lines).
 The path is separate from `--voices`, so a beta car bank can take
 `SOUND.SBK` for the engine while the cop lines still come from Driver 1
-`VOICES.BLK`. Identical slots share one 16-byte-aligned payload copy; the
-1.34 s pursuit cut is its own copy, with its own VAG end flag. Running it
-again replaces lump 203.
+`VOICES.BLK`. Each phrase keeps its source VAG blocks and its own rate
+(11025 Hz on the retail bank). Identical slots share one 16-byte-aligned
+payload copy. The pursuit line's cut is the whole blocks nearest 1.34 s,
+its own copy, with the VAG end flag on the last block. Running the command
+again replaces lump 201 and lump 203.
 
 ```sh
 python tools/car/add_car_sounds.py --lev CAR.LEV \

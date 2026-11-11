@@ -74,7 +74,10 @@ SAMPLE_GAIN = 1.0
 
 # VOICES.BLK bank 1 is the cop radio: 11 samples at 11025 Hz. Driver 2's
 # phrase bank is 17 slots and its heading order is north, east, south, west.
-# s5cut is sample 5 kept to its first 1.34 s ("We are now in pursuit.").
+# s5cut is sample 5 kept to the VAG block boundary nearest 1.34 s
+# ("We are now in pursuit."). Playback stops on the end flag, so that cut
+# is its own copy of those blocks with the flag set on the last one.
+# The directory rate stays each sample's own rate (11025 on the retail bank).
 POLICE_BANK = 1
 POLICE_BANK_SAMPLES = 11
 POLICE_CUT_SECONDS = 1.34
@@ -428,7 +431,13 @@ def _split_data1_body(body):
     return parts, body[off:]
 
 
-def insert_sound_segment(blob, sound_body):
+def _replace_data1_segment(blob, lump_type, segment_body):
+    """Append one DATA1 segment, replacing every existing segment of that type.
+
+    A second run of the same lump finds the old one on the FindLumpSegment
+    walk and writes a single copy in its place, so the finished LEV does not
+    grow a duplicate.
+    """
     parsed = find_data1(blob)
     if parsed is None:
         raise SystemExit("not a synthetic LEV: no DATA1 table")
@@ -439,9 +448,19 @@ def insert_sound_segment(blob, sound_body):
         raise SystemExit("bad DATA1 header size %d" % body_size)
 
     old_body = blob[data1_off + 8:data1_off + body_size]
-    seg = struct.pack("<ii", LUMP_CAR_SOUNDS, len(sound_body)) + sound_body
+    parts, tail = _split_data1_body(old_body)
+    kept = b"".join(raw for typ, raw in parts if typ != lump_type)
+    seg = struct.pack("<ii", lump_type, len(segment_body)) + segment_body
     seg += b"\x00" * ((4 - len(seg) % 4) % 4)
-    return _splice_data1(blob, data1_off, data1_size, bytes(old_body) + seg)
+    new_body = kept + seg
+    if len(tail) >= 8:
+        new_body += tail
+    return _splice_data1(blob, data1_off, data1_size, new_body)
+
+
+def insert_sound_segment(blob, sound_body):
+    """LUMP_CAR_SOUNDS, replacing an existing 201 so a rerun stays one segment."""
+    return _replace_data1_segment(blob, LUMP_CAR_SOUNDS, sound_body)
 
 
 def _exportd2():
@@ -449,24 +468,51 @@ def _exportd2():
     return exportd2
 
 
-def police_voice_clips(voices):
-    """17 (pcm, rate) clips in Driver 2 phrase order, from a cop-radio bank."""
+def _blocks_near(rate, seconds, available):
+    """How many VAG blocks land nearest `seconds` at `rate`, within `available`."""
+    rate = int(rate) or 1
+    blocks = int(round(float(seconds) * rate / vag.SAMPLES_PER_BLOCK))
+    if blocks < 1:
+        blocks = 1
+    if blocks > available:
+        blocks = available
+    return blocks
+
+
+def _end_flagged(data):
+    """Copy of `data` whose last VAG block has the end flag set."""
+    out = bytearray(data)
+    if len(out) < vag.BLOCK_BYTES:
+        raise SystemExit("cop sample is shorter than one VAG block")
+    out[-vag.BLOCK_BYTES + 1] |= 0x01
+    return bytes(out)
+
+
+def police_voice_vags(voices):
+    """17 (vag, rate) pairs in Driver 2 phrase order, from a cop-radio bank.
+
+    The bytes are the source blocks. A cut slot keeps the whole blocks nearest
+    1.34 s and sets the end flag on that copy's last block. The rate is the
+    sample's own directory rate.
+    """
     entries = voices["entries"]
     if len(entries) < POLICE_BANK_SAMPLES:
         raise SystemExit("cop radio bank has %d samples; bank %d has %d"
                          % (len(entries), POLICE_BANK, POLICE_BANK_SAMPLES))
-    # vag.decode is the same low-nibble reader as sbk_samples.decode_vag.
-    decoded = []
+    sources = []
     for i in range(POLICE_BANK_SAMPLES):
         addr, length, _loop, rate = entries[i]
-        pcm = vag.decode(bytes(voices["vag"][addr:addr + length]))
-        decoded.append((pcm, int(rate)))
+        block = bytes(voices["vag"][addr:addr + length])
+        block = block[:len(block) // vag.BLOCK_BYTES * vag.BLOCK_BYTES]
+        sources.append((block, int(rate)))
     clips = []
     for index, cut in POLICE_SLOT_SOURCE:
-        samples, rate = decoded[index]
+        data, rate = sources[index]
         if cut:
-            samples = vag.trim(samples, 0.0, POLICE_CUT_SECONDS, rate)
-        clips.append((samples, rate))
+            blocks = _blocks_near(rate, POLICE_CUT_SECONDS,
+                                  len(data) // vag.BLOCK_BYTES)
+            data = _end_flagged(data[:blocks * vag.BLOCK_BYTES])
+        clips.append((data, rate))
     return clips
 
 
@@ -478,37 +524,17 @@ def build_police_voices_from_bank(voices, warnings=None):
     if len(POLICE_SLOT_SOURCE) != d2.POLICE_VOICE_COUNT:
         raise SystemExit("cop phrase map has %d slots; the stock bank has %d"
                          % (len(POLICE_SLOT_SOURCE), d2.POLICE_VOICE_COUNT))
-    body = d2.build_police_voices_pcm(police_voice_clips(voices), warnings)
+    clips = police_voice_vags(voices)
+    samples = [{"data": data, "rate_field": rate} for data, rate in clips]
+    body = d2._pack_police_voices(samples, warnings)
     if not body:
-        raise SystemExit("cop radio bank did not encode")
+        raise SystemExit("cop radio bank produced no segment")
     return body, warnings
 
 
 def insert_police_voices_segment(blob, voices_body):
-    """Append LUMP_POLICE_VOICES, replacing any segment of that type.
-
-    Same DATA1 rebuild as insert_sound_segment. A second run finds the old
-    203 on the FindLumpSegment walk and writes one segment in its place.
-    """
-    parsed = find_data1(blob)
-    if parsed is None:
-        raise SystemExit("not a synthetic LEV: no DATA1 table")
-
-    data1_off, data1_size = parsed
-    body_size = struct.unpack_from("<i", blob, data1_off + 4)[0]
-    if body_size < 8 or data1_off + body_size > len(blob):
-        raise SystemExit("bad DATA1 header size %d" % body_size)
-
-    lump = _exportd2().LUMP_POLICE_VOICES
-    old_body = blob[data1_off + 8:data1_off + body_size]
-    parts, tail = _split_data1_body(old_body)
-    kept = b"".join(raw for typ, raw in parts if typ != lump)
-    seg = struct.pack("<ii", lump, len(voices_body)) + voices_body
-    seg += b"\x00" * ((4 - len(seg) % 4) % 4)
-    new_body = kept + seg
-    if len(tail) >= 8:
-        new_body += tail
-    return _splice_data1(blob, data1_off, data1_size, new_body)
+    """LUMP_POLICE_VOICES, replacing an existing 203 so a rerun stays one segment."""
+    return _replace_data1_segment(blob, _exportd2().LUMP_POLICE_VOICES, voices_body)
 
 
 def main(argv=None):
