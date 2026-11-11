@@ -8,6 +8,15 @@ patches ONLY the sound segment into a known-good LEV. It reads bank 0 of
 VOICES.BLK, builds one D2-shaped 3-sample bank per present model, appends the
 type-201 segment to DATA1 and moves the page data to the new pageBase. Geometry
 bytes are untouched.
+
+    python add_car_sounds.py --lev CAR.LEV --voices DRIVER/SOUND/VOICES.BLK \
+        --police-voices DRIVER/SOUND/VOICES.BLK
+
+--police-voices PATH bakes LUMP_POLICE_VOICES (203) from bank 1 of that
+VOICES.BLK. The path is its own argument: a beta car bank can use
+SOUND.SBK for --voices while the cop lines still come from VOICES.BLK.
+The 17 phrase slots follow Driver 2's order: north, east, south, west,
+then the chatter lines.
 """
 import argparse
 import os
@@ -62,6 +71,33 @@ SIREN_SAMPLE_RETAIL = 4
 # (crest ~2) stayed loud and a dynamic one went quiet, and the encode then
 # moved it again. Pass a number below 1 to sit a bank under retail on purpose.
 SAMPLE_GAIN = 1.0
+
+# VOICES.BLK bank 1 is the cop radio: 11 samples at 11025 Hz. Driver 2's
+# phrase bank is 17 slots and its heading order is north, east, south, west.
+# s5cut is sample 5 kept to its first 1.34 s ("We are now in pursuit.").
+POLICE_BANK = 1
+POLICE_BANK_SAMPLES = 11
+POLICE_CUT_SECONDS = 1.34
+# (bank-1 sample index, cut to POLICE_CUT_SECONDS), one entry per D2 slot.
+POLICE_SLOT_SOURCE = (
+    (1, False),   # 1  north
+    (3, False),   # 2  east
+    (2, False),   # 3  south
+    (4, False),   # 4  west
+    (10, False),  # 5  suspect has run a red
+    (6, False),   # 6  suspect has hit a building
+    (7, False),   # 7  suspect has hit another vehicle
+    (7, False),   # 8  suspect has hit another vehicle
+    (5, True),    # 9  "We are now in pursuit."
+    (5, False),   # 10 "We are now in pursuit, heading..."
+    (5, True),    # 11 cut
+    (8, False),   # 12 we've lost him
+    (9, False),   # 13 he's out of sight
+    (9, False),   # 14 he's out of sight
+    (0, False),   # 15 suspect is heading
+    (5, True),    # 16 cut
+    (5, True),    # 17 cut
+)
 
 
 def decode_vag(data):
@@ -148,27 +184,44 @@ def encode_vag(samples):
     return bytes(out)
 
 
-def read_d1_voices(voices_path):
-    blob = open(voices_path, "rb").read()
+def _voices_bank(body):
+    """One VOICES.BLK bank: int count, then count x (addr, len, loop, rate), then VAG."""
+    if len(body) < 4:
+        return None
+    count = struct.unpack_from("<i", body, 0)[0]
+    dir_size = 4 + count * 16
+    if count < 1 or dir_size > len(body):
+        return None
+    data = body[dir_size:]
+    entries = []
+    for i in range(count):
+        addr, length, loop, rate = struct.unpack_from("<IIII", body, 4 + i * 16)
+        if addr + length > len(data):
+            return None
+        entries.append((addr, length, loop, rate))
+    return {"entries": entries, "vag": data, "kind": "voices"}
+
+
+def read_d1_voices(voices_path, bank=0):
+    """Bank `bank` of a Driver 1 VOICES.BLK, or a bare SOUND.SBK when bank is 0.
+
+    VOICES.BLK starts with 11 int32 offsets, which is 10 banks. Bank 0 is the
+    car loop and the horns. Bank 1 is the cop radio.
+    """
+    with open(voices_path, "rb") as f:
+        blob = f.read()
     if len(blob) < 44:
         return None
     table = struct.unpack_from("<11i", blob, 0)
     if table[0] == 44 and table[0] < table[1] <= len(blob):
-        body = blob[table[0]:table[1]]
-        if len(body) < 4:
+        if bank == 0:
+            return _voices_bank(blob[table[0]:table[1]])
+        if not 0 <= bank < 10 or not (table[bank] < table[bank + 1] <= len(blob)):
             return None
-        count = struct.unpack_from("<i", body, 0)[0]
-        dir_size = 4 + count * 16
-        if count < 1 or dir_size > len(body):
-            return None
-        vag = body[dir_size:]
-        entries = []
-        for i in range(count):
-            a, length, loop, rate = struct.unpack_from("<IIII", body, 4 + i * 16)
-            if a + length > len(vag):
-                return None
-            entries.append((a, length, loop, rate))
-        return {"entries": entries, "vag": vag, "kind": "voices"}
+        return _voices_bank(blob[table[bank]:table[bank + 1]])
+
+    if bank != 0:
+        return None
 
     # The Euro-43 beta ships a SOUND.SBK: a bare count + the same 16-byte
     # (address, length, loop, rate) directory, with the VAG data right after it.
@@ -343,6 +396,38 @@ def build_sound_body(voices, models, horn_voices=None, city=None):
     return bytes(body), rows
 
 
+def _splice_data1(blob, data1_off, data1_size, new_body):
+    """Replace the DATA1 segment list and move the page bytes to the new pageBase."""
+    new_body = bytes(new_body)
+    new_body += b"\x00" * ((4 - len(new_body) % 4) % 4)
+    new_data1 = struct.pack("<ii", LUMP_CAR_DATA, len(new_body) + 8) + new_body
+    new_data1 += b"\x00" * ((2048 - len(new_data1) % 2048) % 2048)
+
+    page_data = blob[data1_off + data1_size:]
+    out = bytearray(blob[:data1_off])
+    out += new_data1
+    out += page_data
+    struct.pack_into("<ii", out, 8, data1_off, len(new_data1))
+    return bytes(out)
+
+
+def _split_data1_body(body):
+    """DATA1 segments the way FindLumpSegment walks them, plus any unread tail."""
+    off = 0
+    end = len(body)
+    parts = []
+    while off + 8 <= end:
+        typ, size = struct.unpack_from("<ii", body, off)
+        if typ == 0xFF or size < 0 or off + 8 + size > end:
+            break
+        nxt = (off + 8 + size + 3) & ~3
+        if nxt > end:
+            break
+        parts.append((typ, body[off:nxt]))
+        off = nxt
+    return parts, body[off:]
+
+
 def insert_sound_segment(blob, sound_body):
     parsed = find_data1(blob)
     if parsed is None:
@@ -356,18 +441,74 @@ def insert_sound_segment(blob, sound_body):
     old_body = blob[data1_off + 8:data1_off + body_size]
     seg = struct.pack("<ii", LUMP_CAR_SOUNDS, len(sound_body)) + sound_body
     seg += b"\x00" * ((4 - len(seg) % 4) % 4)
+    return _splice_data1(blob, data1_off, data1_size, bytes(old_body) + seg)
 
-    new_body = bytes(old_body) + seg
-    new_body += b"\x00" * ((4 - len(new_body) % 4) % 4)
-    new_data1 = struct.pack("<ii", LUMP_CAR_DATA, len(new_body) + 8) + new_body
-    new_data1 += b"\x00" * ((2048 - len(new_data1) % 2048) % 2048)
 
-    page_data = blob[data1_off + data1_size:]
-    out = bytearray(blob[:data1_off])
-    out += new_data1
-    out += page_data
-    struct.pack_into("<ii", out, 8, data1_off, len(new_data1))
-    return bytes(out)
+def _exportd2():
+    import exportd2
+    return exportd2
+
+
+def police_voice_clips(voices):
+    """17 (pcm, rate) clips in Driver 2 phrase order, from a cop-radio bank."""
+    entries = voices["entries"]
+    if len(entries) < POLICE_BANK_SAMPLES:
+        raise SystemExit("cop radio bank has %d samples; bank %d has %d"
+                         % (len(entries), POLICE_BANK, POLICE_BANK_SAMPLES))
+    # vag.decode is the same low-nibble reader as sbk_samples.decode_vag.
+    decoded = []
+    for i in range(POLICE_BANK_SAMPLES):
+        addr, length, _loop, rate = entries[i]
+        pcm = vag.decode(bytes(voices["vag"][addr:addr + length]))
+        decoded.append((pcm, int(rate)))
+    clips = []
+    for index, cut in POLICE_SLOT_SOURCE:
+        samples, rate = decoded[index]
+        if cut:
+            samples = vag.trim(samples, 0.0, POLICE_CUT_SECONDS, rate)
+        clips.append((samples, rate))
+    return clips
+
+
+def build_police_voices_from_bank(voices, warnings=None):
+    """LUMP_POLICE_VOICES body for one cop-radio bank. Returns (body, warnings)."""
+    if warnings is None:
+        warnings = []
+    d2 = _exportd2()
+    if len(POLICE_SLOT_SOURCE) != d2.POLICE_VOICE_COUNT:
+        raise SystemExit("cop phrase map has %d slots; the stock bank has %d"
+                         % (len(POLICE_SLOT_SOURCE), d2.POLICE_VOICE_COUNT))
+    body = d2.build_police_voices_pcm(police_voice_clips(voices), warnings)
+    if not body:
+        raise SystemExit("cop radio bank did not encode")
+    return body, warnings
+
+
+def insert_police_voices_segment(blob, voices_body):
+    """Append LUMP_POLICE_VOICES, replacing any segment of that type.
+
+    Same DATA1 rebuild as insert_sound_segment. A second run finds the old
+    203 on the FindLumpSegment walk and writes one segment in its place.
+    """
+    parsed = find_data1(blob)
+    if parsed is None:
+        raise SystemExit("not a synthetic LEV: no DATA1 table")
+
+    data1_off, data1_size = parsed
+    body_size = struct.unpack_from("<i", blob, data1_off + 4)[0]
+    if body_size < 8 or data1_off + body_size > len(blob):
+        raise SystemExit("bad DATA1 header size %d" % body_size)
+
+    lump = _exportd2().LUMP_POLICE_VOICES
+    old_body = blob[data1_off + 8:data1_off + body_size]
+    parts, tail = _split_data1_body(old_body)
+    kept = b"".join(raw for typ, raw in parts if typ != lump)
+    seg = struct.pack("<ii", lump, len(voices_body)) + voices_body
+    seg += b"\x00" * ((4 - len(seg) % 4) % 4)
+    new_body = kept + seg
+    if len(tail) >= 8:
+        new_body += tail
+    return _splice_data1(blob, data1_off, data1_size, new_body)
 
 
 def main(argv=None):
@@ -382,6 +523,10 @@ def main(argv=None):
     ap.add_argument("--city", default=None,
                     help="city name; makes the generic horn the cop siren for "
                          "MIAMI/FRISCO/LA/NEWYORK/IVIEW (sample 4) or BETAMIAMI (sample 7)")
+    ap.add_argument("--police-voices", default=None, metavar="VOICES.BLK",
+                    help="bake LUMP_POLICE_VOICES (203) from bank 1 of this "
+                         "Driver 1 VOICES.BLK. Separate from --voices: a beta "
+                         "SOUND.SBK still takes its cop lines from VOICES.BLK")
     ap.add_argument("--out", default=None, help="write here (default: in place)")
     args = ap.parse_args(argv)
 
@@ -398,6 +543,7 @@ def main(argv=None):
         raise SystemExit("cannot read bank 0 from %s" % voices_path)
 
     horn_voices = None
+    horns_path = None
     if voices.get("kind") == "sbk":
         horns_path = args.horns
         if horns_path is None:
@@ -421,6 +567,22 @@ def main(argv=None):
 
     sound_body, rows = build_sound_body(voices, models, horn_voices, args.city)
     out = insert_sound_segment(blob, sound_body)
+
+    if args.police_voices:
+        police_path = args.police_voices
+        if not os.path.isfile(police_path):
+            raise SystemExit("cannot read cop radio bank %d from %s"
+                             % (POLICE_BANK, police_path))
+        cop = read_d1_voices(police_path, POLICE_BANK)
+        if cop is None or cop.get("kind") != "voices":
+            raise SystemExit("cannot read cop radio bank %d from %s"
+                             % (POLICE_BANK, police_path))
+        police_body, warnings = build_police_voices_from_bank(cop)
+        out = insert_police_voices_segment(out, police_body)
+        for w in warnings:
+            print("  warning: %s" % w)
+        print("police voices: bank %d, %d samples, lump %d bytes"
+              % (POLICE_BANK, len(POLICE_SLOT_SOURCE), len(police_body)))
 
     dst = args.out or args.lev
     with open(dst, "wb") as f:

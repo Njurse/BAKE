@@ -214,6 +214,29 @@ the file it just rewrote.
 `pages1.py --selftest` pins the RLE both ways and needs no game data at all, so
 it is the cheapest thing to run after a change to the page decoder.
 
+## Cop radio: `add_car_sounds.py --police-voices`
+
+`add_car_sounds.py` patches `LUMP_CAR_SOUNDS` (201) into an existing car-data
+LEV from bank 0 of `--voices`. `--police-voices VOICES.BLK` also bakes
+`LUMP_POLICE_VOICES` (203) from bank 1 of that file, the cop radio: 17 phrase
+slots in Driver 2 order (north, east, south, west, then the chatter lines).
+The path is separate from `--voices`, so a beta car bank can take
+`SOUND.SBK` for the engine while the cop lines still come from Driver 1
+`VOICES.BLK`. Identical slots share one 16-byte-aligned payload copy; the
+1.34 s pursuit cut is its own copy, with its own VAG end flag. Running it
+again replaces lump 203.
+
+```sh
+python tools/car/add_car_sounds.py --lev CAR.LEV \
+    --voices DRIVER/SOUND/VOICES.BLK \
+    --police-voices DRIVER/SOUND/VOICES.BLK
+
+python tools/car/add_car_sounds.py --lev BETAMIAMI.LEV \
+    --voices EURO43/SOUND/SOUND.SBK \
+    --horns DRIVER/SOUND/VOICES.BLK \
+    --police-voices DRIVER/SOUND/VOICES.BLK
+```
+
 ## Current results
 
 * **43** unique clean shapes across the seven car-bearing levels (they share

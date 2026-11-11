@@ -1553,16 +1553,24 @@ def _sound_sample(spec, warnings, label, budget=SOUND_SAMPLE_BYTES):
     car banks are 2-4 KB per car for exactly this reason, so the bake caps each
     sample and says what it did: a 16 kHz stereo-length loop is not worth a crash.
     """
+    # `pcm` is an in-memory (samples, rate) pair. The cop-radio importer
+    # decodes VOICES.BLK and feeds that here; a WAV path is the bake's path.
+    preloaded = spec.get("pcm")
     path = spec.get("wav")
 
-    if not path:
-        return None
+    if preloaded is None:
+        if not path:
+            return None
 
-    if not os.path.isfile(path):
-        warnings.append("sound %s: %s does not exist" % (label, path))
-        return None
+        if not os.path.isfile(path):
+            warnings.append("sound %s: %s does not exist" % (label, path))
+            return None
 
-    samples, rate = vag.read_wav(path)
+        samples, rate = vag.read_wav(path)
+    else:
+        samples, rate = preloaded
+        samples = list(samples)
+
     source_rate = rate
 
     # Trim and fade come first, at the SOURCE rate: they are defined in seconds,
@@ -1841,6 +1849,73 @@ def _load_sounds(manifest):
     return specs
 
 
+def _police_voice_spec(wav, pcm=None):
+    """The knobs build_police_voices_body applies to every cop phrase."""
+    spec = {
+        "wav": wav,
+        "loop": False,
+        "rate": None,
+        "rate_pct": 100,
+        "pitch": 1.0,
+        "level": 0.999,
+        "rms": 0.34,
+        "normalise": True,
+        "gain_db": 0.0,
+        "trim": None,
+        "fade_out": 0.0,
+        "max_rate": SOUND_MAX_RATE,
+        "sample_bytes": SOUND_SAMPLE_BYTES,
+    }
+
+    if pcm is not None:
+        spec["pcm"] = pcm
+
+    return spec
+
+
+def _pack_police_voices(samples, warnings):
+    """int count, one SAMPLE_DATA per slot, then the VAG payload.
+
+    Addresses are payload-relative and 16-byte aligned: a VAG block is 16
+    bytes, and LoadSoundBankDynamic copies from that offset. Identical bytes
+    share one address and length. A shorter phrase is its own copy, so its
+    last block can carry the end flag playback stops on. The directory is
+    still one row per slot.
+    """
+    body = bytearray(struct.pack("<i", len(samples)))
+    payload = bytearray()
+    seen = {}
+
+    for sample in samples:
+        data = sample["data"]
+
+        if data in seen:
+            addr, length = seen[data]
+        else:
+            addr = len(payload)
+            length = len(data)
+            seen[data] = (addr, length)
+            payload += data
+
+            while len(payload) % vag.BLOCK_BYTES:
+                payload.append(0)
+
+        body += struct.pack("<IIII", addr, length, 0, sample["rate_field"])
+
+    body += payload
+    raw = sum(len(s["data"]) for s in samples)
+    packed = len(payload)
+
+    if packed != raw:
+        warnings.append("police voices: %d samples, %d bytes (%d packed, "
+                        "shared samples)" % (len(samples), raw, packed))
+    else:
+        warnings.append("police voices: %d samples, %d bytes"
+                        % (len(samples), raw))
+
+    return bytes(body)
+
+
 def build_police_voices_body(paths, warnings):
     """LUMP_POLICE_VOICES: a complete replacement cop-phrase bank.
 
@@ -1861,22 +1936,8 @@ def build_police_voices_body(paths, warnings):
     samples = []
 
     for i, path in enumerate(paths):
-        spec = {
-            "wav": path,
-            "loop": False,
-            "rate": None,
-            "rate_pct": 100,
-            "pitch": 1.0,
-            "level": 0.999,
-            "rms": 0.34,
-            "normalise": True,
-            "gain_db": 0.0,
-            "trim": None,
-            "fade_out": 0.0,
-            "max_rate": SOUND_MAX_RATE,
-            "sample_bytes": SOUND_SAMPLE_BYTES,
-        }
-        sample = _sound_sample(spec, warnings, "police voice %d" % (i + 1))
+        sample = _sound_sample(_police_voice_spec(path), warnings,
+                               "police voice %d" % (i + 1))
 
         if sample is None:
             raise SystemExit("bank: police_voices[%d] could not be encoded: %s"
@@ -1884,21 +1945,46 @@ def build_police_voices_body(paths, warnings):
 
         samples.append(sample)
 
-    body = bytearray(struct.pack("<i", len(samples)))
-    payload = bytearray()
+    return _pack_police_voices(samples, warnings)
 
-    for sample in samples:
-        body += struct.pack("<IIII", len(payload), len(sample["data"]),
-                            0, sample["rate_field"])
-        payload += sample["data"]
 
-        while len(payload) % 4:
-            payload.append(0)
+def build_police_voices_pcm(clips, warnings):
+    """Same body as build_police_voices_body, from (pcm, rate) pairs.
 
-    body += payload
-    warnings.append("police voices: %d samples, %d bytes"
-                    % (len(samples), sum(len(s["data"]) for s in samples)))
-    return bytes(body)
+    Identical encoded samples share one payload address and length. A cut
+    phrase is encoded on its own, so its last block carries its own end flag.
+    The directory is still one SAMPLE_DATA per slot.
+    """
+    if not clips:
+        return None
+
+    if len(clips) != POLICE_VOICE_COUNT:
+        raise SystemExit("bank: police_voices has %d clips; the stock cop "
+                         "phrase bank has %d samples"
+                         % (len(clips), POLICE_VOICE_COUNT))
+
+    samples = []
+    encoded = {}
+
+    for i, clip in enumerate(clips):
+        pcm, rate = clip
+        key = (int(rate), tuple(pcm))
+        sample = encoded.get(key)
+
+        if sample is None:
+            sample = _sound_sample(
+                _police_voice_spec("<pcm %d>" % (i + 1), (list(pcm), int(rate))),
+                warnings, "police voice %d" % (i + 1))
+
+            if sample is None:
+                raise SystemExit("bank: police_voices[%d] could not be encoded"
+                                 % i)
+
+            encoded[key] = sample
+
+        samples.append(sample)
+
+    return _pack_police_voices(samples, warnings)
 
 
 def _load_police_voices(manifest):
@@ -2495,7 +2581,12 @@ def verify_sounds(blob, specs):
 
 
 def verify_police_voices(lev_path):
-    """The optional police voices segment must hold the stock phrase count."""
+    """The optional police voices segment: 17 slots, shared offsets allowed.
+
+    Each SAMPLE_DATA address is a 16-byte-aligned offset into the payload.
+    Two slots may name the same offset. The VAG at that offset ends on an
+    end-marker block; playback stops on the flag, not on the length field.
+    """
     with open(lev_path, "rb") as f:
         blob = f.read()
 
@@ -2515,7 +2606,38 @@ def verify_police_voices(lev_path):
         return ["police voices: %d samples, expected %d"
                 % (count, POLICE_VOICE_COUNT)]
 
-    return []
+    directory = 4 + count * 16
+
+    if size < directory:
+        return ["police voices: directory runs past the segment"]
+
+    problems = []
+
+    for i in range(count):
+        addr, length, _loop, _rate = struct.unpack_from(
+            "<IIII", blob, body + 4 + i * 16)
+        where = "police voices: sample %d" % (i + 1)
+
+        if addr % vag.BLOCK_BYTES:
+            problems.append("%s address %d is not 16-byte aligned"
+                            % (where, addr))
+
+        if length < vag.BLOCK_BYTES or length % vag.BLOCK_BYTES:
+            problems.append("%s length %d is not a whole number of VAG blocks"
+                            % (where, length))
+            continue
+
+        if directory + addr + length > size:
+            problems.append("%s runs past the segment" % where)
+            continue
+
+        # Byte 1 of the last 16-byte block. Bit 0 is the end marker.
+        flags = blob[body + directory + addr + length - vag.BLOCK_BYTES + 1]
+
+        if not flags & 0x01:
+            problems.append("%s has no VAG end flag on its last block" % where)
+
+    return problems
 
 
 def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
