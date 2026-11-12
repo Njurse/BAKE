@@ -505,18 +505,33 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("sounds", None)
 
-    wheels = wheel_specs(bank, warnings)
+    car_wheels = wheel_specs(bank, warnings)
+    default_wheels = default_wheel_specs(car_wheels)
+    _check_wheel_clashes(car_wheels)
 
-    if any(wheels):
-        manifest["wheels"] = wheels
+    if any(default_wheels):
+        manifest["wheels"] = default_wheels
     else:
         manifest.pop("wheels", None)
 
+    # The page side wants one entry per SPRITE: two cars cropping the same rect
+    # are one sprite, not two TEXINF details on the same set.
+    flat_wheels = []
+    for entry in car_wheels:
+        for spec in entry["wheels"]:
+            if spec is None:
+                continue
+            if any(spec["set"] == other["set"]
+                   and list(spec["island"]) == list(other["island"])
+                   for other in flat_wheels):
+                continue
+            flat_wheels.append(spec)
+
     # the wheel pages are part of the bank's texture info whether or not a body
     # poly samples them, so they are named here rather than inferred later
-    wheel_sets.update(spec["set"] for spec in wheels if spec)
+    wheel_sets.update(spec["set"] for spec in flat_wheels)
 
-    _wheel_transparency_warnings(wheels, gen_dir, warnings)
+    _wheel_transparency_warnings(flat_wheels, gen_dir, warnings)
 
     if wheel_sets:
         manifest["wheel_sets"] = sorted(wheel_sets)
@@ -524,7 +539,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
         manifest.pop("wheel_sets", None)
 
     # textureinfo / texturenames / modelnames are generated, never copied
-    _write_generated_lumps(manifest, bank, gen_dir, wheels)
+    _write_generated_lumps(manifest, bank, gen_dir, flat_wheels)
 
     # Each car's handling.json "handling" block IS its cosmetics record (LCF):
     # wheelDisp, cPoints, colBox, mass... There is no other source.
@@ -761,33 +776,39 @@ def _png_size(path):
 
 
 def wheel_specs(bank, warnings):
-    """One entry per wheel variant the bank should carry, or None for -1.
+    """One entry per car in slot order, each naming its own wheel set.
 
-    The declaration is per car, but a bank carries ONE wheel set for the whole
-    import (the engine reads three variants, not one per model slot), so the
-    first car in slot order that declares wheels owns it and any other car's
-    wheels are reported rather than silently merged.
+    A car's `wheels` block is ITS set: two cars in one bank may crop their
+    sprites from different pages or different rects on one page, and each keeps
+    its own (the engine reads a wheel set per imported model slot -
+    GetCarImportWheelFor). A car that declares no wheels of its own INHERITS
+    the first declared set in slot order, which is exactly what a bank whose
+    cars share one wheel set has always done; `inherited` marks those so the
+    encoder can write the set once as the bank default instead of repeating it
+    per slot.
+
+    Each entry is::
+
+        {"model": <slot>, "car": <name>, "inherited": bool,
+         "wheels": [spec | None] * len(WHEELS)}
+
+    where a `spec` is {"variant", "set", "island"} - set/island being the page
+    and the crop rect, and None the -1 "keep the host level's wheel" case.
     """
-    specs = [None] * len(WHEELS)
+    out = []
+    default = None
 
-    owner = None
-
-    for _slot, carname in bank.order:
+    for slot, carname in bank.order:
         car = bank.cars[carname]
         declared = [(variant, car.wheels.get(variant)) for variant in WHEELS]
         declared = [(variant, wheel) for variant, wheel in declared
                     if wheel is not None]
 
         if not declared:
+            out.append({"model": slot, "car": carname, "wheels": None})
             continue
 
-        if owner is not None:
-            warnings.append(
-                "%s declares wheels too; a bank carries one wheel set for the "
-                "whole import, and %s's is already it" % (carname, owner))
-            continue
-
-        owner = carname
+        specs = [None] * len(WHEELS)
 
         for variant, wheel in declared:
             if wheel.set is None:
@@ -809,16 +830,55 @@ def wheel_specs(bank, warnings):
                                             "set": wheel.set,
                                             "island": list(island)}
 
-    if owner is not None:
+        if not any(specs):
+            warnings.append("%s: no usable wheel variant declared, so it keeps "
+                            "the host level's wheels" % carname)
+            out.append({"model": slot, "car": carname, "wheels": None})
+            continue
+
         absent = [variant for variant, spec in zip(WHEELS, specs)
                   if spec is None]
+
         if absent:
             _warn("%s: the bank carries no %s wheel (offset -1), so the engine "
                   "keeps the host level's wheel for %s"
-                  % (owner, "/".join(absent),
+                  % (carname, "/".join(absent),
                      "it" if len(absent) == 1 else "them"))
 
-    return specs
+        entry = {"model": slot, "car": carname, "inherited": False,
+                 "wheels": specs}
+        out.append(entry)
+
+        if default is None:
+            default = entry
+
+    if default is None:
+        return out
+
+    for entry in out:
+        if entry["wheels"] is None:
+            # a copy per car: a later edit of one car's set must not walk into
+            # another's through a shared list
+            entry["wheels"] = [None if spec is None else dict(spec)
+                               for spec in default["wheels"]]
+            entry["inherited"] = True
+            entry["inherits_from"] = default["car"]
+
+    return out
+
+
+def default_wheel_specs(car_wheels):
+    """The bank's default 3-variant set: the first DECLARED one, else all None.
+
+    This is what a car with no wheels of its own inherits and what the v1
+    LUMP_CAR_WHEELS segment carries, so a single-set bank keeps baking exactly
+    the file it did when a bank could only ever hold one set.
+    """
+    for entry in car_wheels or ():
+        if not entry.get("inherited") and any(entry.get("wheels") or ()):
+            return entry["wheels"]
+
+    return [None] * len(WHEELS)
 
 
 def _default_island(path, carname, variant, warnings):
@@ -963,34 +1023,77 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
     return record
 
 
+def _rects_overlap(a, b):
+    """Do two [u0, v0, u1, v1] texel rects (u1/v1 EXCLUSIVE) share a texel?"""
+    return (a[0] < b[2] and b[0] < a[2]
+            and a[1] < b[3] and b[1] < a[3])
+
+
+def _check_wheel_clashes(car_wheels):
+    """Refuse two cars whose wheel sprites land on the same texels.
+
+    A bank may give every car its own wheel set, and several cars may crop one
+    page - but one rect holds ONE sprite. Two cars naming overlapping rects is
+    ambiguous: the second composite would paint over the first, so whichever car
+    happened to be last in slot order would decide what both wheels look like.
+    That is an error naming both cars and both rects, not a silent winner.
+
+    A single car's own variants may share a rect (clean and fast are the same
+    tyre redrawn); that pair is skipped rather than refused.
+    """
+    owners = {}         # {set: [(car, variant, rect)]}
+
+    for entry in car_wheels:
+        if entry.get("inherited"):
+            # an inherited set IS the declaring car's set - same sprite, not a
+            # second claim on those texels
+            continue
+
+        carname = entry["car"]
+
+        for spec in entry["wheels"]:
+            if spec is None:
+                continue
+
+            rect = tuple(int(v) for v in spec["island"])
+
+            for other_car, other_variant, other in owners.get(spec["set"], ()):
+                if other_car == carname and other == rect:
+                    continue            # this car's own variant on one rect
+
+                if _rects_overlap(other, rect):
+                    raise SystemExit(
+                        "bank: %s wheels.%s and %s wheels.%s crop page set %d at "
+                        "%s and %s - one rect cannot hold two sprites; give one "
+                        "car its own rect or its own page"
+                        % (other_car, other_variant, carname, spec["variant"],
+                           spec["set"], list(other), list(rect)))
+
+            owners.setdefault(spec["set"], []).append(
+                (carname, spec["variant"], rect))
+
+
 def wheel_islands(bank):
     """{set: [(variant, image path, island)]} for every declared wheel sprite.
 
-    The FIRST car in slot order owns the bank's wheels (see wheel_specs), so only
-    that car's sprites are composited; another car's would be reported by
-    wheel_specs and never reach the bank anyway.
+    Every car's sprites are composited: a bank may carry a wheel set per car
+    (see wheel_specs), so two cars cropping different rects of one page are two
+    sprites on that page. The case that cannot work - two cars whose rects
+    overlap - is refused by _check_wheel_clashes before the bake gets this far.
     """
     islands = {}
-    owner = None
 
     for _slot, carname in bank.order:
         car = bank.cars[carname]
         declared = [(v, car.wheels.get(v)) for v in WHEELS]
         declared = [(v, w) for v, w in declared if w is not None]
 
-        if not declared:
-            continue
-
-        if owner is not None:
-            continue
-
-        owner = carname
-
         for variant, wheel in declared:
             if wheel.set is None or wheel.island is None or not wheel.path:
                 continue
 
-            # one island, one sprite: clean wins over fast on a shared rect
+            # one island, one sprite: a car's own clean/fast pair on one rect is
+            # the same tyre redrawn, not a second sprite
             if any(list(i) == list(wheel.island)
                    for _v, _p, i in islands.get(wheel.set, [])):
                 continue
