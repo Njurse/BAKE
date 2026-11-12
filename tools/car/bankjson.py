@@ -553,6 +553,11 @@ class Wheel(object):
     """One declared wheel variant: the art, the page it is cropped from, and the
     crop rect on that page.
 
+    A car's `wheels` block is THAT car's set: each car in a bank may name its own
+    (carbank_bake.wheel_specs keeps them apart and the bake writes a per-model
+    LUMP_CAR_WHEELS2), and a car that names none inherits the first declared set
+    in slot order.
+
     `set` is what lets the bank carry a wheel MODEL. The engine keeps the host
     level's wheel mesh and reads the imported wheel only for its page and its
     crop rect (models.c BuildCarImportWheels: poly 2's texture_set is the page,

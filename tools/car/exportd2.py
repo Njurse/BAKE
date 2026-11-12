@@ -895,8 +895,10 @@ def write_rebake(city_dir, name, donor_city="CHICAGO"):
 def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
                     extras=None, name=None, source=None, obj_scale=D2_OBJ_SCALE):
     """bank.json with a `declare` block shaped like banks/firebird/bank.json:
-    every car points at its OBJs, PNG pages (+ recovered paints/protect),
-    WAVs, and the first car in order owns the bank's one wheel set."""
+    every car points at its OBJs, PNG pages (+ recovered paints/protect), WAVs,
+    and the wheel set the donor level carried - on the first car, because a donor
+    level has one set for all of them (a bank that names a set per car declares
+    each on its own car, see carbank_bake.wheel_specs)."""
     decl_cars = {}
     for c in cars:
         entry = {}
@@ -913,7 +915,7 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
                     tex[str(s)]["paints"] = paint["paints"]
                     tex[str(s)]["protect"] = paint["protect"]
         if extras and extras["wheels"] and not decl_cars:
-            entry["wheels"] = extras["wheels"]   # first car owns the bank's set
+            entry["wheels"] = extras["wheels"]   # the donor's one set: first car declares it
             # A wheel's page is a page the bank carries, so it must be a
             # declared texture too: the bake only bakes pages the declaration
             # names, and a wheel-only set (one no body poly samples) otherwise

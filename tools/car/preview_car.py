@@ -227,7 +227,7 @@ def main():
 
     root, car = resolve(cars[key])
     wroot, wcar = root, car
-    if not car.get("wheels"):   # the bank's one wheel set lives on one car
+    if not car.get("wheels"):   # this car inherits the bank's first declared set
         for other in cars.values():
             r, c = resolve(other)
             if c.get("wheels"):
