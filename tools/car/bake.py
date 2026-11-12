@@ -163,6 +163,47 @@ def _inward_normal(verts, v):
             int(round(nz / L * 4096)))
 
 
+MAX_POINT_NORMALS = 256         # a GT record names a point normal with ONE byte
+
+
+def _normal_entry(pnorm, normal_index, n):
+    """Index of normal `n` in `pnorm`, adding it while the table stays addressable.
+
+    A GT record carries a point-normal index per vertex in a single byte (lev1:
+    [8..11] for GT4), so entry 256 and beyond cannot be named at all - the byte
+    wraps and the poly is lit from an unrelated direction, which is the same
+    "black side" family as the index-0 fallback. Measured on the Driver 1 pool:
+    IVIEW_7's damaged body has 128 source normals, and the flat + flipped copies
+    this function is asked for took it to 265, leaving 4 polys pointing back at
+    entries 0..3. Returns None when the table is full.
+    """
+    idx = normal_index.get(n)
+    if idx is not None:
+        return idx
+    if len(pnorm) >= MAX_POINT_NORMALS:
+        return None
+    idx = len(pnorm)
+    pnorm.append(n)
+    normal_index[n] = idx
+    return idx
+
+
+def _nearest_entry(pnorm, n):
+    """The addressable entry facing closest to `n` - a full table's last resort.
+
+    Only reached once the table is at its 256-entry byte limit, where a fresh
+    entry cannot be named. Reusing the closest existing direction keeps the
+    index valid and the poly lit from roughly the right side, rather than
+    silently wrapping onto entry 0.
+    """
+    best, best_dot = 0, None
+    for i, m in enumerate(pnorm):
+        dot = m[0] * n[0] + m[1] * n[1] + m[2] * n[2]
+        if best_dot is None or dot > best_dot:
+            best, best_dot = i, dot
+    return best
+
+
 def build_model_record(vertices, polys, face_normals, point_normals, scale,
                        stats=None, flip_normals=False):
     """One MODEL + vertices + BOTH normal tables + a GT3/GT4 poly stream.
@@ -209,17 +250,17 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
 
     flat_of = {}
     fallback_polys = 0
+    overflowed = 0
     for k, p in enumerate(polys):
         v = p["v"]
         ns = list(p.get("n") or [])
         if len(ns) >= len(v):
             continue
         n = _inward_normal(verts, v)
-        idx = normal_index.get(n)
+        idx = _normal_entry(pnorm, normal_index, n)
         if idx is None:
-            idx = len(pnorm)
-            pnorm.append(n)
-            normal_index[n] = idx
+            idx = _nearest_entry(pnorm, n)
+            overflowed += 1
         flat_of[k] = idx
         fallback_polys += 1
 
@@ -245,11 +286,10 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
             n = pnorm[i]
             if n[0] * inward[0] + n[1] * inward[1] + n[2] * inward[2] < 0:
                 neg = (-n[0], -n[1], -n[2])
-                j = normal_index.get(neg)
+                j = _normal_entry(pnorm, normal_index, neg)
                 if j is None:
-                    j = len(pnorm)
-                    pnorm.append(neg)
-                    normal_index[neg] = j
+                    j = _nearest_entry(pnorm, neg)
+                    overflowed += 1
                 out_ns.append(j)
                 flipped = True
             else:
@@ -261,6 +301,15 @@ def build_model_record(vertices, polys, face_normals, point_normals, scale,
     if stats is not None:
         stats["fallback_normals"] = stats.get("fallback_normals", 0) + fallback_polys
         stats["flipped_normals"] = stats.get("flipped_normals", 0) + flipped_polys
+        stats["normal_table_full"] = stats.get("normal_table_full", 0) + overflowed
+
+    # One byte per normal index: anything past the cap cannot be named by the
+    # record, so refuse to encode it rather than let it wrap to entry 0..3.
+    assert len(pnorm) <= MAX_POINT_NORMALS, (
+        "%d point normals - a GT index is one byte and holds %d"
+        % (len(pnorm), MAX_POINT_NORMALS))
+    assert all(i < MAX_POINT_NORMALS for ns in resolved.values() for i in ns), (
+        "a GT normal index is past the byte-addressable table")
 
     stream = bytearray()
     npolys = 0
@@ -1620,6 +1669,10 @@ def bake_one_city(args, levels_dir):
     print("   normal resolution: %d poly(s) got a flat normal, %d had a source normal flipped"
           % (bake_stats.get("fallback_normals", 0),
              bake_stats.get("flipped_normals", 0)))
+    if bake_stats.get("normal_table_full"):
+        print("   normal table: at the %d-entry byte limit, %d reference(s) reused "
+              "the closest entry" % (MAX_POINT_NORMALS,
+                                     bake_stats["normal_table_full"]))
     problem, stats = verify(out)
     if stats:
         print("   normals: %d GT polys, table faces the geometry in %.1f%%"
@@ -1704,6 +1757,10 @@ def main(argv=None):
     print("   normal resolution: %d poly(s) got a flat normal, %d had a source normal flipped"
           % (bake_stats.get("fallback_normals", 0),
              bake_stats.get("flipped_normals", 0)))
+    if bake_stats.get("normal_table_full"):
+        print("   normal table: at the %d-entry byte limit, %d reference(s) reused "
+              "the closest entry" % (MAX_POINT_NORMALS,
+                                     bake_stats["normal_table_full"]))
     problem, stats = verify(blob)
     if stats:
         print("   normals: %d GT polys, table faces the geometry in %.1f%%"

@@ -33,6 +33,7 @@ measurement behind "the greys survived".
 """
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -895,7 +896,9 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
 
         if group["quantize"]:
             owned = [pixels[t] for t in texels]
-            side = max(1, int(len(owned) ** 0.5))
+            # ceil(sqrt), not floor: a square grid one texel short of the
+            # sprite is a negative pad, and paletteize rejects the grid
+            side = max(1, math.isqrt(len(owned) - 1) + 1)
             pad = side * side - len(owned)
             grid = owned + [owned[0]] * pad
             colours, local_idx = fourbpp.paletteize(grid, side, side)

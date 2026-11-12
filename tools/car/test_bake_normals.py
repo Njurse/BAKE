@@ -108,6 +108,33 @@ class BakeNormals(unittest.TestCase):
         model2 = decode(bytes(bad))
         self.assertFalse(faces_outward(model2, model2.polys[0]))
 
+    def test_a_full_normal_table_stays_byte_addressable(self):
+        """A GT normal index is ONE byte, so entry 256+ cannot be named.
+
+        Both passes here ADD table entries (a flipped copy, a poly's flat
+        normal), and the index that names them is a single byte: past 255 it
+        wraps and the poly is lit from whichever entry it landed on. IVIEW_7's
+        damaged D1 body is the measured case - 128 source entries, 265 after the
+        bake's additions, 4 polys naming 0..3. A full table must reuse an entry
+        on the correct side instead of growing.
+        """
+        polys = [{"kind": "GT3", "set": 1, "id": 0, "v": [0, 1, 2],
+                  "n": [0, 1, 2], "uv": [(0, 0), (10, 0), (0, 10)],
+                  "color": [127, 127, 127]}]
+        # 256 entries: the three the poly names face OUT (the wrong hemisphere
+        # for a table stored inward, so each needs a flipped copy), and the rest
+        # face in and are what a full table has to fall back on.
+        pnorm = [(0, 0, -4096), (400, 0, -4096), (0, 400, -4096)]
+        pnorm += [(0, 0, 4096)] * (256 - len(pnorm))
+        stats = {}
+        rec = bake.build_model_record(VERTS, polys, None, pnorm, 1.0, stats=stats)
+        model = decode(rec)
+        p = model.polys[0]
+        self.assertEqual(len(model.normals), 256)        # no entry past the cap
+        self.assertTrue(all(i < 256 for i in p.n))
+        self.assertTrue(faces_outward(model, p))
+        self.assertGreater(stats["normal_table_full"], 0)
+
     def test_pool_shapes_have_no_inward_normals(self):
         """Every cached pool shape must resolve to outward-facing normals."""
         pooldir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "pool")
