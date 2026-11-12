@@ -514,6 +514,21 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("wheels", None)
 
+    declaring = [entry for entry in car_wheels if not entry.get("inherited")]
+
+    if len(declaring) <= 1 or not any(default_wheels):
+        # One set for the whole bank: manifest["wheels"] already says everything
+        # and the manifest a single-set bank writes stays exactly as it was.
+        manifest.pop("car_wheels", None)
+    else:
+        # One entry per car in slot order. `inherited` marks the cars that fall
+        # back to the bank default above, so a reader never has to re-derive it.
+        manifest["car_wheels"] = [
+            {"model": entry["model"], "car": entry["car"],
+             "inherited": bool(entry.get("inherited")),
+             "wheels": entry["wheels"]}
+            for entry in car_wheels]
+
     # The page side wants one entry per SPRITE: two cars cropping the same rect
     # are one sprite, not two TEXINF details on the same set.
     flat_wheels = []
