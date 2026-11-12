@@ -153,6 +153,26 @@ VARIANT_NAMES = {"CLEANWHEEL": "clean", "DAMWHEEL": "damaged",
                  "FASTWHEEL": "fast"}
 
 
+def _wheel_model_record(blob, at):
+    """{set, island} from one wheel MODEL's poly 2, or None.
+
+    poly 2 is the tread rect (models.c WheelPolyRect), and its texture_set is the
+    page the sprite lives on. WheelPolyRect adds 1 to the maxima, so the rect it
+    derives - and the declaration states - is exclusive, exactly as baked.
+    """
+    model = lev1.decode_model(blob, at)
+
+    if len(model.polys) <= 2 or model.errors:
+        return None
+
+    poly = model.polys[2]
+    us = [u for u, _v in poly.uv]
+    vs = [v for _u, v in poly.uv]
+
+    return {"set": poly.texture_set,
+            "island": [min(us), min(vs), max(us) + 1, max(vs) + 1]}
+
+
 def _wheel_records(blob):
     """{variant: {set, island}} for the wheels the bank carries, or {}.
 
@@ -178,23 +198,65 @@ def _wheel_records(blob):
         if ofs < 0 or ofs + 36 > size:
             continue
 
-        model = lev1.decode_model(blob, body + ofs)
+        record = _wheel_model_record(blob, body + ofs)
 
-        if len(model.polys) <= 2 or model.errors:
-            continue
-
-        poly = model.polys[2]
-        us = [u for u, _v in poly.uv]
-        vs = [v for _u, v in poly.uv]
-
-        out[VARIANT_NAMES.get(name, name.lower())] = {
-            "set": poly.texture_set,
-            # WheelPolyRect adds 1 to the maxima, so the rect it derives - and the
-            # declaration states - is exclusive, exactly as it was baked
-            "island": [min(us), min(vs), max(us) + 1, max(vs) + 1],
-        }
+        if record is not None:
+            out[VARIANT_NAMES.get(name, name.lower())] = record
 
     return out
+
+
+def _car_wheel_records(blob):
+    """{model: {variant: {set, island}}} from LUMP_CAR_WHEELS2, or None.
+
+    v2 carries a wheel set per model slot, so each car's declaration can be
+    reconstructed from its own block instead of the one bank-wide set. A model
+    whose variants are all -1 keeps the default and is left out of the map.
+    """
+    body, size = bake._data1_segment(blob, exportd2.LUMP_CAR_WHEELS2)
+
+    if body is None or size < 8:
+        return None
+
+    magic, nslots = struct.unpack_from("<4si", blob, body)
+
+    if magic != bake.WHEEL_LUMP_MAGIC or not 0 < nslots <= bake.MAX_CAR_MODELS:
+        return None
+
+    out = {}
+    at = 8
+
+    for _slot in range(nslots):
+        if at + 12 > size:
+            break
+
+        model, count, slot_bytes = struct.unpack_from("<iii", blob, body + at)
+
+        if count < 1 or slot_bytes < 12 or at + slot_bytes > size:
+            break
+
+        records = {}
+
+        for i, name in enumerate(bake.WHEEL_ORDER):
+            if i >= count:
+                break
+
+            ofs = struct.unpack_from("<i", blob, body + at + 12 + i * 4)[0]
+
+            if ofs < 0 or ofs + 36 > size:
+                continue
+
+            record = _wheel_model_record(blob, body + ofs)
+
+            if record is not None:
+                records[VARIANT_NAMES.get(name, name.lower())] = record
+
+        if records:
+            out[model] = records
+
+        at += slot_bytes
+
+    return out or None
 
 
 WHEEL_SOURCES = {
@@ -252,6 +314,8 @@ def export(path, outdir, declare=False):
     # a bank that carries wheel models names their pages and crop rects; one that
     # does not has the author's wheel images and nothing else
     wheel_records = _wheel_records(blob)
+    # a v2 bank names a set per model slot; None means "one set for the import"
+    car_wheel_records = _car_wheel_records(blob)
 
     included = sorted(entries)
     scale = _levels_scale()
@@ -300,14 +364,28 @@ def export(path, outdir, declare=False):
 
         _write_mtl(os.path.join(cardir, carname + ".mtl"), sorted(materials))
 
-        entry["wheels"] = wheel_records or {}
+        if car_wheel_records is not None:
+            # this car's own set; a model the segment does not name keeps the
+            # bank default, which the declaration expresses by declaring none
+            entry["wheels"] = car_wheel_records.get(slot) or {}
+        else:
+            entry["wheels"] = wheel_records or {}
         cars[carname] = entry
         order.append({"slot": slot, "car": carname})
 
     wheels = _wheel_variants(blob)
     wheel_pngs = {}
 
-    if not wheel_records:
+    if car_wheel_records is not None and wheels is None:
+        # v1 is absent in a v2 bank: report the variants any model carries
+        wheels = {}
+
+        for variant in bake.WHEEL_ORDER:
+            name = VARIANT_NAMES.get(variant, variant.lower())
+            wheels[variant] = any(name in records
+                                  for records in car_wheel_records.values())
+
+    if not wheel_records and not car_wheel_records:
         wheel_pngs = _wheel_pngs_from_sources(os.path.dirname(os.path.abspath(path)),
                                              outdir)
     wheels_dir = os.path.join(outdir, "wheels")
@@ -315,17 +393,20 @@ def export(path, outdir, declare=False):
 
     with open(os.path.join(wheels_dir, "wheels.json"), "w") as f:
         json.dump({"variants": wheels, "records": wheel_records or None,
+                   "records_by_model": car_wheel_records,
                    "note":
                    "variants: true = the bank carries this wheel model. "
                    "records: the page set and crop rect it names, which is what "
-                   "a declaration needs to carry it again"},
+                   "a declaration needs to carry it again. records_by_model: the "
+                   "same, per model slot, when the bank carries a set per car"},
                   f, indent=2)
 
     for carname in cars:
         cars[carname]["wheel_pngs"] = wheel_pngs
 
     return {"cars": cars, "order": order, "pages": page_files,
-            "wheels": wheels, "wheel_pngs": wheel_pngs, "scale": scale}
+            "wheels": wheels, "wheel_pngs": wheel_pngs, "scale": scale,
+            "car_wheel_records": car_wheel_records}
 
 
 def _page_rows(blob, pal, setid):
