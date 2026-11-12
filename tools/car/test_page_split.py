@@ -107,6 +107,45 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(emitted[0]["texnum"], 0)
         self.assertEqual(emitted[0]["clut"], page_rows[0])
 
+    def test_an_explicit_mask_clears_its_index_without_a_key(self):
+        """A composited wheel sprite can be keyed by its mask alone."""
+        indices = bytearray([1]) * (W * H)
+        rows = {0: [(8, 8, 8)] * 16,
+                1: [(0, 0, 0)] + [(200, 0, 0)] * 15}
+        mask = [False] * (W * H)
+
+        for y in range(2):
+            for x in range(2):
+                mask[y * W + x] = True
+                indices[y * W + x] = 0
+
+        blob, _ordered = carbank_page.pack_indexed(
+            indices, rows, mask=mask, key=None,
+            pieces=[{"id": 1, "rect": [0, 0, 2, 2]}])
+        page_rows, _raw = pages1.read_page(blob, 0, len(blob))
+
+        self.assertEqual(struct.unpack_from("<H", page_rows[1], 0)[0], 0)
+
+    def test_an_explicit_mask_clears_every_index_it_uses(self):
+        """A masked wheel with two backdrop indices must make both transparent."""
+        indices = bytearray([2]) * (W * H)
+        rows = {0: [(8, 8, 8)] * 16,
+                1: [(0, 0, 0), (1, 1, 1)] + [(200, 0, 0)] * 14}
+        mask = [False] * (W * H)
+
+        for y in range(2):
+            for x in range(2):
+                mask[y * W + x] = True
+                indices[y * W + x] = (x + y) & 1
+
+        blob, _ordered = carbank_page.pack_indexed(
+            indices, rows, mask=mask, key=None,
+            pieces=[{"id": 1, "rect": [0, 0, 2, 2]}])
+        page_rows, _raw = pages1.read_page(blob, 0, len(blob))
+
+        self.assertEqual(struct.unpack_from("<H", page_rows[1], 0)[0], 0)
+        self.assertEqual(struct.unpack_from("<H", page_rows[1], 2)[0], 0)
+
     def test_civ_rows_past_eight_fall_back_to_row_zero(self):
         mapping = carbank_page.civ_row_map(range(1, 12))
         overflow = [m for m in mapping if m["overflow"]]

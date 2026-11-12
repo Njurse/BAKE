@@ -422,9 +422,31 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
 
     warnings = []
 
+    previous_pages = {}
+    previous_path = os.path.join(gen_dir, _manifest_name(bank))
+
+    if os.path.isfile(previous_path):
+        try:
+            with open(previous_path, encoding="utf-8") as f:
+                previous_pages = {p.get("set"): p
+                                  for p in (json.load(f).get("pages") or [])}
+        except (OSError, ValueError):
+            previous_pages = {}
+
     # ...and the declaration owns each page's BAKE, not just its image
     _sync_declared_pages(manifest, bank, gen_dir, warnings,
-                         out_dir=out_dir, force=force_pages)
+                         out_dir=out_dir, force=force_pages,
+                         previous_pages=previous_pages)
+
+    # The page planner now gives each wheel rect its own texture id. Record
+    # (set, rect) -> id so the wheel record can carry it; clean/fast sharing
+    # one rect resolve to the same id.
+    wheel_tex = {}
+
+    for page in manifest.get("pages") or []:
+        for piece in page.get("clut_rects") or []:
+            if piece.get("kind") == "wheel":
+                wheel_tex[(page["set"], tuple(piece["rect"]))] = piece["id"]
 
     # With palette_from_pages the pages ARE the palette, so the rows are rebuilt
     # from them after the page step. Without it a re-baked page silently keeps a
@@ -505,9 +527,9 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     else:
         manifest.pop("sounds", None)
 
-    car_wheels = wheel_specs(bank, warnings)
+    car_wheels = wheel_specs(bank, warnings, wheel_tex)
     default_wheels = default_wheel_specs(car_wheels)
-    _check_wheel_clashes(car_wheels)
+    _check_wheel_clashes(bank, car_wheels)
 
     if any(default_wheels):
         manifest["wheels"] = default_wheels
@@ -533,7 +555,7 @@ def build_manifest(bank, out_dir, scale, blocks_dir, default_page=None, flip_y=F
     # are one sprite, not two TEXINF details on the same set.
     flat_wheels = []
     for entry in car_wheels:
-        for spec in entry["wheels"]:
+        for spec in entry.get("wheels") or ():
             if spec is None:
                 continue
             if any(spec["set"] == other["set"]
@@ -790,7 +812,7 @@ def _png_size(path):
     return struct.unpack(">II", head[16:24])
 
 
-def wheel_specs(bank, warnings):
+def wheel_specs(bank, warnings, wheel_tex=None):
     """One entry per car in slot order, each naming its own wheel set.
 
     A car's `wheels` block is ITS set: two cars in one bank may crop their
@@ -812,6 +834,7 @@ def wheel_specs(bank, warnings):
     """
     out = []
     default = None
+    placed = []         # [{"car", "spec"}] already given a rect, for the placer
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
@@ -834,16 +857,48 @@ def wheel_specs(bank, warnings):
                 continue
 
             island = wheel.island
+            setid = wheel.set
 
-            if island is None:
+            if island == "auto":
+                spot = _auto_island(bank, setid, placed, wheel.path,
+                                    carname, variant, warnings)
+
+                if spot is None:
+                    continue        # _auto_island said why (no measurable PNG)
+
+                setid, island = spot
+            elif island is None:
                 island = _default_island(wheel.path, carname, variant, warnings)
+
+            # JERICHO: relocation is automatic now. A declared rect is kept
+            # when it is usable; a clash with body art or another wheel moves
+            # it, so authors no longer have to hand-place coordinates just to
+            # avoid a collision. `island: "auto"` remains the explicit form
+            # that always asks the planner, and declare.auto_textures is still
+            # accepted (it is now the default behaviour).
+            if island is not None and island != "auto":
+                reason = _island_usable(bank, setid, placed, carname, island)
+
+                if reason:
+                    width, height = island[2] - island[0], island[3] - island[1]
+                    spot = _auto_island(
+                        bank, setid, placed, wheel.path, carname, variant,
+                        warnings, size=(width, height),
+                        requested=(setid, list(island)), reason=reason)
+
+                    if spot is None:
+                        continue
+
+                    setid, island = spot
 
             if island is None:
                 continue
 
-            specs[WHEELS.index(variant)] = {"variant": variant,
-                                            "set": wheel.set,
-                                            "island": list(island)}
+            spec = {"variant": variant, "set": setid,
+                    "island": list(island),
+                    "texid": (wheel_tex or {}).get((setid, tuple(island)), 0)}
+            specs[WHEELS.index(variant)] = spec
+            placed.append({"car": carname, "spec": spec})
 
         if not any(specs):
             warnings.append("%s: no usable wheel variant declared, so it keeps "
@@ -925,6 +980,132 @@ def _default_island(path, carname, variant, warnings):
           % (carname, variant, wheels_w, wheels_h))
 
     return (0, 0, wheels_w, wheels_h)
+
+
+def _car_page_sets(bank, carname):
+    """Page sets this car's own art uses (its palette is what the sprite is drawn against)."""
+    car = bank.cars.get(carname)
+    return sorted({t.set for t in (car.textures if car else ()) if t.set is not None})
+
+
+def _bank_page_sets(bank):
+    """Every page set the bank carries art for."""
+    out = set()
+
+    for car in bank.cars.values():
+        out.update(t.set for t in car.textures if t.set is not None)
+
+    return sorted(out)
+
+
+def _largest_free(bank, setid, car_wheels):
+    """Largest free square on the page, as (side, side) - for the inventory."""
+    for side in range(bankjson.PAGE_TEXELS, 0, -WHEEL_GRID):
+        if _page_free(bank, setid, car_wheels, side, side, limit=1):
+            return side, side
+
+    return 0, 0
+
+
+def _island_usable(bank, setid, placed, carname, island):
+    """Why a declared wheel rect cannot be used, or None when it is fine.
+
+    `placed` is [{"car", "spec"}] for the sprites already resolved, so a rect
+    that clashes with another car's sprite is reported by name. A single car's
+    clean/fast pair sharing one rect is the same tyre redrawn and stays valid.
+    """
+    u0, v0, u1, v1 = (int(v) for v in island)
+    rect = (u0, v0, u1, v1)
+
+    if not (0 <= u0 < u1 <= bankjson.PAGE_TEXELS
+            and 0 <= v0 < v1 <= bankjson.PAGE_TEXELS):
+        return "it does not fit one 256x256 page"
+
+    for body_rect, owner in _page_occupied(bank, setid, ()):
+        if "body" in owner and _rects_overlap(body_rect, rect):
+            return "it overlaps the body art at %s" % (list(body_rect),)
+
+    for item in placed:
+        spec = item["spec"]
+
+        if spec["set"] != setid:
+            continue
+
+        other = tuple(int(v) for v in spec["island"])
+
+        if not _rects_overlap(other, rect):
+            continue
+
+        if item["car"] == carname and other == rect:
+            continue        # one car's clean/fast pair may share one rect
+
+        return ("it overlaps %s wheels.%s at %s"
+                % (item["car"], spec["variant"], list(other)))
+
+    return None
+
+
+def _auto_island(bank, setid, placed, path, carname, variant, warnings,
+                 size=None, requested=None, reason=None):
+    """(set, rect) where this sprite goes, or None when it cannot be measured.
+
+    The declared page is tried first. With no room there, the sprite moves to
+    another page the bank already carries - preferring the pages this car's own
+    art uses, whose palette the sprite was drawn against - and the move is
+    reported. If nothing in the bank has room, the bake stops with an inventory
+    of every page (what fills it, largest free square) instead of guessing.
+
+    Deterministic: _page_free scans row-major in WHEEL_GRID steps and cars are
+    walked in slot order, so the same bank always lands on the same rects.
+    """
+    if size is None:
+        size = _png_size(path) if path else None
+
+        if size is None:
+            warnings.append(
+                "%s: wheels.%s asks for automatic placement but names no "
+                "measurable PNG, so its rect cannot be worked out"
+                % (carname, variant))
+            return None
+
+    width, height = size
+    holder = [{"car": item["car"], "wheels": [item["spec"]]}
+              for item in placed]
+
+    order = []
+
+    for page in ([setid] + _car_page_sets(bank, carname) + _bank_page_sets(bank)):
+        if page not in order:
+            order.append(page)
+
+    for page in order:
+        free = _page_free(bank, page, holder, width, height, limit=1)
+
+        if not free:
+            continue
+
+        if requested is not None:
+            from_set, from_rect = requested
+
+            if page != from_set or list(free[0]) != list(from_rect):
+                _warn("%s: wheels.%s moved from set %d %s to set %d %s - %s"
+                      % (carname, variant, from_set, list(from_rect), page,
+                         list(free[0]), reason or "the declared rect is unusable"))
+        elif page != setid:
+            _warn("%s: wheels.%s moved to page set %d - set %d has no free "
+                  "%dx%d rect" % (carname, variant, page, setid, width, height))
+
+        return page, list(free[0])
+
+    inventory = "; ".join(
+        "set %d: %d used rect(s), largest free square %dx%d"
+        % (page, len(_page_occupied(bank, page, holder)),
+           *_largest_free(bank, page, holder))
+        for page in order)
+
+    raise SystemExit(
+        "bank: %s wheels.%s (%dx%d) has no room in this bank - %s"
+        % (carname, variant, width, height, inventory))
 
 
 def _file_sha256(path):
@@ -1044,19 +1225,94 @@ def _rects_overlap(a, b):
             and a[1] < b[3] and b[1] < a[3])
 
 
-def _check_wheel_clashes(car_wheels):
-    """Refuse two cars whose wheel sprites land on the same texels.
+def _page_occupied(bank, setid, car_wheels=()):
+    """[(rect, owner)] for every texel group already spoken for on `setid`.
+
+    Two kinds of art live on one page: WHEEL sprites (per car, per variant - the
+    resolved islands the bake composites) and the BODY's UV islands, which are
+    what the page is baked from (`_uv_islands`, the same data the page hash
+    trusts). A wheel sprite that lands on a body island REPAINTS those texels -
+    the composite runs after the art is baked - so both belong in one map, and a
+    rect can be checked against a single source of truth.
+
+    `car_wheels` is carbank_bake.wheel_specs() output; pass it when the caller
+    already has the resolved islands so a measured/default rect is included.
+    """
+    out = []
+
+    for entry in car_wheels:
+        if entry.get("inherited"):
+            # an inherited set IS the declaring car's sprite - counting it again
+            # would report a conflict that the bake does not have
+            continue
+
+        for spec in entry.get("wheels") or ():
+            if spec is None or spec["set"] != setid:
+                continue
+
+            out.append((tuple(int(v) for v in spec["island"]),
+                        "%s wheels.%s" % (entry["car"], spec["variant"])))
+
+    for _tex_id, lists in _uv_islands(bank, setid).items():
+        for uvs in lists:
+            if uvs:
+                out.append((tuple(int(v) for v in carbank_page._bbox_uv(uvs)),
+                            "set %d body" % setid))
+
+    return out
+
+
+WHEEL_GRID = 8          # candidate positions move in 8-texel steps
+
+
+def _page_free(bank, setid, car_wheels=(), width=0, height=0, grid=WHEEL_GRID,
+               limit=8):
+    """[(u0, v0, u1, v1)] where a width x height sprite still fits, scan order.
+
+    A rect LIST, not a pixel mask: the answer is printable, and two bakes of the
+    same bank hand back the same list. Candidates move in `grid` texel steps from
+    the page origin, row-major (top-left first), and a candidate is free when it
+    overlaps nothing from _page_occupied - so body islands and already-placed
+    wheels are both avoided.
+    """
+    occupied = [rect for rect, _owner in _page_occupied(bank, setid, car_wheels)]
+    free = []
+
+    if width <= 0 or height <= 0:
+        return free
+
+    for v in range(0, bankjson.PAGE_TEXELS - height + 1, grid):
+        for u in range(0, bankjson.PAGE_TEXELS - width + 1, grid):
+            rect = (u, v, u + width, v + height)
+
+            if any(_rects_overlap(rect, other) for other in occupied):
+                continue
+
+            free.append(rect)
+
+            if len(free) >= limit:
+                return free
+
+    return free
+
+
+def _check_wheel_clashes(bank, car_wheels):
+    """Refuse wheel sprites that land on another sprite, or on the body's texels.
 
     A bank may give every car its own wheel set, and several cars may crop one
     page - but one rect holds ONE sprite. Two cars naming overlapping rects is
     ambiguous: the second composite would paint over the first, so whichever car
     happened to be last in slot order would decide what both wheels look like.
-    That is an error naming both cars and both rects, not a silent winner.
+
+    The page also carries the CAR BODY's art, and the composite runs after it is
+    baked, so a wheel island that lands on a body UV island silently repaints the
+    car's skin. Both cases are errors naming the car, the variant, the page and
+    the overlapping texels - never a silent winner.
 
     A single car's own variants may share a rect (clean and fast are the same
     tyre redrawn); that pair is skipped rather than refused.
     """
-    owners = {}         # {set: [(car, variant, rect)]}
+    owners = {}         # {set: [(car, variant, rect, png)]}
 
     for entry in car_wheels:
         if entry.get("inherited"):
@@ -1065,18 +1321,48 @@ def _check_wheel_clashes(car_wheels):
             continue
 
         carname = entry["car"]
+        car = bank.cars.get(carname)
 
-        for spec in entry["wheels"]:
+        for spec in entry.get("wheels") or ():
             if spec is None:
                 continue
 
             rect = tuple(int(v) for v in spec["island"])
+            setid = spec["set"]
+            wheel = car.wheels.get(spec["variant"]) if car is not None else None
+            png = os.path.normpath(wheel.path) if wheel and wheel.path else None
 
-            for other_car, other_variant, other in owners.get(spec["set"], ()):
+            # (a) the body's own art on this page - what the page is baked from
+            for body_rect, owner in _page_occupied(bank, setid, ()):
+                if "body" not in owner:
+                    continue
+
+                if _rects_overlap(body_rect, rect):
+                    raise SystemExit(
+                        "bank: %s wheels.%s crops page set %d at %s, which "
+                        "overlaps the body art at %s - the wheel sprite would "
+                        "repaint those texels. Move it to a free rect or another "
+                        "page." % (carname, spec["variant"], setid, list(rect),
+                                   list(body_rect)))
+
+            # (b) another wheel sprite on the same page
+            for other_car, other_variant, other, other_png in owners.get(setid, ()):
                 if other == rect:
                     # one rect, one sprite: two cars may share a wheel island
                     # (an inherited set, or deliberate sharing) - the composite
-                    # paints one sprite and both cars sample it
+                    # paints one sprite and both cars sample it. Only a DIFFERENT
+                    # piece of art from ANOTHER car on that rect is a conflict; a
+                    # single car's clean/fast pair is the same tyre redrawn as two
+                    # files, which the bake has always allowed.
+                    if carname != other_car and png and other_png and png != other_png:
+                        raise SystemExit(
+                            "bank: %s wheels.%s and %s wheels.%s both crop page "
+                            "set %d at %s but name different art (%s vs %s) - "
+                            "one rect holds one sprite; give one of them its own "
+                            "rect or page"
+                            % (other_car, other_variant, carname, spec["variant"],
+                               setid, list(rect), os.path.basename(other_png),
+                               os.path.basename(png)))
                     continue
 
                 if _rects_overlap(other, rect):
@@ -1085,45 +1371,55 @@ def _check_wheel_clashes(car_wheels):
                         "%s and %s - one rect cannot hold two sprites; give one "
                         "car its own rect or its own page"
                         % (other_car, other_variant, carname, spec["variant"],
-                           spec["set"], list(other), list(rect)))
+                           setid, list(other), list(rect)))
 
-            owners.setdefault(spec["set"], []).append(
-                (carname, spec["variant"], rect))
+            owners.setdefault(setid, []).append(
+                (carname, spec["variant"], rect, png))
 
 
-def wheel_islands(bank):
-    """{set: [(variant, image path, island)]} for every declared wheel sprite.
+def wheel_islands(bank, car_wheels=None):
+    """{set: [(variant, image path, island)]} for every wheel sprite on a page.
 
-    Every car's sprites are composited: a bank may carry a wheel set per car
-    (see wheel_specs), so two cars cropping different rects of one page are two
-    sprites on that page. The case that cannot work - two cars whose rects
-    overlap - is refused by _check_wheel_clashes before the bake gets this far.
+    Built from the RESOLVED per-car specs (wheel_specs), not the raw declaration,
+    so an island the bake placed itself ("auto") is composited at the rect it was
+    given instead of leaking the sentinel into the page hash. Two cars cropping
+    different rects of one page are two sprites on that page; an overlap between
+    cars is refused by _check_wheel_clashes before the bake gets this far.
     """
+    if car_wheels is None:
+        car_wheels = wheel_specs(bank, [])
+
     islands = {}
 
-    for _slot, carname in bank.order:
-        car = bank.cars[carname]
-        declared = [(v, car.wheels.get(v)) for v in WHEELS]
-        declared = [(v, w) for v, w in declared if w is not None]
+    for entry in car_wheels:
+        if entry.get("inherited"):
+            continue        # the declaring car's sprite, already counted
 
-        for variant, wheel in declared:
-            if wheel.set is None or wheel.island is None or not wheel.path:
+        car = bank.cars.get(entry["car"])
+
+        for spec in entry.get("wheels") or ():
+            if spec is None:
+                continue
+
+            wheel = car.wheels.get(spec["variant"]) if car is not None else None
+
+            if wheel is None or not wheel.path:
                 continue
 
             # one island, one sprite: a car's own clean/fast pair on one rect is
             # the same tyre redrawn, not a second sprite
-            if any(list(i) == list(wheel.island)
-                   for _v, _p, i in islands.get(wheel.set, [])):
+            if any(list(i) == list(spec["island"])
+                   for _v, _p, i in islands.get(spec["set"], [])):
                 continue
 
-            islands.setdefault(wheel.set, []).append(
-                (variant, wheel.path, wheel.island))
+            islands.setdefault(spec["set"], []).append(
+                (spec["variant"], wheel.path, tuple(spec["island"])))
 
     return islands
 
 
 def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
-                         force=False):
+                         force=False, previous_pages=None):
     """Bake every declared page whose IMAGE, or whose bake options, changed.
 
     The bank bake used to read `pages/PAGE_<set>.bin` and nothing else, so a new
@@ -1179,19 +1475,39 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         # wheel came from the page image, so a stale pink square in the page
         # survived every rebake no matter what sprite was declared.
         sprites = islands.get(setid) or []
+        extra_islands = []
 
         if sprites:
             mask = list(mask) if mask else [False] * len(pixels)
 
             for variant, sprite_path, island in sprites:
                 sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
-                transparent = carbank_page.sprite_mask(sprite, sprite_alpha)
+                transparent = carbank_page.wheel_sprite_mask(
+                    sprite, sprite_alpha, sw, sh)
                 masked = carbank_page.composite(
                     pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
                     island, transparent, key if key is not None else sprite[0])
 
                 for index in masked:
                     mask[index] = True
+
+                u0, v0, u1, v1 = [int(v) for v in island]
+
+                # A pure-black interior texel would quantise to 0x0000, the
+                # transparent marker; bump it to the darkest opaque shade so a
+                # black tyre stays solid (the STP / see-through tyre symptom).
+                for y in range(v0, v1):
+                    for x in range(u0, u1):
+                        index = y * fourbpp.PAGE_W + x
+
+                        if not mask[index] and pixels[index] == (0, 0, 0):
+                            pixels[index] = (8, 8, 8)
+
+                extra_islands.append({
+                    "uv": [(u0, v0), (u1 - 1, v0), (u1 - 1, v1 - 1), (u0, v1 - 1)],
+                    "kind": "wheel",
+                    "variant": variant,
+                })
 
                 warnings.append("page set %d: composited the %s wheel from %s "
                                 "into island %s"
@@ -1207,15 +1523,90 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         if use_split:
             indices, row_map, pieces = carbank_page.plan_islands(
                 pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, uv_islands,
-                split=True)
+                split=True, extra_islands=extra_islands)
             blob, _ordered = carbank_page.pack_indexed(
                 indices, row_map, mask=mask, key=key,
                 tolerance=page.transparent_tolerance,
                 chroma=page.transparent_chroma, pieces=pieces)
             colours = row_map.get(min(row_map)) if row_map else []
-            entry["clut_rects"] = [{"id": piece["id"], "rect": piece["rect"],
-                                    "src": piece.get("src")}
-                                   for piece in pieces]
+            old_rects = list(((previous_pages or {}).get(setid) or {}).get("clut_rects") or [])
+            entry["clut_rects"] = []
+            for piece in pieces:
+                rect = {"id": piece["id"], "rect": piece["rect"],
+                        "src": piece.get("src")}
+
+                if piece.get("kind"):
+                    rect["kind"] = piece["kind"]
+
+                if piece.get("variant"):
+                    rect["variant"] = piece["variant"]
+
+                entry["clut_rects"].append(rect)
+
+            moves = manifest.setdefault("texture_moves", [])
+            for piece, record in zip(pieces, entry["clut_rects"]):
+                kind = piece.get("kind") or ("body" if piece.get("src") is not None else "leftover")
+                old = next((p for p in old_rects
+                            if p.get("rect") == piece["rect"]), None)
+
+                if old is None and kind == "wheel":
+                    old = next((p for p in old_rects
+                                if (p.get("kind") or ("body" if p.get("src") is not None else "leftover")) == "wheel"
+                                and p.get("variant") == piece.get("variant")), None)
+
+                if old is not None and old.get("id") == piece["id"] and old.get("rect") == piece["rect"]:
+                    continue
+
+                if old is None:
+                    reason = "new %s island" % kind
+                elif old.get("id") != piece["id"]:
+                    reason = "texture id remapped"
+                else:
+                    reason = "relocated"
+
+                old_entry = None if old is None else {
+                    "rect": old["rect"], "tex_id": old["id"], "clut_row": old["id"]}
+                new_entry = {"rect": record["rect"], "tex_id": record["id"],
+                             "clut_row": record["id"]}
+                moves.append({"kind": kind, "set": setid, "reason": reason,
+                              "old": old_entry, "new": new_entry})
+                warnings.append(
+                    "page set %d: texture move %s %s: %s -> %s (%s)"
+                    % (setid, kind, piece.get("variant") or "",
+                       "none" if old_entry is None else old_entry,
+                       new_entry, reason))
+
+            for piece in pieces:
+                if piece.get("kind") != "wheel":
+                    continue
+
+                u0, v0, _u1, _v1 = piece["rect"]
+                warnings.append(
+                    "page set %d: wheel %s owns tex id %d (row %d) at %s, "
+                    "corner index %d"
+                    % (setid, piece.get("variant") or "wheel", piece["id"],
+                       piece["id"], list(piece["rect"]),
+                       indices[v0 * fourbpp.PAGE_W + u0]))
+
+                masked_indices = set()
+                plain_indices = set()
+
+                for y in range(v0, _v1):
+                    for x in range(u0, _u1):
+                        index = indices[y * fourbpp.PAGE_W + x]
+
+                        if mask[y * fourbpp.PAGE_W + x]:
+                            masked_indices.add(index)
+                        else:
+                            plain_indices.add(index)
+
+                shared = sorted(masked_indices & plain_indices)
+
+                if shared:
+                    warnings.append(
+                        "page set %d: wheel %s interior shares palette index(es) "
+                        "%s with its backdrop - use an alpha or keyed sprite"
+                        % (setid, piece.get("variant") or "wheel", shared))
             ncluts = (max(row_map) + 1) if row_map else 1
             warnings.append(
                 "page set %d: %d texture id(s) %s — each has its own CLUT row "

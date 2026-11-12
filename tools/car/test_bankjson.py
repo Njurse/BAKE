@@ -74,6 +74,16 @@ class LoadTests(BankFixture):
         self.assertIsNone(car.damaged)
         self.assertIsNone(car.sounds)
 
+    def test_auto_textures_defaults_off(self):
+        bank = bankjson.load(self.write(self.declare()))
+
+        self.assertFalse(bank.auto_textures)
+
+    def test_auto_textures_can_be_enabled(self):
+        bank = bankjson.load(self.write(self.declare(auto_textures=True)))
+
+        self.assertTrue(bank.auto_textures)
+
     def test_wheels_may_omit_a_variant(self):
         bank = bankjson.load(self.write(self.declare(
             car=self.car(wheels={"clean": "wheel.png", "fast": "wheel.png"}))))

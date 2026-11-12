@@ -568,6 +568,19 @@ class Wheel(object):
     `island` is (u0, v0, u1, v1) in page texels, u1/v1 EXCLUSIVE - the same
     rectangle PIL's crop() takes, so a 60x60 sprite at the page origin is
     (0, 0, 60, 60). Left unset, the bake uses the image's own size at the origin.
+
+    `"island": "auto"` hands the choice to the bake: it places the sprite in the
+    first free rect on `set` (row-major, 8-texel steps, after the body's UV
+    islands and the wheels already placed there), moves it to another page the
+    bank carries when that page is full, and stops with a per-page inventory when
+    nothing has room. The resolved rect is written into the manifest, so a re-bake
+    and an export both keep the same coordinates.
+
+    Whatever the source of the rect, the bake refuses ambiguity: a wheel island
+    that overlaps another car's sprite, or the body art on that page, fails with
+    the car, variant, page and rectangles named; two cars naming one rect with
+    different art is refused too, while a single car's clean/fast pair may share
+    a rect (the same tyre redrawn).
     """
 
     def __init__(self, path, setid, island):
@@ -604,6 +617,11 @@ def _wheel(where, field, data, file_of):
               "%r is not a page set id 0..255" % (setid,))
 
     island = data.get("island")
+
+    if island == "auto":
+        # "auto": the bake places this sprite in the first free rect on `set`,
+        # after subtracting the body art and the wheels already placed there
+        return Wheel(path, setid, "auto")
 
     if island is not None:
         if not isinstance(island, (list, tuple)) or len(island) != 4:
@@ -845,6 +863,9 @@ class Bank(object):
         # with AttributeError before it could reproduce the bank unchanged.
         self.palette_from_pages = False
         self.clut_rows = 8
+        # Opt-in relocation of wheel sprites that cannot be used as declared.
+        # False keeps every explicit island exactly where the author put it.
+        self.auto_textures = False
         # None: the bake keeps its Driver 1 default (2048/3000). A Driver 2
         # export sets 1, because those OBJs are already engine units.
         self.obj_scale = None
@@ -860,7 +881,8 @@ class Bank(object):
 
         _check_keys(where, "declare", decl,
                     {"schema", "name", "donor", "order", "cars",
-                     "palette_from_pages", "clut_rows", "scale"}, "declare")
+                     "palette_from_pages", "clut_rows", "scale",
+                     "auto_textures"}, "declare")
 
         if "scale" in decl:
             self.obj_scale = _bake_scale(where, "declare.scale", decl.get("scale"))
@@ -870,6 +892,14 @@ class Bank(object):
         # from its pages, so this is on unless the bank says otherwise (and the
         # bake refuses "false": there is no other palette to take).
         self.palette_from_pages = bool(decl.get("palette_from_pages", True))
+
+        auto_textures = decl.get("auto_textures", False)
+
+        if not isinstance(auto_textures, bool):
+            _fail(where, "declare.auto_textures",
+                  "%r is not true or false" % (auto_textures,))
+
+        self.auto_textures = auto_textures
         # How many civ_clut rows this engine build actually binds. 8 is
         # carTpages[city][8]. A larger number only changes the diagnostic: the
         # bake still emits every set, and a row the engine does not have still
@@ -1088,11 +1118,46 @@ def install_portraits(bank, out_dir, stem):
     return written, notes
 
 
+class _DuplicateKey(ValueError):
+    """One JSON object listed the same key twice."""
+
+    def __init__(self, key):
+        ValueError.__init__(self, key)
+        self.key = key
+
+
+def _no_duplicate_keys(pairs):
+    """Pairs -> dict, refusing a key repeated inside ONE object.
+
+    json.load keeps the LAST of a repeated key and says nothing. That is how a
+    bank lost a car: two "order" arrays meant only the second survived, so the
+    car the first named vanished from the bake - and with no car left declaring
+    wheels the bank silently had no wheel set either. A duplicate is a typo, not
+    an instruction, so it is refused by name.
+    """
+    out = {}
+
+    for key, value in pairs:
+        if key in out:
+            raise _DuplicateKey(key)
+
+        out[key] = value
+
+    return out
+
+
 def load(path):
     """Read bank.json and validate its `declare` half. Raises BankError."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+            raw = json.load(f, object_pairs_hook=_no_duplicate_keys)
+    except _DuplicateKey as e:
+        raise BankError(
+            "%s: the key %r is listed twice in one object - JSON keeps only the "
+            "LAST one, so the first is silently lost. Two \"order\" arrays, for "
+            "instance, drop every car the second does not name (and a bank left "
+            "with no car declaring wheels then has no wheel set at all)."
+            % (path, e.key))
     except FileNotFoundError:
         raise BankError("%s: no such file" % path)
     except ValueError as e:

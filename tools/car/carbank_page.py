@@ -922,13 +922,18 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
     return pieces
 
 
-def plan_islands(pixels, width, height, islands, split=True):
+def plan_islands(pixels, width, height, islands, split=True, extra_islands=None):
     """(indices, {id: 16 colours}, pieces) for a page that does not fit one row.
 
     `islands` is `{texture id: [uv list, ...]}` with uvs in page texels.
     The first group of each source id keeps that id (so set65_id13 stays id
     13). Further groups take the next free id, up to 32. Pieces carry the rect
     a poly's UV centroid is matched against.
+
+    `extra_islands` are rects that must own a row of their own: a composited
+    wheel sprite is not a body UV island, and folding it into the leftover
+    piece is what let a whole-page leftover palette paint the tyre. Each entry
+    is {"uv": [...], "kind": "wheel", "variant": "clean"}.
     """
     islands = islands or {0: [[(0, 0), (width - 1, 0),
                                (width - 1, height - 1), (0, height - 1)]]}
@@ -937,6 +942,10 @@ def plan_islands(pixels, width, height, islands, split=True):
     pieces = []
     next_id = (max(islands) + 1) if islands else 1
     mask = page_coverage(width, height, islands) if split else None
+
+    if mask is not None and extra_islands:
+        for extra in extra_islands:
+            _cover_poly(mask, width, height, extra["uv"])
 
     for src_id in sorted(islands):
         groups = _cluster_uvs(pixels, width, height, islands[src_id], split,
@@ -966,6 +975,39 @@ def plan_islands(pixels, width, height, islands, split=True):
                 pieces.append({"id": tex_id, "rect": [int(v) for v in rect],
                                "src": src_id})
 
+    # A wheel rect is its own island: it must not share a row with body art or
+    # with the whole-page leftover piece. Give each one a fresh id and spread
+    # its own colours over that row.
+    for extra in extra_islands or ():
+        rect = _clip_rect(_bbox_uv(extra["uv"]), width, height)
+
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+
+        cols = _colours_in(pixels, width, rect)
+
+        if not cols:
+            continue
+
+        if next_id >= MAX_TEX_IDS:
+            raise SystemExit(
+                "page: no free texture id left for the %s wheel island at %s"
+                % (extra.get("variant") or "wheel", list(rect)))
+
+        tex_id = next_id
+        next_id += 1
+
+        if len(cols) > fourbpp.CLUT_ROW_ENTRIES:
+            colours = _scatter_quantize(indices, pixels, width, height, [rect])
+        else:
+            colours = _pad16(cols)
+            _scatter_exact(indices, pixels, width, [rect], colours)
+
+        rows[tex_id] = colours
+        pieces.append({"id": tex_id, "rect": [int(v) for v in rect],
+                       "src": None, "kind": extra.get("kind", "wheel"),
+                       "variant": extra.get("variant")})
+
     if split and any(mask or []):
         backdrop = fourbpp.snap555(pixels[0]) if pixels else (0, 0, 0)
         blobs = leftover_blobs(pixels, width, height, mask, backdrop)
@@ -994,7 +1036,9 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
 
     A keyed backdrop is cleared (0x0000) only on the index its texels actually
     took, and only when that entry still is the key colour — a near-black shade
-    is not turned into the transparent marker.
+    is not turned into the transparent marker. An explicit mask (a composited
+    wheel sprite) does not need a key: the mask itself says those texels are
+    transparent, so the index they took is cleared in that id's row.
     """
     if not rows_by_id:
         rows_by_id = {0: [(8, 8, 8)] * fourbpp.CLUT_ROW_ENTRIES}
@@ -1009,7 +1053,7 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
 
     cleared = {}
 
-    if mask is not None and key is not None and any(mask):
+    if mask is not None and any(mask):
         owned = {}
 
         for piece in pieces or []:
@@ -1019,7 +1063,7 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
             if tex_id >= len(ordered):
                 continue
 
-            votes = {}
+            used = set()
 
             for rect in rects:
                 x0, y0, x1, y1 = _clip_rect(rect, fourbpp.PAGE_W, fourbpp.PAGE_H)
@@ -1029,17 +1073,13 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
 
                     for x in range(x0, x1):
                         if mask[row + x]:
-                            index = indices[row + x]
-                            votes[index] = votes.get(index, 0) + 1
+                            used.add(indices[row + x])
 
-            if not votes:
-                continue
+            for at in used:
+                colour = ordered[tex_id][at]
 
-            at = max(votes, key=lambda k: (votes[k], -k))
-            colour = ordered[tex_id][at]
-
-            if _key_matches(colour, key, tolerance, chroma):
-                cleared.setdefault(tex_id, set()).add(at)
+                if key is None or _key_matches(colour, key, tolerance, chroma):
+                    cleared.setdefault(tex_id, set()).add(at)
 
     raw = fourbpp.encode_indices(bytes(indices))
     stream = fourbpp.encode_literal(raw[::-1])
@@ -1111,6 +1151,57 @@ def sprite_mask(texels, alpha):
 
     key = texels[0]
     return [max(abs(t[c] - key[c]) for c in range(3)) <= 8 for t in texels]
+
+
+def wheel_sprite_mask(texels, alpha, width, height):
+    """The sprite's backdrop only, not same-coloured interior art.
+
+    A black tyre on a black backdrop is the STP case: `sprite_mask` keys every
+    near-black texel, so the whole tyre becomes transparent. This flood-fills
+    the corner colour inward from the sprite border instead, so only the
+    border-connected backdrop is masked and a black tyre that does not touch
+    the edge stays opaque.
+    """
+    if alpha is not None and any(a < 128 for a in alpha):
+        return [a < 128 for a in alpha]
+
+    if not texels or width <= 0 or height <= 0:
+        return []
+
+    key = texels[0]
+    mask = [False] * (width * height)
+    seen = [False] * (width * height)
+    stack = []
+
+    def matches(index):
+        return max(abs(texels[index][c] - key[c]) for c in range(3)) <= 8
+
+    def push(x, y):
+        index = y * width + x
+
+        if not seen[index] and matches(index):
+            seen[index] = True
+            mask[index] = True
+            stack.append(index)
+
+    for x in range(width):
+        push(x, 0)
+        push(x, height - 1)
+
+    for y in range(1, height - 1):
+        push(0, y)
+        push(width - 1, y)
+
+    while stack:
+        index = stack.pop()
+        x = index % width
+        y = index // width
+
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < width and 0 <= ny < height:
+                push(nx, ny)
+
+    return mask
 
 
 def composite(pixels, width, height, sprite, sprite_w, sprite_h, island,

@@ -1438,6 +1438,7 @@ def _wheel_geoms(specs):
 
         geoms.append(carbank_wheels.wheel_geom(spec["set"],
                                               _uv_corners(spec["island"]),
+                                              texid=spec.get("texid", 0),
                                               name=spec["variant"]))
 
     return geoms
@@ -1882,7 +1883,8 @@ def _load_wheels(manifest):
                              % (variant, island))
 
         by_variant[variant] = {"variant": variant, "set": setid,
-                               "island": list(island)}
+                               "island": list(island),
+                               "texid": spec.get("texid", 0)}
 
     return [by_variant.get(variant) for variant in WHEEL_VARIANTS]
 
@@ -2207,6 +2209,8 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         "included_sets": sorted(included),
         "pages": page_report,
         "wheels": wheel_specs,
+        "wheel_segment": "v2" if car_wheels else ("v1" if any(wheel_specs)
+                                                   else None),
         "sounds": {"models": sorted((spec.get("model")
                                      for spec in (sound_specs.get("models") or [])),
                                     key=lambda m: (m is None, m)),
@@ -2218,9 +2222,14 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     if car_wheels:
         report["car_wheels"] = car_wheels
 
+    texture_moves = manifest.get("texture_moves") or []
+
+    if texture_moves:
+        report["texture_moves"] = texture_moves
+
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
-                                   sound_specs)
+                                   sound_specs, car_wheels)
     # bank.json is the AUTHOR'S input (the declaration) and the bake must never
     # write it: when out_dir is the bank folder itself, the old name overwrote
     # a hand-written declaration with this computed report. Everything the bake
@@ -2232,7 +2241,13 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     print("  bank ok: %s (%d bytes, %d cars, %d sets)"
           % (os.path.basename(lev_path), len(bank_blob), len(order),
              len(included)))
-    if any(wheel_specs):
+    if car_wheels:
+        for entry in car_wheels:
+            print("  wheels model %d (%s): %s" % (
+                entry["model"], entry["car"], ", ".join(
+                    "%s set %d %s" % (s["variant"], s["set"], list(s["island"]))
+                    if s else "absent" for s in entry["wheels"])))
+    elif any(wheel_specs):
         print("  wheels: %s" % ", ".join(
             "%s set %d %s" % (s["variant"], s["set"], list(s["island"]))
             if s else "absent" for s in wheel_specs))
@@ -2309,6 +2324,53 @@ def _lcf_records(manifest, manifest_dir, cars, order):
     return records
 
 
+def _verify_wheel_block(blob, body, size, offset, spec, name):
+    """Problems with ONE wheel MODEL block, as models.c BuildCarImportWheels
+    would see it.
+
+    `offset` is relative to `body`, the segment start; `spec` is the declared
+    {"variant", "set", "island"}. The engine rejects an unusable record silently
+    (the wheel keeps the host texture), so every test it applies is repeated
+    here: decode, 8..24 polys, the first eight FT4, and the page and crop rect
+    read off poly 2.
+    """
+    problems = []
+
+    if offset < 0 or offset + 36 > size:
+        return ["wheel %s offset %d is outside the segment (%d bytes)"
+                % (name, offset, size)]
+
+    model = lev1.decode_model(blob, body + offset)
+
+    if model.errors:
+        return ["wheel %s decoded with %d poly errors"
+                % (name, len(model.errors))]
+
+    if not 8 <= len(model.polys) <= 24:
+        return ["wheel %s has %d polys; the engine takes 8..24"
+                % (name, len(model.polys))]
+
+    if any(p.kind != "FT4" for p in model.polys[:8]):
+        return ["wheel %s is not the 8-quad FT4 wheel" % name]
+
+    poly = model.polys[2]
+
+    if poly.texture_set != spec["set"]:
+        problems.append("wheel %s names page set %d, not the declared %d"
+                        % (name, poly.texture_set, spec["set"]))
+
+    # WheelPolyRect: min/max of the UVs, then +1 on the maxima
+    us = [u for u, _v in poly.uv]
+    vs = [v for _u, v in poly.uv]
+    rect = (min(us), min(vs), max(us) + 1, max(vs) + 1)
+
+    if list(rect) != list(spec["island"]):
+        problems.append("wheel %s covers %s, not the declared crop %s"
+                        % (name, list(rect), list(spec["island"])))
+
+    return problems
+
+
 def verify_wheels(blob, specs):
     """Re-read the bank's LUMP_CAR_WHEELS the way the engine will.
 
@@ -2349,42 +2411,111 @@ def verify_wheels(blob, specs):
                                 "carries it" % name)
             continue
 
-        if offset < 0 or offset + 36 > size:
-            problems.append("wheel %s offset %d is outside the segment (%d "
-                            "bytes)" % (name, offset, size))
+        problems.extend(_verify_wheel_block(blob, body, size, offset, spec, name))
+
+    return problems
+
+
+def verify_wheels_v2(blob, car_wheels):
+    """Re-read LUMP_CAR_WHEELS2 the way models.c BuildCarImportWheelsV2 will.
+
+    `car_wheels` is the manifest's per-car list:
+    [{"model", "car", "inherited", "wheels"}]. The v2 segment names the MODEL
+    each set belongs to, so this checks the slot headers (model, variant count,
+    slot length) and every block against the set declared for that model. A
+    model or variant the segment disagrees with is reported, never accepted as
+    an absent wheel.
+    """
+    problems = []
+    wanted = [entry for entry in (car_wheels or ())
+              if any(entry.get("wheels") or ())]
+    got = d2_lump(blob, LUMP_CAR_WHEELS2)
+
+    if not wanted:
+        if got is not None:
+            problems.append("the bank carries a per-model wheel segment but "
+                            "nothing declared one")
+        return problems
+
+    if got is None:
+        return ["the bank has no per-model wheel segment (%d car(s) declared)"
+                % len(wanted)]
+
+    body, size = got
+
+    if size < 8 or blob[body:body + 4] != bake.WHEEL_LUMP_MAGIC:
+        return ["the per-model wheel segment has no WHL2 header (%d bytes)"
+                % size]
+
+    nslots = struct.unpack_from("<i", blob, body + 4)[0]
+
+    if not 1 <= nslots <= MAX_CAR_MODELS:
+        return ["the per-model wheel segment holds %d slots; the engine takes "
+                "1..%d" % (nslots, MAX_CAR_MODELS)]
+
+    expected = {entry["model"]: entry for entry in wanted}
+    seen = set()
+    at = 8
+
+    for s in range(nslots):
+        if at + 12 > size:
+            problems.append("wheel slot %d header runs past the segment (%d "
+                            "bytes)" % (s, size))
+            break
+
+        model, count, slot_bytes = struct.unpack_from("<iii", blob, body + at)
+
+        if (not 0 <= model < MAX_CAR_MODELS or not 1 <= count <= len(WHEEL_VARIANTS)
+                or slot_bytes < 12 or at + slot_bytes > size):
+            problems.append("wheel slot %d is unusable (model %d, %d variants, "
+                            "%d bytes)" % (s, model, count, slot_bytes))
+            break
+
+        if model in seen:
+            problems.append("wheel segment lists model %d twice" % model)
+
+        seen.add(model)
+        entry = expected.get(model)
+
+        if entry is None:
+            problems.append("wheel segment names model %d, which nothing "
+                            "declared" % model)
+            at += slot_bytes
             continue
 
-        model = lev1.decode_model(blob, body + offset)
+        declared = entry.get("wheels") or []
 
-        if model.errors:
-            problems.append("wheel %s decoded with %d poly errors"
-                            % (name, len(model.errors)))
-            continue
+        if count != len(declared):
+            problems.append("wheel model %d holds %d variants, expected %d"
+                            % (model, count, len(declared)))
 
-        if not 8 <= len(model.polys) <= 24:
-            problems.append("wheel %s has %d polys; the engine takes 8..24"
-                            % (name, len(model.polys)))
-            continue
+        for k in range(min(count, len(WHEEL_VARIANTS))):
+            offset = struct.unpack_from("<i", blob, body + at + 12 + k * 4)[0]
+            spec = declared[k] if k < len(declared) else None
+            name = ("model %d wheel %s"
+                    % (model, spec["variant"] if spec else "variant %d" % k))
 
-        if any(p.kind != "FT4" for p in model.polys[:8]):
-            problems.append("wheel %s is not the 8-quad FT4 wheel"
-                            % name)
-            continue
+            if spec is None:
+                if offset != -1:
+                    problems.append("wheel %s is not declared but the segment "
+                                    "carries it" % name)
+                continue
 
-        poly = model.polys[2]
+            if offset == -1:
+                problems.append("wheel %s is declared but the segment writes "
+                                "-1 (keep the host wheel)" % name)
+                continue
 
-        if poly.texture_set != spec["set"]:
-            problems.append("wheel %s names page set %d, not the declared %d"
-                            % (name, poly.texture_set, spec["set"]))
+            problems.extend(_verify_wheel_block(blob, body, size, offset, spec,
+                                                name))
 
-        # WheelPolyRect: min/max of the UVs, then +1 on the maxima
-        us = [u for u, _v in poly.uv]
-        vs = [v for _u, v in poly.uv]
-        rect = (min(us), min(vs), max(us) + 1, max(vs) + 1)
+        at += slot_bytes
 
-        if list(rect) != list(spec["island"]):
-            problems.append("wheel %s covers %s, not the declared crop %s"
-                            % (name, list(rect), list(spec["island"])))
+    missing = sorted(set(expected) - seen)
+
+    if missing:
+        problems.append("wheel segment does not name declared model(s) %s"
+                        % ", ".join(str(m) for m in missing))
 
     return problems
 
@@ -2470,7 +2601,7 @@ def verify_sounds(blob, specs):
 
 
 def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
-                wheel_specs=None, sound_specs=None):
+                wheel_specs=None, sound_specs=None, car_wheels=None):
     problems = []
     with open(lev_path, "rb") as f:
         blob = f.read()
@@ -2515,7 +2646,9 @@ def verify_bank(lev_path, lcf_path, order, cars, manifest_dir, included,
             if size <= 8 or off + size > len(blob):
                 problems.append("set %d page bytes are missing" % s)
 
-    if wheel_specs is not None:
+    if car_wheels:
+        problems.extend(verify_wheels_v2(blob, car_wheels))
+    elif wheel_specs is not None:
         problems.extend(verify_wheels(blob, wheel_specs))
 
     if sound_specs is not None:

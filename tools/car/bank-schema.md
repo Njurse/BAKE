@@ -265,6 +265,17 @@ binds (`carTpages[city][8]` on the stock build). It only changes the
 still draws row 0 — the first page's palette — until the engine has a slot
 for it. Raising the number does not invent rows.
 
+`declare.auto_textures` (default `false`) is the opt-in safety net for wheel
+sprites. With it off, every explicit `island` is used exactly as written and a
+wheel that overlaps the page's body art or another car's sprite is refused by
+the clash check. With it on, the bake keeps every island that still fits and
+does not overlap, and moves only a wheel that cannot be used as declared: first
+to the first free rect on its own page, then to another page the bank carries
+(preferring the car's own pages). The relocation is reported with the old and
+new rect. It does not invent space — if no page has a free rect the bake still
+stops with the per-page inventory. This option relocates **wheel sprites only**;
+body texture pages are whole 256x256 pages and are never moved or renumbered.
+
 ### Firebird (multi-id page + an image paint)
 
 Stock materials are `set65_id0` for the body and `set65_id13` for the lamps.
@@ -377,6 +388,12 @@ top-left colour) are masked transparent. So:
 - whatever the page art carried at that rectangle cannot reach the bank;
 - the declared sprite is the only thing that can end up in the wheel;
 - editing the sprite re-bakes its page - it is part of the page's source hash.
+
+`"island": "auto"` asks the bake to choose the rect for that one sprite.
+`declare.auto_textures` is the bank-wide variant: it keeps a declared rect that
+already fits and moves only a sprite that cannot be used as written (overlapping
+body art or another car's sprite). Both forms relocate wheel sprites only; they
+never move or renumber a body texture page.
 
 The page still has to key its backdrop, because the engine has no per-texel alpha:
 the marker is a CLUT entry of `0x0000` and `CarImportDeriveWheelPaletteRow` keys
