@@ -97,6 +97,11 @@ LUMP_CAR_WHEELS = 200
 # straight to LoadSoundBankDynamic; SIRENS is 13 cop flags.
 LUMP_CAR_SOUNDS = 201
 LUMP_CAR_SIRENS = 202
+# JERICHO: the per-model wheel segment. 200 carries ONE set for the whole import
+# (every car the import brings wears it); this one names the model slot in each
+# block, so two cars in one bank can wear different wheels. 203 is
+# LUMP_POLICE_VOICES, so the next free id is 204.
+LUMP_CAR_WHEELS2 = 204
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
@@ -1420,13 +1425,8 @@ def _uv_corners(island):
     return (u0, v0, u1 - 1, v1 - 1)
 
 
-def build_wheel_body(specs):
-    """A LUMP_CAR_WHEELS body from [(variant, page set, island)] (None = absent).
-
-    One entry per variant, in WHEEL_VARIANTS order. An absent variant is written
-    as offset -1, which is the engine's "keep the host level's wheel for this
-    state" - the rule bake.build_wheel_lump already carries.
-    """
+def _wheel_geoms(specs):
+    """[geom | None] for one wheel set - the FT4 carrier per declared variant."""
     geoms = []
 
     for spec in specs:
@@ -1438,7 +1438,29 @@ def build_wheel_body(specs):
                                               _uv_corners(spec["island"]),
                                               name=spec["variant"]))
 
-    return bake.build_wheel_lump(geoms)
+    return geoms
+
+
+def build_wheel_body(specs):
+    """A LUMP_CAR_WHEELS body from [(variant, page set, island)] (None = absent).
+
+    One entry per variant, in WHEEL_VARIANTS order. An absent variant is written
+    as offset -1, which is the engine's "keep the host level's wheel for this
+    state" - the rule bake.build_wheel_lump already carries.
+    """
+    return bake.build_wheel_lump(_wheel_geoms(specs))
+
+
+def build_wheel_body_v2(car_wheels):
+    """A LUMP_CAR_WHEELS2 body: one wheel set per MODEL slot.
+
+    `car_wheels` is the manifest's per-car list, [{"model", "car", "wheels"}].
+    A car the list does not name simply has no slot in the segment, and the
+    engine falls back to the bank's default set for it - the v1 behaviour.
+    """
+    return bake.build_wheel_lump_v2([(entry["model"],
+                                      _wheel_geoms(entry["wheels"]))
+                                     for entry in car_wheels])
 
 
 SOUND_RATE_LADDER = (44100, 32000, 22050, 16000, 11025, 8000)
@@ -1863,9 +1885,54 @@ def _load_wheels(manifest):
     return [by_variant.get(variant) for variant in WHEEL_VARIANTS]
 
 
+def _load_car_wheels(manifest):
+    """The manifest's per-car `car_wheels`, or None when the bank has one set.
+
+    The bake writes this only when more than one car declares its own set (see
+    carbank_bake.build_manifest). Each entry is
+    {"model", "car", "inherited", "wheels"}; the wheels go through the same
+    validation as the bank default, so a hand-edited manifest is refused by name
+    instead of being encoded into a segment the engine cannot read.
+    """
+    raw = manifest.get("car_wheels")
+
+    if not raw:
+        return None
+
+    if not isinstance(raw, list):
+        raise SystemExit("bank: car_wheels must be a list, not %r" % (raw,))
+
+    out = []
+    seen = set()
+
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise SystemExit("bank: a car_wheels entry must be an object, not %r"
+                             % (entry,))
+
+        model = entry.get("model")
+
+        if not isinstance(model, int) or not 0 <= model < MAX_CAR_MODELS:
+            raise SystemExit(
+                "bank: car_wheels model %r is not a model slot 0..%d"
+                % (model, MAX_CAR_MODELS - 1))
+
+        if model in seen:
+            raise SystemExit("bank: car_wheels lists model %d twice" % model)
+
+        seen.add(model)
+        out.append({"model": model,
+                    "car": entry.get("car", ""),
+                    "inherited": bool(entry.get("inherited")),
+                    "wheels": _load_wheels({"wheels": entry.get("wheels") or []})})
+
+    return sorted(out, key=lambda e: e["model"])
+
+
 def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
-                  wheels_body=None, sounds_body=None, sirens_body=None):
+                  wheels_body=None, sounds_body=None, sirens_body=None,
+                  wheels2_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -1877,6 +1944,8 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
     add(LUMP_CAR_MODELS, models_body)
     if wheels_body:
         add(LUMP_CAR_WHEELS, wheels_body)
+    if wheels2_body:
+        add(LUMP_CAR_WHEELS2, wheels2_body)
     if sounds_body:
         add(LUMP_CAR_SOUNDS, sounds_body)
     if sirens_body:
@@ -2095,8 +2164,17 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         page_blobs.append(data)
         page_report.append({"set": s, "size": len(data)})
 
+    car_wheels = _load_car_wheels(manifest)
+
     wheels_body = None
-    if any(wheel_specs):
+    wheels2_body = None
+
+    if car_wheels:
+        # More than one car declares its own set: the model has to travel with
+        # the wheels, so the v2 segment is written INSTEAD of v1 (an engine that
+        # predates it keeps host wheels, which is the documented fallback).
+        wheels2_body = build_wheel_body_v2(car_wheels)
+    elif any(wheel_specs):
         wheels_body = build_wheel_body(wheel_specs)
 
     sound_specs = _load_sounds(manifest)
@@ -2105,7 +2183,8 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
 
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
-                              wheels_body, sounds_body, sirens_body)
+                              wheels_body, sounds_body, sirens_body,
+                              wheels2_body=wheels2_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -2134,6 +2213,9 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         "page_base": d2_page_base(bank_blob),
         "warnings": warnings,
     }
+    if car_wheels:
+        report["car_wheels"] = car_wheels
+
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
                                    sound_specs)
