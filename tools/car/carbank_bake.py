@@ -1073,8 +1073,11 @@ def _check_wheel_clashes(car_wheels):
             rect = tuple(int(v) for v in spec["island"])
 
             for other_car, other_variant, other in owners.get(spec["set"], ()):
-                if other_car == carname and other == rect:
-                    continue            # this car's own variant on one rect
+                if other == rect:
+                    # one rect, one sprite: two cars may share a wheel island
+                    # (an inherited set, or deliberate sharing) - the composite
+                    # paints one sprite and both cars sample it
+                    continue
 
                 if _rects_overlap(other, rect):
                     raise SystemExit(

@@ -170,10 +170,10 @@ class WheelLumpV2Tests(unittest.TestCase):
         magic, nslots = struct.unpack_from("<4si", body, 0)
         self.assertEqual((magic, nslots), (b"WHL2", 2))
 
-        model, count = struct.unpack_from("<ii", body, 8)
+        model, count, slot_bytes = struct.unpack_from("<iii", body, 8)
         self.assertEqual((model, count), (0, 3))
 
-        offs = list(struct.unpack_from("<iii", body, 16))
+        offs = list(struct.unpack_from("<iii", body, 20))
         self.assertGreaterEqual(offs[0], 0)
         self.assertEqual(offs[1:], [-1, -1])        # v1's "keep the host wheel"
 
@@ -181,11 +181,13 @@ class WheelLumpV2Tests(unittest.TestCase):
         wheel = lev1.decode_model(body[offs[0]:], 0)
         self.assertEqual(len(wheel.polys), 8)
 
-        # slot 1's header follows slot 0's blocks, and names model 1
-        next_at = offs[0] + len(carbank_wheels.wheel_record(20, (0, 0, 63, 63)))
-        model1, count1 = struct.unpack_from("<ii", body, next_at)
+        # the slot's byte length is what lets a reader step to the next slot,
+        # because a MODEL block is variable-length
+        next_at = 8 + slot_bytes
+        model1, count1, slot1_bytes = struct.unpack_from("<iii", body, next_at)
         self.assertEqual((model1, count1), (1, 3))
-        self.assertEqual(struct.unpack_from("<i", body, next_at + 8)[0], -1)
+        self.assertEqual(struct.unpack_from("<i", body, next_at + 12)[0], -1)
+        self.assertEqual(next_at + slot1_bytes, len(body))
 
     def test_a_repeated_slot_is_refused(self):
         geom = carbank_wheels.wheel_geom(20, (0, 0, 63, 63), name="clean")

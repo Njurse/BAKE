@@ -618,7 +618,13 @@ def build_wheel_lump_v2(slots):
     import brings. A bank may now carry a set per car, so v2 names the model::
 
         [4s "WHL2"][i32 nslots]
-        nslots x {[i32 model][i32 count][count x i32 offset][MODEL blocks]}
+        nslots x {[i32 model][i32 count][i32 slot_bytes][count x i32 offset]
+                  [MODEL blocks]}
+
+    `slot_bytes` is the length of that whole slot record, so a reader walks from
+    one slot header to the next without having to measure a MODEL block - the
+    blocks are variable-length (a wheel is a bare MODEL + FT4 stream, but the
+    next slot starts immediately after it).
 
     Offsets are relative to the segment body start, exactly as in v1, and -1
     still means "this variant is absent - keep the host level's wheel".
@@ -647,20 +653,25 @@ def build_wheel_lump_v2(slots):
                              % (model, len(geoms) if geoms else 0,
                                 MAX_CAR_MODELS))
 
-        body += struct.pack("<ii", model, len(geoms))
-        offsets_at = len(body)
-        body += b"\x00" * (len(geoms) * 4)
+        slot = bytearray(struct.pack("<iii", model, len(geoms), 0))
+        slot += b"\x00" * (len(geoms) * 4)
 
         offsets = []
         for g in geoms:
             if g is None:
                 offsets.append(-1)
                 continue
-            offsets.append(len(body))
-            body += build_wheel_record(g, g.get("scale", d1pool.SCALE))
+            offsets.append(len(slot))
+            slot += build_wheel_record(g, g.get("scale", d1pool.SCALE))
 
+        # offsets are from the segment BODY, not this slot: the reader hands the
+        # engine an absolute body pointer, exactly as it does for v1
+        base = len(body)
         for i, ofs in enumerate(offsets):
-            struct.pack_into("<i", body, offsets_at + i * 4, ofs)
+            struct.pack_into("<i", slot, 12 + i * 4, -1 if ofs < 0 else base + ofs)
+
+        struct.pack_into("<i", slot, 8, len(slot))
+        body += slot
 
     return bytes(body)
 
