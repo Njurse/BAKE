@@ -13,14 +13,18 @@ Run from this directory:
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import bake
 import bankjson
 import carbank_bake
+import carbank_wheels
+import lev1
 
 
 class WheelFixture(unittest.TestCase):
@@ -153,6 +157,41 @@ class PerCarSetterTests(WheelFixture):
 
         islands = carbank_bake.wheel_islands(bank)
         self.assertEqual(len(islands[20]), 2)
+
+
+class WheelLumpV2Tests(unittest.TestCase):
+    def test_each_slot_carries_its_own_models(self):
+        """v2 names the model slot, so two cars' sets do not overwrite each other."""
+        geom = carbank_wheels.wheel_geom(20, (0, 0, 63, 63), name="clean")
+
+        body = bake.build_wheel_lump_v2([(0, [geom, None, None]),
+                                         (1, [None, geom, geom])])
+
+        magic, nslots = struct.unpack_from("<4si", body, 0)
+        self.assertEqual((magic, nslots), (b"WHL2", 2))
+
+        model, count = struct.unpack_from("<ii", body, 8)
+        self.assertEqual((model, count), (0, 3))
+
+        offs = list(struct.unpack_from("<iii", body, 16))
+        self.assertGreaterEqual(offs[0], 0)
+        self.assertEqual(offs[1:], [-1, -1])        # v1's "keep the host wheel"
+
+        # the block really is a wheel MODEL: the eight FT4 quads models.c wants
+        wheel = lev1.decode_model(body[offs[0]:], 0)
+        self.assertEqual(len(wheel.polys), 8)
+
+        # slot 1's header follows slot 0's blocks, and names model 1
+        next_at = offs[0] + len(carbank_wheels.wheel_record(20, (0, 0, 63, 63)))
+        model1, count1 = struct.unpack_from("<ii", body, next_at)
+        self.assertEqual((model1, count1), (1, 3))
+        self.assertEqual(struct.unpack_from("<i", body, next_at + 8)[0], -1)
+
+    def test_a_repeated_slot_is_refused(self):
+        geom = carbank_wheels.wheel_geom(20, (0, 0, 63, 63), name="clean")
+
+        with self.assertRaises(SystemExit):
+            bake.build_wheel_lump_v2([(0, [geom]), (0, [geom])])
 
 
 if __name__ == "__main__":

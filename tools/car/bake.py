@@ -606,6 +606,65 @@ def build_wheel_lump(wheels):
     return bytes(body)
 
 
+# A v1 LUMP_CAR_WHEELS body starts with a count of 1..3, so this tag cannot be
+# mistaken for one - the engine reads v2 only when it sees the tag.
+WHEEL_LUMP_MAGIC = b"WHL2"
+
+
+def build_wheel_lump_v2(slots):
+    """LUMP_CAR_WHEELS2 body: a wheel set per MODEL slot, not per import.
+
+    v1 is `[count][offsets][models]` and the engine applies it to every car the
+    import brings. A bank may now carry a set per car, so v2 names the model::
+
+        [4s "WHL2"][i32 nslots]
+        nslots x {[i32 model][i32 count][count x i32 offset][MODEL blocks]}
+
+    Offsets are relative to the segment body start, exactly as in v1, and -1
+    still means "this variant is absent - keep the host level's wheel".
+
+    `slots` is [(model, [geom | None, ...]), ...]; a model may appear once.
+    """
+    if not slots:
+        raise SystemExit("a wheel segment needs at least one model slot")
+
+    body = bytearray(WHEEL_LUMP_MAGIC)
+    body += struct.pack("<i", len(slots))
+    seen = set()
+
+    for model, geoms in slots:
+        if not isinstance(model, int) or not 0 <= model < MAX_CAR_MODELS:
+            raise SystemExit("wheel slot %r is not a model slot 0..%d"
+                             % (model, MAX_CAR_MODELS - 1))
+
+        if model in seen:
+            raise SystemExit("wheel slot %d is listed twice" % model)
+
+        seen.add(model)
+
+        if not geoms or len(geoms) > MAX_CAR_MODELS:
+            raise SystemExit("wheel slot %d names %d variants, not 1..%d"
+                             % (model, len(geoms) if geoms else 0,
+                                MAX_CAR_MODELS))
+
+        body += struct.pack("<ii", model, len(geoms))
+        offsets_at = len(body)
+        body += b"\x00" * (len(geoms) * 4)
+
+        offsets = []
+        for g in geoms:
+            if g is None:
+                offsets.append(-1)
+                continue
+            offsets.append(len(body))
+            body += build_wheel_record(g, g.get("scale", d1pool.SCALE))
+
+        for i, ofs in enumerate(offsets):
+            struct.pack_into("<i", body, offsets_at + i * 4, ofs)
+
+    return bytes(body)
+
+
 def _wheel_is_car_scale(model, scale):
     """A wheel from a car level, not a menu/credits display asset.
 
