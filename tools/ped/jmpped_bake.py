@@ -346,12 +346,20 @@ def _set_map(part: dict, character: dict) -> dict[int, int]:
 
 
 def _runtime_targets(project: str) -> list[str]:
-    targets = [os.path.join(project, "JMPPED.LEV")]
+    """Where `bake --copy` puts the archive.
+
+    JMPPED.LEV ships with the mp mod, so the canonical copy is
+    JERICHO/MODS/mp/JMPPED.LEV and the runtime copy sits in the built mp mod
+    folder. DRIVER2/LEVELS stays a target until the engine reads the mod path.
+    REPO is the JERICHO folder; src_rebuild is its sibling in the game tree.
+    """
+    targets = [os.path.join(project, "JMPPED.LEV"),
+               os.path.join(REPO, "MODS", "mp", "JMPPED.LEV")]
     for config in ("Release", "Release_dev"):
-        levels = os.path.join(REPO, "src_rebuild", "bin", config,
-                              "DRIVER2", "LEVELS")
-        if os.path.isdir(os.path.dirname(os.path.dirname(levels))):
-            targets.append(os.path.join(levels, "JMPPED.LEV"))
+        bindir = os.path.join(os.path.dirname(REPO), "src_rebuild", "bin", config)
+        if os.path.isdir(bindir):
+            targets.append(os.path.join(bindir, "JERICHO", "MODS", "mp", "JMPPED.LEV"))
+            targets.append(os.path.join(bindir, "DRIVER2", "LEVELS", "JMPPED.LEV"))
     return targets
 
 
