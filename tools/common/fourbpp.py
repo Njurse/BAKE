@@ -37,9 +37,18 @@ PAGE_INDEX_BYTES = PAGE_BYTES // 2   # two 4bpp indices per byte, 32768
 
 
 def rgb555(rgb8: Sequence[int]) -> int:
-    """8-bit (r, g, b) -> one PSX RGB555 word (STP clear, so opaque)."""
+    """8-bit (r, g, b) -> one PSX RGB555 word (STP clear, so opaque).
+
+    0x0000 is the engine's transparent key. Truncating with `>> 3` maps every
+    channel under 8 to zero, so a near-black source like (4, 4, 4) would become
+    a hole. Only a source that is exactly (0, 0, 0) may produce 0x0000; any
+    other colour that truncates to zero becomes the darkest opaque shade, 0x0421.
+    """
     r, g, b = rgb8[0], rgb8[1], rgb8[2]
-    return ((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10)
+    v = ((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) | (((b >> 3) & 0x1F) << 10)
+    if v == 0 and (r or g or b):
+        return 0x0421
+    return v
 
 
 def clut_rgb(row: bytes) -> list[tuple[int, int, int]]:
