@@ -59,6 +59,37 @@ def skeleton_for(project: str, character: dict,
     }
 
 
+def _part_side(part: str) -> str:
+    if part.endswith("_LEFT"):
+        return "L"
+    if part.endswith("_RIGHT"):
+        return "R"
+    return ""
+
+
+def _check_part_side(part: str, bone: str, engine) -> None:
+    """Refuse a part whose side disagrees with the bone that carries it.
+
+    A stem part is stored in the space of the joint on its own side. Subtracting
+    the opposite side's joint instead puts the art two bone-widths away from the
+    pivot that rotates it - the shoes drifted 56 engine units and swung wide on
+    every toe rotation - and nothing complains until someone looks at the ped's
+    feet. Cheap to assert, so assert it where every caller passes through.
+    """
+    side = _part_side(part)
+    if not side or not isinstance(engine, list) or len(engine) != 3:
+        return
+    x = float(engine[0])
+    bone_side = "L" if x > 0 else ("R" if x < 0 else "")
+    if bone_side and bone_side != side:
+        raise jc.JMPPEDError(
+            "%s: bound to %s, which sits on the %s side of the skeleton; a %s "
+            "part must keep the bone on its own side, or its art is stored away "
+            "from the joint that rotates it"
+            % (part, bone, "left" if bone_side == "L" else "right",
+               "left" if side == "L" else "right"))
+
+
 def bind_offset(bones: dict, part: str, bone_by_model: dict) -> tuple:
     bone = bone_by_model.get(part)
     if bone is None:
@@ -70,6 +101,7 @@ def bind_offset(bones: dict, part: str, bone_by_model: dict) -> tuple:
     offset = rec.get("engine")
     if not isinstance(offset, list) or len(offset) != 3:
         raise jc.JMPPEDError("bone %r has no three-value engine offset" % bone)
+    _check_part_side(part, bone, offset)
     return tuple(float(v) for v in offset)
 
 
@@ -84,6 +116,112 @@ def model_path(project: str, character: dict) -> str:
 
 def part_names(character: dict) -> list[str]:
     return [p["part"] for p in character.get("parts", [])]
+
+
+def rename_part(project: str, part: dict, new_name: str) -> list[str]:
+    """Give one part record another name, moving its named files with it.
+
+    The archive addresses a part by slot, so its name is an authoring label.
+    The per-part caches and crops are named after it, so they are renamed too.
+    Returns the old cache files to delete once the new ones are written (the
+    caller writes them, so it can move or overwrite safely).
+    """
+    old = part["part"]
+    if old == new_name:
+        return []
+    stale = []
+    part["part"] = new_name
+    for key in ("obj_raw", "obj_edit"):
+        rel = part.get(key)
+        if not rel:
+            continue
+        folder, file_name = os.path.split(rel)
+        if file_name != old + ".obj":
+            continue
+        part[key] = ((folder + "/") if folder else "") + new_name + ".obj"
+        old_abs = _abs(project, rel)
+        if os.path.isfile(old_abs):
+            stale.append(old_abs)
+    for crop in part.get("crops") or []:
+        rel = crop.get("rgb")
+        if not rel:
+            continue
+        folder, file_name = os.path.split(rel)
+        if not file_name.startswith(old + "_"):
+            continue
+        new_rel = (((folder + "/") if folder else "") + new_name
+                   + file_name[len(old):])
+        old_abs = _abs(project, rel)
+        new_abs = _abs(project, new_rel)
+        if os.path.isfile(old_abs) and not os.path.exists(new_abs):
+            os.replace(old_abs, new_abs)
+        crop["rgb"] = new_rel
+    return stale
+
+
+def adopt_upper_names(project: str, character: dict,
+                      groups: dict) -> list[str]:
+    """Follow the torso/head/arm names the model actually uses.
+
+    tannerd3 fills those slots with Tanner's geometry. A model exported from
+    Blender names its objects TORSO, HEAD, ... while the cloned records still
+    say JERI_*. Both address the same slot: when the export uses Tanner's names
+    for all six, the records adopt them (so the caches and materials stop lying
+    about being Jericho); when it uses the recorded names, the groups are keyed
+    back onto the records. Returns the old cache files to delete.
+    """
+    upper = [(part, jc.part_alias(part["part"]))
+             for part in character.get("parts", [])
+             if jc.part_alias(part["part"])]
+    if not upper:
+        return []
+    for part, alt in upper:
+        if part["part"] not in groups and alt not in groups:
+            # A missing part is reported by the caller's missing-parts check;
+            # rename nothing on a half-read model.
+            return []
+    both = [part["part"] for part, alt in upper
+            if part["part"] in groups and alt in groups]
+    if both:
+        raise jc.JMPPEDError(
+            "%s: the model names the %s slot both ways; keep either the "
+            "archive (JERI_*) or the source (TORSO, HEAD, ...) name"
+            % (character.get("name", "?"), both[0]))
+
+    own_used = [part["part"] in groups for part, _ in upper]
+    alt_used = [alt in groups for _, alt in upper]
+    if all(alt_used) and not any(own_used):
+        # Every upper group used the other name. Adopt it only when the records
+        # are the archive (Jericho) names and the model used Tanner's.
+        if all(jc.part_alias(part["part"]) in jc.UPPER_SLOT_ALIASES.values()
+               for part, _ in upper):
+            stale = []
+            for part, alt in upper:
+                stale += rename_part(project, part, alt)
+            # The bindings name the parts, so follow them to the variant that
+            # has the adopted names (tanner for Tanner's torso/head/arms).
+            data = skeleton_for(project, character)
+            character["skeleton"] = _variant_for_parts(
+                data["skeleton"], part_names(character),
+                character.get("skeleton", "jericho"))
+            return stale
+
+    # Keep the record names; key any alias group onto its part.
+    for part, alt in upper:
+        if alt in groups and part["part"] not in groups:
+            groups[part["part"]] = groups.pop(alt)
+    return []
+
+
+def _variant_for_parts(skeleton: dict, parts: list[str], current: str) -> str:
+    """The skeleton variant whose bindings name every part, preferring `current`."""
+    variants = skeleton.get("variants") or {}
+    order = [current] + sorted(v for v in variants if v != current)
+    for variant in order:
+        values = set((variants[variant].get("bindings") or {}).values())
+        if set(parts) <= values:
+            return variant
+    return current
 
 
 def reference_names(skeleton: dict) -> list[str]:
@@ -233,12 +371,20 @@ def split_character(project: str, character: dict, scene: str | None = None,
 
     data = skeleton_for(project, character, manifest)
     parts = part_names(character)
-    names = set(parts) | set(data["bindings"].values())
+    names = jc.part_names_with_aliases(
+        set(parts) | set(data["bindings"].values()))
     if use_textured:
         groups = jt.read_textured(project, character, scene_abs)
-        jt.write_page_model(project, character, groups)
     else:
         groups = jm.read_combined_obj(scene_abs, names, blender=not raw)
+    stale = adopt_upper_names(project, character, groups)
+    if stale:
+        parts = part_names(character)
+        data = skeleton_for(project, character, manifest)
+    if use_textured:
+        # Generated from the adopted names, so the page model and the part
+        # caches agree on what each object is called.
+        jt.write_page_model(project, character, groups)
     missing = sorted(set(parts) - set(groups))
     if missing:
         raise jc.JMPPEDError(
@@ -280,6 +426,12 @@ def split_character(project: str, character: dict, scene: str | None = None,
             part["obj_raw_sha256"] = jc.sha256_file(raw_path)
         if primary_changed:
             changed += 1
+
+    for path in stale:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     part_set = set(parts)
     for name in sorted(set(data["bindings"].values()) - part_set):

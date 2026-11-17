@@ -400,7 +400,10 @@ def _resolve_part_group(name: str, part_names: set[str]) -> str | None:
 
     Blender writes `PART`, `PART_PART` for the object and `PART_sN_tM` for a
     material subgroup, and appends `.001` when the object name is duplicated.
-    `off` and unknown names return None.
+    A Blender scene may also carry the base set's `JERI_` prefix on every
+    object, even the parts the archive does not prefix (`JERI_CALF_LEFT`); that
+    prefix is stripped only after the full name fails, so an actual `JERI_HEAD`
+    group still resolves to `JERI_HEAD`. `off` and unknown names return None.
     """
     name = name.strip()
     if not name:
@@ -409,11 +412,21 @@ def _resolve_part_group(name: str, part_names: set[str]) -> str | None:
         head, tail = name.rsplit(".", 1)
         if tail.isdigit():
             name = head
-    if name in part_names:
-        return name
-    for part in sorted(part_names, key=len, reverse=True):
-        if name.startswith(part + "_") or name.startswith(part + "."):
-            return part
+
+    def resolve(candidate: str) -> str | None:
+        if candidate in part_names:
+            return candidate
+        for part in sorted(part_names, key=len, reverse=True):
+            if (candidate.startswith(part + "_")
+                    or candidate.startswith(part + ".")):
+                return part
+        return None
+
+    found = resolve(name)
+    if found is not None:
+        return found
+    if name.startswith(ARCHIVE_PART_PREFIX):
+        return resolve(name[len(ARCHIVE_PART_PREFIX):])
     return None
 
 

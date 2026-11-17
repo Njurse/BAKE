@@ -116,7 +116,8 @@ def _polys_from_obj(faces, path: str, set_map=None) -> list:
 def _load_model(path: str, blender: bool, model: jm.Model,
                 page_sets: set[int], label: str,
                 offset=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0),
-                set_map=None) -> bytes:
+                set_map=None, texture_row: int | None = None,
+                texture_map: dict[int, int] | None = None) -> bytes:
     if model.normals or model.point_normals:
         raise jc.JMPPEDError(
             "%s (%s): this model has normal tables; the OBJ path only rebuilds "
@@ -136,6 +137,18 @@ def _load_model(path: str, blender: bool, model: jm.Model,
         polys = _polys_from_obj(faces, path, set_map)
     except jc.JMPPEDError as e:
         raise jc.JMPPEDError("%s: %s" % (label, e)) from e
+    if texture_row is not None:
+        # One row per part: the crop records own the texture; the model's
+        # material id is only the author's old label for it.
+        for p in polys:
+            if p.textured:
+                p.id = int(texture_row) & 0xFF
+    elif texture_map:
+        # A part with several crops: keep each material but move its palette
+        # row to the one allocated for that crop.
+        for p in polys:
+            if p.textured and p.id in texture_map:
+                p.id = int(texture_map[p.id]) & 0xFF
     for p in polys:
         if p.textured and p.set not in page_sets:
             raise jc.JMPPEDError(
@@ -371,7 +384,8 @@ def _copy_runtime(project: str, archive: str) -> None:
 
 
 def _build_character(project: str, arch: ja.Archive, character: dict,
-                     index: int, use: str):
+                     index: int, use: str,
+                     texture_rows: dict[str, dict] | None = None):
     je.validate_character({}, character)
     page_sets = {int(s) for s in character["texture_page_sets"]}
     used_slots: set[int] = set()
@@ -388,7 +402,11 @@ def _build_character(project: str, arch: ja.Archive, character: dict,
             raise jc.JMPPEDError("%s: slot %d is claimed more than once"
                                  % (character["name"], slot))
         used_slots.add(slot)
-        if part["part"] != arch.model_names[slot]:
+        allowed = {arch.model_names[slot]}
+        alias = jc.part_alias(arch.model_names[slot])
+        if alias:
+            allowed.add(alias)
+        if part["part"] not in allowed:
             raise jc.JMPPEDError("%s/%s maps to slot %d, whose base model is %s"
                                  % (character["name"], part["part"], slot,
                                     arch.model_names[slot]))
@@ -421,14 +439,17 @@ def _build_character(project: str, arch: ja.Archive, character: dict,
             else:
                 path = edit
             blender = path == edit
+            override = (texture_rows or {}).get(part["part"]) or {}
             blob = _load_model(path, blender, arch.models[slot], page_sets,
                                "%s/%s" % (character["name"], part["part"]),
                                transform[0], transform[1],
-                               _set_map(part, character))
+                               _set_map(part, character),
+                               override.get("all"),
+                               override.get("textures"))
             model = jm.parse_model(blob)
             changed += 1
             print("model %-20s rebuilt from %s/%s" %
-                  (arch.model_names[slot], character["name"],
+                  (part["part"], character["name"],
                    os.path.basename(path)))
         else:
             blob = arch.raw_models[slot]
@@ -443,8 +464,88 @@ def _build_character(project: str, arch: ja.Archive, character: dict,
     return models, raw_models, changed
 
 
+def _crop_palette(project: str, crop: dict):
+    """Quantise one crop to the 16-colour row it will be painted with."""
+    rect = crop.get("rect")
+    rgb = crop.get("rgb")
+    if not rect or not rgb:
+        return None
+    x, y, w, h = _check_page_rect(rect, rgb)
+    path = _abs(project, rgb)
+    if not os.path.isfile(path):
+        return None
+    actual_w, actual_h, pixels = ji.load_png_rgb(path)
+    if len(pixels) != w * h:
+        raise jc.JMPPEDError(
+            "%s is %dx%d, but its crop rect %r expects %dx%d"
+            % (path, actual_w, actual_h, rect, w, h))
+    colours, _patch = _paletteize_crop(pixels, w, h)
+    return tuple(colours)
+
+
+def allocate_palette_rows(project: str, character: dict,
+                          palette_rows: dict[int, int]) -> dict[str, dict]:
+    """Give each crop its own palette row, deduplicating equal palettes.
+
+    A texture id is a CLUT row, so two crops with different palettes must not
+    share one: the later crop would overwrite the earlier palette. Starting
+    from the row the character already names, each crop keeps it when it is
+    free (or already holds the same palette) and moves to the next free row
+    when another palette owns it. Crops that quantise to the same palette
+    (mirrored arms, the leg set) deliberately share a row.
+
+    Returns {part: {"all": row}} for the usual one-crop part, or
+    {part: {"textures": {source texture: row}}} when a part has several crops.
+    Each crop also carries its chosen row as `_alloc_row` for the page bake.
+    The bake applies this to custom characters; the base character keeps its
+    stock texture layout byte-for-byte.
+    """
+    used: dict[int, dict[int, tuple]] = {}
+    out: dict[str, dict] = {}
+    for part in character.get("parts", []):
+        crops = [c for c in part.get("crops") or []
+                 if c.get("rgb") and c.get("rect")]
+        if not crops:
+            continue
+        textures: dict[int, int] = {}
+        for crop in crops:
+            page_set = int(crop["page_set"])
+            palette = _crop_palette(project, crop)
+            if palette is None:
+                continue
+            total = int(palette_rows.get(page_set, 0))
+            if total <= 0:
+                continue
+            page_rows = used.setdefault(page_set, {})
+            row = next((r for r, pal in page_rows.items() if pal == palette),
+                       None)
+            if row is None:
+                preferred = int(crop.get("palette_row",
+                                         crop.get("texture", 0)))
+                order = (list(range(preferred, total))
+                         + list(range(0, preferred)))
+                row = next((r for r in order if r not in page_rows), None)
+                if row is None:
+                    raise jc.JMPPEDError(
+                        "%s/%s: all %d palette rows are in use; merge crops or "
+                        "give the character a page with more rows"
+                        % (character["name"], part["part"], total))
+                page_rows[row] = palette
+            crop["_alloc_row"] = row
+            if crop.get("texture") is not None:
+                textures[int(crop["texture"])] = row
+        if len(crops) == 1:
+            row = crops[0].get("_alloc_row")
+            if row is not None:
+                out[part["part"]] = {"all": int(row)}
+        elif textures:
+            out[part["part"]] = {"textures": textures}
+    return out
+
+
 def _apply_character_crops(character: dict, states: dict[int, dict],
-                           project: str) -> int:
+                           project: str,
+                           palette_rows: dict[str, int] | None = None) -> int:
     changed = 0
     seen = set()
 
@@ -456,6 +557,13 @@ def _apply_character_crops(character: dict, states: dict[int, dict],
                 "%s/%s: crop references page set %d, which the character "
                 "does not carry"
                 % (character["name"], label, page_set))
+        row = crop.get("_alloc_row")
+        if row is None and palette_rows and label in palette_rows:
+            override = palette_rows[label]
+            row = override.get("all") if isinstance(override, dict) else override
+        if row is not None:
+            crop = dict(crop)
+            crop["palette_row"] = int(row)
         key = (page_set,
                tuple(int(v) for v in crop["rect"]),
                crop.get("rgb"),
@@ -551,12 +659,7 @@ def build_v5(project: str, manifest: dict, dest: str | None,
     characters = manifest["characters"]
     models_by_character = []
     states: dict[int, dict] = {}
-    changed_models = 0
-    for index, c in enumerate(characters):
-        models, raw_models, changed = _build_character(project, arch, c,
-                                                       index, use)
-        models_by_character.append((models, raw_models))
-        changed_models += changed
+    for c in characters:
         for page in c["pages"]:
             st = _entry_page_state(page, arch, project)
             if st["set"] in states:
@@ -564,9 +667,38 @@ def build_v5(project: str, manifest: dict, dest: str | None,
                                      "character" % st["set"])
             states[st["set"]] = st
 
+    # Custom characters get one palette row per distinct crop palette. Entry 0
+    # is the stock set: its texture layout is what base_v5 ships, so leave it
+    # untouched and keep a no-edit bake byte-identical.
+    palette_rows = {s: len(st["cluts"]) for s, st in states.items()}
+    rows_by_character: list[dict[str, dict]] = []
+    for index, c in enumerate(characters):
+        rows = ({} if index == 0
+                else allocate_palette_rows(project, c, palette_rows))
+        if rows:
+            labels = []
+            for p in c["parts"]:
+                override = rows.get(p["part"])
+                if not override:
+                    continue
+                if "all" in override:
+                    labels.append("%s=%d" % (p["part"], override["all"]))
+                else:
+                    labels.append("%s=%s" % (p["part"], override["textures"]))
+            print("palette rows: %s" % ", ".join(labels))
+        rows_by_character.append(rows)
+
+    changed_models = 0
+    for index, c in enumerate(characters):
+        models, raw_models, changed = _build_character(
+            project, arch, c, index, use, rows_by_character[index])
+        models_by_character.append((models, raw_models))
+        changed_models += changed
+
     changed_crops = 0
-    for c in characters:
-        changed_crops += _apply_character_crops(c, states, project)
+    for index, c in enumerate(characters):
+        changed_crops += _apply_character_crops(
+            c, states, project, rows_by_character[index])
 
     changed_pages = 0
     out_entries = []

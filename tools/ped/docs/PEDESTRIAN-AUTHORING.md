@@ -113,9 +113,29 @@ motion-space positions (`motion_raw`, +Y up) and the engine draw positions
 ## 3. The 14-slot map
 
 Every entry has exactly these 14 model slots. Slots 0–5 are the Jericho upper
-body; slots 6–13 are Tanner's limbs and hands. The bind bone column is the
-Jericho/`OTHER_MODEL` binding; the Tanner skeleton binds `LTOE`/`RTOE` to the
-opposite foot names, which is why `skeleton.json` keeps both skeletons.
+body; slots 6–13 are Tanner's limbs and hands. The bind bone column is the joint
+each part is stored against; `skeleton.json` keeps one binding table per variant
+because Tanner and Jericho bind different models to the same joints.
+
+The archive addresses slots 0–5 by number, not by name. The base set calls them
+`JERI_*`, but a character built from Tanner's own torso/head/arms (tannerd3)
+names the same slots `TORSO`, `HEAD`, `U_ARM_*`, `L_ARM_*`. The splitter accepts
+either name and follows the one the model uses, so a Tanner exported from
+Blender does not come back prefixed with Jericho's names. Slots 6–13 have one
+name.
+
+For a custom entry, `bake` also allocates the palette rows: it quantises each
+part's crop, gives equal palettes one row (mirrored arms, the leg set) and a
+different palette the next free row, then rewrites the part's material id to
+that row. A crop's `palette_row` is a starting hint, not a hard mapping. Entry
+0 is the stock set and keeps its shipped layout byte-for-byte.
+
+Slots 8 and 11 are stored against the toe on their own side. The engine draws
+slot 8 on `RTOE` and slot 11 on `LTOE` — the stock Tanner crossover in
+`SetSkelModelPointersForEntry` — so the shoe art is mirrored by the draw. A stock
+ped does the same and near-symmetric shoe art hides it; storing a shoe against
+the opposite toe instead would put its art two toe-widths (56 engine units) away
+from the pivot that turns it, and the splitter now refuses that.
 
 | Slot | Part | Source ped | Bind bone | Entry-0 page set |
 | ---: | --- | --- | --- | ---: |

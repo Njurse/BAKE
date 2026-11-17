@@ -119,7 +119,9 @@ def _target_set(character: dict, source_set: int) -> int:
 
 def _crop(character: dict, part: str, page_set: int, texture_id: int):
     for entry in character.get("parts", []):
-        if entry.get("part") != part:
+        # A material may use the source ped's name for a torso/head/arm slot
+        # while the record still carries the archive's (JERI_*) name.
+        if part not in (entry.get("part"), jc.part_alias(entry.get("part"))):
             continue
         for crop in entry.get("crops", []):
             if (int(crop["page_set"]) == int(page_set)
@@ -290,7 +292,8 @@ def _backup_combine(project: str, character: dict, shared: dict) -> str:
 
 def _rewrite_model(project: str, character: dict, model_abs: str,
                    mtl_abs: str, old_crops: dict, shared: dict) -> None:
-    names = set(p["part"] for p in character.get("parts", []))
+    names = jc.part_names_with_aliases(
+        p["part"] for p in character.get("parts", []))
     groups = jm.read_combined_obj(model_abs, names, blender=True)
     lines = ["# JMPPED textured model (shared crops)\n",
              "mtllib %s\n" % os.path.basename(mtl_abs)]
@@ -509,7 +512,8 @@ def _clip_uv(uv):
 
 
 def _read_page_groups(project: str, character: dict, path: str):
-    names = set(p["part"] for p in character.get("parts", [])) | {"HIPS"}
+    names = jc.part_names_with_aliases(
+        [p["part"] for p in character.get("parts", [])]) | {"HIPS"}
     return jm.read_combined_obj(path, names, blender=True)
 
 
@@ -652,7 +656,8 @@ def scan_textured(project: str, character: dict,
     path_abs = _abs(project, rel)
     if not os.path.isfile(path_abs):
         raise jc.JMPPEDError("textured model is missing: %s" % path_abs)
-    names = set(p["part"] for p in character.get("parts", []))
+    names = jc.part_names_with_aliases(
+        p["part"] for p in character.get("parts", []))
     verts_all = []
     uvs_all = []
     groups = {}
@@ -939,6 +944,8 @@ def export_textured(project: str, character_name: str | None = None) -> int:
             "model.obj contains per-part materials; it is the localized/textured "
             "model, not the page-space model. Restore the page-space model or use "
             "model_textured.obj directly.")
+    import jmpped_model
+    jmpped_model.adopt_upper_names(project, character, groups)
     _write_textured(project, character, groups, textured_abs, mtl_abs)
 
     model["path"] = _rel(project, textured_abs)

@@ -167,8 +167,12 @@ class BakeByteIdentityTests(unittest.TestCase):
         if any(jmodel.model_pending(HERE, c, manifest)
                for c in manifest.get("characters", [])):
             self.skipTest("combined model is pending; the baseline test does not apply")
+        import jmpped_archive as ja
         import jmpped_bake
         import tempfile
+        if len(ja.read_archive(base).entries) != len(manifest["characters"]):
+            self.skipTest("the baseline archive predates the project's "
+                          "characters; re-bake it to compare")
         with tempfile.TemporaryDirectory() as tmp:
             dest = os.path.join(tmp, "JMPPED.LEV")
             self.assertEqual(jmpped_bake.bake(HERE, dest=dest), 0)

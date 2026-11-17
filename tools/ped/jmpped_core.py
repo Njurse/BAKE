@@ -72,6 +72,27 @@ MODEL_NAMES = [
     "THIGH_RIGHT", "CALF_RIGHT", "FOOT_RIGHT",
     "HAND_LEFT", "HAND_RIGHT",
 ]
+# Slots 0..5 are the torso/head/arms whichever ped supplied the geometry. The
+# archive's names for them come from the base (Jericho) set; a character built
+# from Tanner's own parts (tannerd3) names the same slots after Tanner. The slot
+# number is authoritative, so both names address one slot, and a model exported
+# from Blender may use either.
+UPPER_SLOT_ALIASES = {
+    "JERI_TORSO": "TORSO",
+    "JERI_HEAD": "HEAD",
+    "JERI_U_ARM_LEFT": "U_ARM_LEFT",
+    "JERI_L_ARM_LEFT": "L_ARM_LEFT",
+    "JERI_U_ARM_RIGHT": "U_ARM_RIGHT",
+    "JERI_L_ARM_RIGHT": "L_ARM_RIGHT",
+}
+_ALIAS_PAIRS = dict(UPPER_SLOT_ALIASES)
+_ALIAS_PAIRS.update({v: k for k, v in UPPER_SLOT_ALIASES.items()})
+
+# The base archive's own prefix for the six upper-body parts. A Blender scene
+# may carry it on every object, including the limbs the archive does not
+# prefix; the OBJ reader strips it only as a last resort.
+ARCHIVE_PART_PREFIX = "JERI_"
+
 # v5 entries may carry one optional trailing slot: the character's own HIPS,
 # a copy of Tanner's HIPS retargeted onto the entry's legs page set.
 HIPS_MODEL = "HIPS"
@@ -95,6 +116,21 @@ POLY_NAMES = {POLY_FT3: "FT3", POLY_FT4: "FT4", POLY_GT3: "GT3", POLY_GT4: "GT4"
 # Blender's Z-up view. The raw OBJ is authoritative; this transform only exists
 # for the editing copy.
 BLENDER_SCALE = 1.0 / 1024.0
+
+
+def part_alias(name: str) -> str | None:
+    """The other name for a torso/head/arm slot, or None."""
+    return _ALIAS_PAIRS.get(name)
+
+
+def part_names_with_aliases(names) -> set[str]:
+    """Every name a model may use for these parts (see UPPER_SLOT_ALIASES)."""
+    out = set(names)
+    for name in list(out):
+        alias = part_alias(name)
+        if alias:
+            out.add(alias)
+    return out
 
 
 class JMPPEDError(Exception):

@@ -70,9 +70,21 @@ BONE_PARENTS = [
     1,
 ]
 
-# Actual model bindings from Skel[] / SetSkelModelPointers. LTOE/RTOE really do
-# bind the opposite foot names in pmTannerModels (13 and 7); that is what the
-# engine does and exactly what the skeleton export should show.
+# Toe binding, written once and shared by both tables.
+#
+# The engine draws archive slot 8 (FOOT_LEFT) on RTOE and slot 11 (FOOT_RIGHT)
+# on LTOE - the stock Tanner crossover (motion_c.c, SetSkelModelPointersForEntry).
+# What the bake stores, however, is the mesh in the space of the toe the part
+# belongs to: the split subtracts that toe's bind position and the engine adds
+# back the position of the joint it draws the part on. Storing a left shoe in
+# RTOE's space therefore put its art 2 x the toe-bone X - 56 engine units - away
+# from the joint that also carries the toe rotation, which is what showed up as
+# the shoes sitting shifted over and swinging wide. Crossing only the rendering
+# (the engine's crossover) mirrors the shoe instead, exactly like a stock ped,
+# and near-symmetric shoe art hides that.
+_TOE_BINDINGS = {"LTOE": "FOOT_LEFT", "RTOE": "FOOT_RIGHT"}
+
+# Actual model bindings from Skel[] / SetSkelModelPointers.
 TANNER_BINDINGS = {
     "JOINT_1": "TORSO",
     "NECK": "NECK",
@@ -86,10 +98,9 @@ TANNER_BINDINGS = {
     "LHIP": "HIPS",
     "LKNEE": "THIGH_LEFT",
     "LFOOT": "CALF_LEFT",
-    "LTOE": "FOOT_RIGHT",
     "RKNEE": "THIGH_RIGHT",
     "RFOOT": "CALF_RIGHT",
-    "RTOE": "FOOT_LEFT",
+    **_TOE_BINDINGS,
 }
 JERICHO_BINDINGS = {
     "JOINT_1": "JERI_TORSO",
@@ -101,14 +112,11 @@ JERICHO_BINDINGS = {
     "LHIP": "HIPS",
     "LKNEE": "THIGH_LEFT",
     "LFOOT": "CALF_LEFT",
-    # Crossed exactly like TANNER_BINDINGS (the engine binds JMPPED toes the
-    # same way since 0.12): FOOT_LEFT is the mesh drawn on the right toe.
-    "LTOE": "FOOT_RIGHT",
     "RKNEE": "THIGH_RIGHT",
     "RFOOT": "CALF_RIGHT",
-    "RTOE": "FOOT_LEFT",
     "LFINGERS": "HAND_LEFT",
     "RFINGERS": "HAND_RIGHT",
+    **_TOE_BINDINGS,
 }
 
 

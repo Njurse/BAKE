@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### A Tanner model keeps Tanner's part names
+
+- Slots 0-5 are addressed by number. Their archive names are the base Jericho set (`JERI_*`), but a character built from Tanner's torso/head/arms (tannerd3) names the same slots `TORSO`, `HEAD`, `U_ARM_*`, `L_ARM_*`. The splitter, importer and textured export accept either name, adopt the names the model uses, and switch the bind variant with them, so a Blender export is not relabelled as Jericho.
+- A Blender scene that prefixes every object with `JERI_` (including the limbs, e.g. `JERI_CALF_LEFT`) now resolves by stripping that prefix when the full name does not match.
+- `jmpped_make_tannerd3.py` writes the Tanner names and the `tanner` bindings, and the per-part caches/crops follow them (`models/blender/TORSO.obj`, not `JERI_TORSO.obj`).
+
+### Palette rows are allocated by the bake
+
+- For a custom entry, `bake` quantises each part's crop and allocates a CLUT row per distinct palette: equal palettes share a row (mirrored arms, the leg set), different palettes get the next free one. The part's model materials are rewritten to the allocated row, and the crop's row in `character.json` is a starting hint rather than a hard mapping.
+- Entry 0 (the stock Jericho set) keeps its shipped palette layout byte-for-byte; only custom entries are re-allocated.
+- The part caches and the combined `model.obj` no longer need hand-maintained texture ids for a custom character. `allocate_palette_rows()` raises if a page runs out of rows instead of silently overwriting another crop's palette.
+
+
 ### Car-select portraits pack into `<CITY>.RAW`
 
 - `portrait` on `cars/<id>/handling.json` (path relative to that file; optional sibling `.clut` on a pre-packed page) is the author-facing field. An inline `bank.json` car object is the same key and the same packer.

@@ -168,6 +168,10 @@ the 14 models, and **slot** only when it means the archive index 0–13.
   split a changed combined model automatically; the per-part OBJs under
   `models/{blender,engine}` are generated caches, and reference-only groups are
   written under `models/reference/`.
+- Slots 0-5 are addressed by number. Their archive names are the base Jericho
+  set (`JERI_*`), but a character built from Tanner's torso/head/arms names the
+  same slots `TORSO`, `HEAD`, ...; the splitter accepts either and follows the
+  names the model uses, so a Tanner export is not relabelled as Jericho.
 - Every `*_sha256` value is a change detector, not a checksum of what is on
   disk. Migration moves the path and preserves the recorded hash, so a pending
   `model.obj` edit is still seen as pending after the move.
