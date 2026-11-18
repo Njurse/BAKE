@@ -129,7 +129,8 @@ def halves_from_bbox(bb):
     return [(bb[1][i] - bb[0][i]) / 2.0 for i in range(3)]
 
 
-def build_record(verts, scale, centres, radius, donor, donor_bbox, model_id=None):
+def build_record(verts, scale, centres, radius, donor, donor_bbox, model_id=None,
+                 is_cop=False):
     """One car's CAR_COSMETICS.
 
     `verts` is the car's own (unscaled) vertices, `scale` the bake scale,
@@ -158,15 +159,15 @@ def build_record(verts, scale, centres, radius, donor, donor_bbox, model_id=None
     for o, p in zip(POS_OFFSETS[:9], donor["anchors"]):
         struct.pack_into("<3h", out, o, *scaled(p))
 
-    # TODO: per-model policeLight override for exported D1 cars.
-    # policeLight is the SVECTOR at offset 40. Edit the three int16s
-    # (x, y, z) here after the donor re-proportion if the baked position
-    # is wrong. Example:
-    # if model_id == SOME_D1_COP:
-    #     police_light_x, police_light_y, police_light_z = 0, -200, 50
-    police_light_x, police_light_y, police_light_z = struct.unpack_from("<3h", out, 40)
-    struct.pack_into("<3h", out, 40,
-                     police_light_x, police_light_y, police_light_z)
+    # policeLight: Driver 1 has no such anchor, so a transplanted cop car's bar
+    # used to sit wherever its donor put it - a touch low on the D1 body. For a
+    # cop, measure it from the car's OWN roof instead: y is down-positive, so the
+    # highest vertex is the lightbar line; x/z are centred (the bar runs along the
+    # middle of the roof). This replaces the engine's old global vy nudge.
+    if is_cop:
+        roof = min(ys) * scale
+        cog_y = scaled(donor["cog"])[1]
+        struct.pack_into("<3h", out, 40, 0, int(round(roof - cog_y)), 0)
     # colBox is ours outright, measured from this car's own bbox.
     struct.pack_into("<3h", out, 212, int(round(half[0])), int(round(half[1])),
                      int(round(half[2])))
@@ -229,20 +230,22 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
     blob = open(os.path.join(levels_dir, d1pool.source_file(city, levels_dir) + ".LEV"), "rb").read()
     donors = sorted(donor_bb)          # only the models that have a body
     donor_halves = [halves_from_bbox(donor_bb[m]) for m in donors]
-    out = []
+    import bake
+
+    # First pass: this city's real car models and their wheel placement. A D1
+    # city ships fewer than 13, so collect only the slots that hold a car.
+    cars = []
     for m, variants in lev1.car_models(blob):
         model = variants.get("clean")
         if model is None and variants:
             model = next(iter(variants.values()))
         if model is None or not model.vertices:
-            out.append((m, None, None, None, None))
             continue
 
         # Same non-car test as the bake (see d1pool.source_file). If these two ever
         # disagree about which slots hold cars, a record lands on the wrong body.
         _bb = model.bbox()
         if _bb is None or (_bb[5] - _bb[2]) < d1pool.MIN_LENGTH_RAW:
-            out.append((m, None, None, None, None))
             continue
         bmin, bmax = wheelgeom.body_bbox(model.vertices)
         half = [(bmax[i] - bmin[i]) / 2.0 * SCALE for i in range(3)]
@@ -254,10 +257,11 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
                                                  dcentres, SCALE)
         zs = sorted(c[2] for c in centres)
         track = (max(c[0] for c in centres) - min(c[0] for c in centres)) / 2.0
-        rec = build_record(model.vertices, SCALE, centres,
-                           _wheel_radius(wheel_model, SCALE), drec, donor_bb[di],
-                           model_id=m)
-        out.append((m, rec, di, zs[-1] - zs[0], track))
+        cars.append((m, model, di, drec, centres, zs[-1] - zs[0], track))
+
+    if len(cars) > len(bake.D2_COMPLIANT_MODELS):
+        raise SystemExit("%s ships %d cars but only %d D2-compliant models exist"
+                         % (city, len(cars), len(bake.D2_COMPLIANT_MODELS)))
 
     # REMAP onto the same models the .LEV bake uses. The .LEV and the .LCF are two
     # halves of ONE description: the .LCF's table is indexed by MODEL NUMBER, so a
@@ -266,16 +270,18 @@ def records_for_city(levels_dir, city, donor_recs, donor_bb, wheel_model,
     # mapping, so it is imported from bake rather than copied: a second literal is
     # exactly how these two drift apart, silently, with the colours landing on the
     # wrong bodies.
-    import bake
-    filled = [e for e in out if e[1] is not None]
-    if len(filled) > len(bake.D2_COMPLIANT_MODELS):
-        raise SystemExit("%s ships %d cars but only %d D2-compliant models exist"
-                         % (city, len(filled), len(bake.D2_COMPLIANT_MODELS)))
+    dst_slots = bake.destination_slots(city, [c[0] for c in cars])
+    cop_dest = set(bake.COP_DEST_MODELS.get(city, ()))
     remapped = [(m, None, None, None, None) for m in range(scalemodels.MAX_CAR_MODELS)]
     SLOT_MAP[city] = []
-    dst_slots = bake.destination_slots(city, [e[0] for e in filled])
-    for (src_m, rec, di, r, t), dst_m in zip(filled, dst_slots):
-        remapped[dst_m] = (dst_m, rec, di, r, t)
+    for (src_m, model, di, drec, centres, wheelbase, track), dst_m in zip(cars, dst_slots):
+        # A cop gets a lightbar measured from its own roof. The bake marks the
+        # same dest slots as siren cars (COP_DEST_MODELS -> LUMP_CAR_SIRENS), so
+        # the bar the engine flashes and the bar we measured belong to one car.
+        rec = build_record(model.vertices, SCALE, centres,
+                           _wheel_radius(wheel_model, SCALE), drec, donor_bb[di],
+                           model_id=src_m, is_cop=dst_m in cop_dest)
+        remapped[dst_m] = (dst_m, rec, di, wheelbase, track)
         SLOT_MAP[city].append([src_m, dst_m])
     for gap in bake.D2_GAP_MODELS:
         if remapped[gap][1] is not None:
