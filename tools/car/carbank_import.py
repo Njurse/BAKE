@@ -56,7 +56,7 @@ def import_car(obj_path, scale=0.68267, grey=False,
     name = os.path.splitext(os.path.basename(obj_path))[0]
 
     return obj2geom.build_geom(verts, uvs, faces, scale, grey, name, mats,
-                               flip_y, flip_winding, kinds, flip_z)
+                               flip_y, flip_winding, kinds, flip_z, orient=True)
 
 
 def _remap_page(page, set_map, id_map):

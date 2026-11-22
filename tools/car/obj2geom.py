@@ -71,8 +71,28 @@ def face_normal(verts, idxs):
     return (nx / L, ny / L, nz / L)
 
 
+def signed_volume(verts, faces):
+    """The signed volume the faces enclose.
+
+    Engine winding (what exportd2 writes and the game draws outward) is
+    NEGATIVE; a mesh Blender's "Recalculate Outside" fixed is positive. An open
+    shell (no floor) still has the sign of its dominant orientation.
+    """
+    t = 0.0
+    for vi, _ in faces:
+        a = verts[vi[0]]
+        for i in range(1, len(vi) - 1):
+            b = verts[vi[i]]
+            c = verts[vi[i + 1]]
+            t += (a[0] * (b[1] * c[2] - b[2] * c[1])
+                  - a[1] * (b[0] * c[2] - b[2] * c[0])
+                  + a[2] * (b[0] * c[1] - b[1] * c[0]))
+    return t / 6.0
+
+
 def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
-               flip_y=False, flip_winding=False, kinds=None, flip_z=False):
+               flip_y=False, flip_winding=False, kinds=None, flip_z=False,
+               orient=False):
     """A geom record for bake.py.
 
     flip_y negates every vertex's Y and flip_winding reverses each face's vertex
@@ -95,6 +115,13 @@ def build_geom(verts, uvs, faces, scale, force_grey, name, mats=None,
     if flip_winding:
         faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
         # mats/kinds are per-FACE lists and face order is unchanged: leave them.
+    elif orient and signed_volume(verts, faces) > 0:
+        # orient: put the mesh in engine winding whichever way it was saved, so
+        # an OBJ Blender recalculated outward does not bake inside out. An
+        # explicit flip_winding wins over this.
+        faces = [(list(reversed(vi)), list(reversed(ti))) for vi, ti in faces]
+        print("obj2geom: %s was outward-in for the engine (Blender winding); "
+              "reversed its faces" % name, file=sys.stderr)
     # point normals: average of face normals meeting at each vertex
     acc = [[0.0, 0.0, 0.0] for _ in verts]
     face_n = []
