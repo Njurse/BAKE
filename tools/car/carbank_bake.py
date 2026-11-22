@@ -835,6 +835,11 @@ def wheel_specs(bank, warnings, wheel_tex=None):
     out = []
     default = None
     placed = []         # [{"car", "spec"}] already given a rect, for the placer
+    # (png, variant, declared set, declared island) -> the (set, island) it resolved to.
+    # Two slots that declare the same sprite at the same place (two slots on one
+    # car json, or cars sharing a city's stock wheels) share one island instead
+    # of each claiming fresh texels; _check_wheel_clashes allows that sharing.
+    resolved = {}
 
     for slot, carname in bank.order:
         car = bank.cars[carname]
@@ -858,8 +863,14 @@ def wheel_specs(bank, warnings, wheel_tex=None):
 
             island = wheel.island
             setid = wheel.set
+            share = (os.path.normcase(os.path.abspath(wheel.path))
+                     if wheel.path else None, variant, setid,
+                     island if isinstance(island, str) or island is None
+                     else tuple(island))
 
-            if island == "auto":
+            if share[0] and share in resolved:
+                setid, island = resolved[share]
+            elif island == "auto":
                 spot = _auto_island(bank, setid, placed, wheel.path,
                                     carname, variant, warnings)
 
@@ -876,7 +887,9 @@ def wheel_specs(bank, warnings, wheel_tex=None):
             # avoid a collision. `island: "auto"` remains the explicit form
             # that always asks the planner, and declare.auto_textures is still
             # accepted (it is now the default behaviour).
-            if island is not None and island != "auto":
+            reused = share[0] is not None and share in resolved
+
+            if island is not None and island != "auto" and not reused:
                 reason = _island_usable(bank, setid, placed, carname, island)
 
                 if reason:
@@ -893,6 +906,9 @@ def wheel_specs(bank, warnings, wheel_tex=None):
 
             if island is None:
                 continue
+
+            if share[0]:
+                resolved.setdefault(share, (setid, list(island)))
 
             spec = {"variant": variant, "set": setid,
                     "island": list(island),
@@ -1345,7 +1361,14 @@ def _check_wheel_clashes(bank, car_wheels):
                         "page." % (carname, spec["variant"], setid, list(rect),
                                    list(body_rect)))
 
-            # (b) another wheel sprite on the same page
+            # (b) another wheel sprite on the same page. The same art already
+            # owning this exact rect is a shared island, not a second claim.
+            if png and any(other == rect and other_png == png
+                           for _c, _v, other, other_png in owners.get(setid, ())):
+                owners.setdefault(setid, []).append(
+                    (carname, spec["variant"], rect, png))
+                continue
+
             for other_car, other_variant, other, other_png in owners.get(setid, ()):
                 if other == rect:
                     # one rect, one sprite: two cars may share a wheel island
