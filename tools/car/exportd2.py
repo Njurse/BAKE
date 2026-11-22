@@ -593,7 +593,7 @@ def write_png_rgba(path, w, h, pix):
         f.write(chunk(b"IEND", b""))
 
 
-def page_png(path, rows, idx, transparent=None, regions=None):
+def page_png(path, rows, idx, transparent=None, regions=None, see_through=None):
     """The page as a PNG. `transparent` names the indices the bake keyed out.
 
     It is passed in rather than guessed: a 0x0000 entry on a BODY page can just
@@ -628,6 +628,20 @@ def page_png(path, rows, idx, transparent=None, regions=None):
                 r, g, b = rp[v] if v < len(rp) else (0, 0, 0)
                 pix[i * 4:i * 4 + 4] = bytes(
                     (r, g, b, 0 if v in transparent else 255))
+
+    # A wheel sprite's surround is the raw 0x0000 entry, which the GPU never
+    # draws; its black tyre is 0x8000 (STP black), which it does. Both are
+    # RGB black, so without alpha a later bake cannot tell them apart and
+    # keys the tyre out with the surround. `see_through` = [(x, y, w, h, row)].
+    for x0, y0, w, h, ri in see_through or ():
+        if not (0 <= ri < len(rows)):
+            continue
+        raw = struct.unpack("<16H", bytes(rows[ri][:32]))
+        for y in range(max(0, y0), min(256, y0 + h)):
+            for x in range(max(0, x0), min(256, x0 + w)):
+                i = y * 256 + x
+                if idx[i] < 16 and raw[idx[i]] == 0:
+                    pix[i * 4 + 3] = 0
 
     write_png_rgba(path, 256, 256, pix)
 
@@ -1178,7 +1192,10 @@ def export_one(lev_path, out_root, models_filter, variants, make_bank,
         page_dets = [d for pi, d in details if pi == s]
         page_png(os.path.join(city_dir, png_rel), rows, idx,
                  regions=[(d["x"], d["y"], d["width"], d["height"], i)
-                          for i, d in enumerate(page_dets)])
+                          for i, d in enumerate(page_dets)],
+                 see_through=[(d["x"], d["y"], d["width"], d["height"], i)
+                              for i, d in enumerate(page_dets)
+                              if d.get("name") in WHEEL_DETAIL_NAMES])
         with open(os.path.join(raw_dir, "pages", "PAGE_%d.bin" % s), "wb") as f:
             f.write(blob[off:off + size])
         page_json.append({
