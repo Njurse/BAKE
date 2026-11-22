@@ -2460,6 +2460,9 @@ def main(argv=None):
         s_, i_ = args.default_page.split(":")
         default_page = (int(s_), int(i_))
 
+    for path in bankjson.stamp_transparent(args.bank):
+        print("carbank_bake: added a transparent colour (000000) to %s" % path)
+
     if not args.out:
         args.out = bank_layout(bankjson.load(args.bank))[1]
 

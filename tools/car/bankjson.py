@@ -104,6 +104,46 @@ OUTPUT_DIRS = ("work", "pages", "build")
 # sprite is where the "leftover pink" lives - see carbank_page.key_mask.
 DEFAULT_KEY_TOLERANCE = 96
 
+# What the bake stamps into a car json texture entry that names no key: the
+# engine's own default, exact black (0x0000) and nothing near it.
+DEFAULT_TRANSPARENT = {"transparent": "000000", "transparent_tolerance": 0}
+
+
+def stamp_transparent(bank_path):
+    """Give every texture entry in the bank's car json files a `transparent`
+    key, so the colour that bakes to 0x0000 can be changed in place. Entries
+    that already name one are left alone. Returns the files rewritten."""
+    with open(bank_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    base = os.path.dirname(os.path.abspath(bank_path))
+    cars = ((raw.get("declare") or {}).get("cars")) or {}
+    done = []
+    for rel in sorted({v for v in cars.values() if isinstance(v, str)}):
+        carfile = os.path.normpath(os.path.join(base, rel))
+        try:
+            with open(carfile, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue                       # load() reports it properly
+        textures = data.get("textures")
+        if not isinstance(textures, dict):
+            continue
+        changed = False
+        for key, value in list(textures.items()):
+            if isinstance(value, str):
+                value = {"png": value}
+            if not isinstance(value, dict) or "transparent" in value:
+                continue
+            value.update({k: v for k, v in DEFAULT_TRANSPARENT.items()
+                          if k not in value})
+            textures[key] = value
+            changed = True
+        if changed:
+            with open(carfile, "w", encoding="utf-8", newline="\n") as f:
+                f.write(dumps_compact(data) + "\n")
+            done.append(carfile)
+    return done
+
 
 def _check_not_output(where, field, rel, base):
     """Refuse a source under a folder the bake writes (see OUTPUT_DIRS)."""
@@ -414,6 +454,14 @@ class Texture(object):
                 or not 0 <= self.transparent_tolerance <= 255):
             _fail(where, field + ".transparent_tolerance",
                   "%r is not 0..255" % (self.transparent_tolerance,))
+
+        # Exact black at tolerance 0 is what an undeclared page already does:
+        # only a (0, 0, 0) texel lands on 0x0000. The bake writes that pair into
+        # every car json (see DEFAULT_TRANSPARENT) so the key is visible and
+        # editable; reading it back as "no key" keeps the bake byte-identical.
+        if (self.transparent_tolerance == 0 and isinstance(self.transparent, str)
+                and self.transparent.strip().lower().lstrip("#") == "000000"):
+            self.transparent = None
 
         if self.protect and not isinstance(self.protect, list):
             _fail(where, field + ".protect", "must be a list of hex colours")
