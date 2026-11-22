@@ -488,6 +488,24 @@ with no bounds check, so an oversized bank writes past the end of SPU RAM and
 takes the game with it. Retail spends what it needs - its own three-sample car
 bank measures 29,008 bytes at 16 kHz - so the cap is a ceiling, not a target. A longer loop is trimmed and the bake says so.
 
+### `handling.driveWheels`
+
+Optional, in a car's `handling` block: `"front"`, `"rear"` or `"all"`. Any other
+value is a `BankError`. Leave it out and the car keeps the stock drive of the
+slot it loads into. In stock that depends on the controller, not the model:
+the rear wheels always take thrust, and the front wheels also take it under
+`CONTROL_TYPE_PURSUER_AI` (`wheelforces.c` StepOneCar, the `(i & 1)` rear/front
+split). Driver 1 cars are rear-wheel drive.
+
+When at least one car sets it, the bake writes `LUMP_CAR_DRIVE` (205): 13 bytes,
+one per model slot, then 3 zero bytes of padding. `0` = no override, `1` = front,
+`2` = rear, `3` = all (bit 0 = front axle driven, bit 1 = rear). When no car
+sets it the segment is left out, so the bank bakes byte-identical to one baked
+before the field existed. `verify_drive` checks the segment against the
+declaration. The engine has to read 205 itself (models.c, next to
+`CAR_IMPORT_LUMP_SIRENS`); an engine that predates it skips the segment by its
+size and keeps stock drive.
+
 ### `remap`
 
 `set` and `id` are objects keyed by the source value as a string,

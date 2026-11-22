@@ -107,6 +107,12 @@ POLICE_VOICE_COUNT = 17
 # block, so two cars in one bank can wear different wheels. 203 is
 # LUMP_POLICE_VOICES, so the next free id is 204.
 LUMP_CAR_WHEELS2 = 204
+# JERICHO: per-model drive-wheel override (handling.driveWheels). 13 bytes, one
+# per model slot, padded to 16. 0 = no override: the slot keeps the stock drive
+# of whatever controls it. Otherwise bit 0 = front wheels driven, bit 1 = rear
+# (1 front, 2 rear, 3 all). Written only when some car sets it. 204 is
+# LUMP_CAR_WHEELS2, so the next free id is 205.
+LUMP_CAR_DRIVE = 205
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
@@ -1853,6 +1859,30 @@ def build_sirens_body(sirens):
     return flags + bytes(3)
 
 
+def build_drive_body(order, cars):
+    """LUMP_CAR_DRIVE: one byte per model slot, or None when no car sets
+    handling.driveWheels (so a bank without it bakes byte-identical)."""
+    flags = bytearray(MAX_CAR_MODELS)
+
+    for slot, car_id in order:
+        value = ((cars.get(car_id) or {}).get("handling") or {}).get("driveWheels")
+
+        if value is None:
+            continue
+
+        if value not in bankjson.DRIVE_WHEELS:
+            raise bankjson.BankError(
+                "%s: handling.driveWheels: %r is not one of %s"
+                % (car_id, value, ", ".join(sorted(bankjson.DRIVE_WHEELS))))
+
+        flags[slot] = bankjson.DRIVE_WHEELS[value]
+
+    if not any(flags):
+        return None
+
+    return bytes(flags) + bytes(3)
+
+
 def _load_sounds(manifest):
     """The manifest's `sounds` block, or {} when the bank declares none."""
     specs = manifest.get("sounds") or {}
@@ -2028,7 +2058,8 @@ def _load_car_wheels(manifest):
 def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
                   wheels_body=None, sounds_body=None, sirens_body=None,
-                  wheels2_body=None, police_voices_body=None):
+                  wheels2_body=None, police_voices_body=None,
+                  drive_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -2048,6 +2079,8 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
         add(LUMP_CAR_SIRENS, sirens_body)
     if police_voices_body:
         add(LUMP_POLICE_VOICES, police_voices_body)
+    if drive_body:
+        add(LUMP_CAR_DRIVE, drive_body)
     add(LUMP_TEXTUREINFO, texinfo_body)
     add(LUMP_PALLET, pallet_body)
     if texture_names_body:
@@ -2280,12 +2313,14 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     sirens_body = build_sirens_body(sirens)
     police_voices_body = build_police_voices_body(
         _load_police_voices(manifest), warnings)
+    drive_body = build_drive_body(order, cars)
 
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
                               wheels_body, sounds_body, sirens_body,
                               wheels2_body=wheels2_body,
-                              police_voices_body=police_voices_body)
+                              police_voices_body=police_voices_body,
+                              drive_body=drive_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -2322,6 +2357,10 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     if car_wheels:
         report["car_wheels"] = car_wheels
 
+    if drive_body:
+        report["drive_wheels"] = {str(m): drive_body[m]
+                                  for m in range(MAX_CAR_MODELS) if drive_body[m]}
+
     texture_moves = manifest.get("texture_moves") or []
 
     if texture_moves:
@@ -2330,7 +2369,8 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     report["checks"] = verify_bank(lev_path, lcf_path, order, cars,
                                    manifest_dir, included, wheel_specs,
                                    sound_specs, car_wheels)
-    voice_problems = verify_police_voices(lev_path)
+    voice_problems = (verify_police_voices(lev_path)
+                      + verify_drive(lev_path, build_drive_body(order, cars)))
 
     if voice_problems:
         report["checks"]["problems"].extend(voice_problems)
@@ -2705,6 +2745,36 @@ def verify_sounds(blob, specs):
     return problems
 
 
+def verify_drive(lev_path, wanted):
+    """LUMP_CAR_DRIVE must be present exactly when a car declares
+    driveWheels, and carry the declared byte per model slot."""
+    with open(lev_path, "rb") as f:
+        blob = f.read()
+
+    got = d2_lump(blob, LUMP_CAR_DRIVE)
+
+    if wanted is None:
+        return (["drive: the bank has a drive segment no car declares"]
+                if got is not None else [])
+
+    if got is None:
+        return ["drive: no drive segment, the declaration wants %s"
+                % list(wanted[:MAX_CAR_MODELS])]
+
+    body, size = got
+
+    if size < MAX_CAR_MODELS:
+        return ["drive: segment is %d bytes, needs %d" % (size, MAX_CAR_MODELS)]
+
+    have = blob[body:body + MAX_CAR_MODELS]
+
+    if have != wanted[:MAX_CAR_MODELS]:
+        return ["drive: segment says %s, the declaration says %s"
+                % (list(have), list(wanted[:MAX_CAR_MODELS]))]
+
+    return []
+
+
 def verify_police_voices(lev_path):
     """The optional police voices segment must hold the stock phrase count."""
     with open(lev_path, "rb") as f:
@@ -2931,6 +3001,18 @@ def selftest():
         fails += 1
     else:
         print("ok: bank offset table")
+
+    # drive override segment: absent unless declared, one byte per slot
+    cars = {"a": {"handling": {"driveWheels": "front"}},
+            "b": {"handling": {"driveWheels": "all"}}, "c": {"handling": {}}}
+    drive = build_drive_body([(0, "c"), (3, "a"), (7, "b")], cars)
+    if build_drive_body([(0, "c")], cars) is not None or drive is None \
+            or len(drive) != 16 or drive[3] != 1 or drive[7] != 3 \
+            or any(drive[m] for m in range(16) if m not in (3, 7)):
+        print("FAIL: drive segment", drive)
+        fails += 1
+    else:
+        print("ok: drive segment")
 
     print("selftest: %s" % ("FAILED" if fails else "clean"))
     return 1 if fails else 0

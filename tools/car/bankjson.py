@@ -97,6 +97,11 @@ MAX_SLOT = 12
 # would land on the wrong line.
 POLICE_VOICE_COUNT = 17
 
+# handling.driveWheels -> the LUMP_CAR_DRIVE byte (exportd2). Bit 0 is the front
+# axle, bit 1 the rear; 0 (the key absent) means no override, so the car keeps
+# whatever the controller of the slot it loads into drives in stock.
+DRIVE_WHEELS = {"front": 1, "rear": 2, "all": 3}
+
 
 class BankError(Exception):
     """A bank.json that cannot be used, with the file and field named."""
@@ -182,6 +187,20 @@ def _check_keys(where, field, obj, allowed, what):
                   % (what, ", ".join(sorted(allowed))))
 
 
+def _drive_wheels(where, field, handling):
+    """handling.driveWheels, validated, or None when the car does not set it."""
+    if not isinstance(handling, dict) or "driveWheels" not in handling:
+        return None
+
+    value = handling["driveWheels"]
+
+    if not isinstance(value, str) or value not in DRIVE_WHEELS:
+        _fail(where, field + ".handling.driveWheels",
+              "%r is not one of %s" % (value, ", ".join(sorted(DRIVE_WHEELS))))
+
+    return value
+
+
 def _bake_scale(where, field, value):
     """A vertex multiplier. 1 is a Driver 2 OBJ; 2048/3000 is a Driver 1 OBJ."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -259,6 +278,11 @@ class Car(object):
 
         if sounds is not None:
             self.sounds = Sounds(where, sounds, self._file)
+
+        # Optional per-car drive override, read off handling.json's handling
+        # block by Bank (_drive_wheels). None: the stock drive of the resident
+        # slot's controller, which is what every retail car gets.
+        self.drive_wheels = None
 
         self.palette_source = None
         palette = data.get("palette") or {}
@@ -1000,6 +1024,7 @@ class Bank(object):
 
         for name, data in cars.items():
             base = self.base
+            drive = None
             if isinstance(data, str):
                 # a car may live in its own file (cars/<car>/handling.json):
                 # its paths are relative to that file, and keys the bake does
@@ -1011,6 +1036,8 @@ class Bank(object):
                 except (OSError, ValueError) as e:
                     _fail(where, "declare.cars.%s" % name,
                           "cannot read %s (%s)" % (data, e))
+                drive = _drive_wheels(where, "declare.cars.%s" % name,
+                                      filed.get("handling"))
                 data = {k: v for k, v in filed.items() if k in CAR_KEYS}
                 base = os.path.dirname(carfile)
             if not isinstance(data, dict):
@@ -1029,6 +1056,7 @@ class Bank(object):
 
             _check_keys(where, label, data, CAR_KEYS, "car")
             self.cars[name] = Car(label, path, data, base, where)
+            self.cars[name].drive_wheels = drive
 
         seen = set()
 
