@@ -922,6 +922,114 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
     return pieces
 
 
+# denting.c: a dented HD poly samples its UVs shifted by `64 * n` in u - the
+# damage art sits beside the clean art on the same page, read through the
+# SAME CLUT row. Which n a poly gets comes from the host slot's denting table
+# at run time, so the bake plans whichever shift lands on art no poly covers.
+DENT_SHIFTS = (128, 64)
+
+
+def dent_shadows(pixels, width, height, islands, cover=None):
+    """({src id: texel mask}, shift) - the damage art each material's polys read
+    when dented. Only texels no poly covers and that are not the page backdrop
+    count; of the shifts in DENT_SHIFTS the one that reaches most art wins."""
+    if not pixels or not islands:
+        return {}, None
+
+    cover = cover if cover is not None else page_coverage(width, height, islands)
+    snapped = [fourbpp.snap555(p) for p in pixels]
+    backdrop = snapped[0]
+    best = (0, None, {})
+
+    for shift in DENT_SHIFTS:
+        out = {}
+        total = 0
+
+        for sid in sorted(islands):
+            moved = bytearray(width * height)
+
+            for uvs in islands[sid] or []:
+                if uvs and max(p[0] for p in uvs) + shift < width:
+                    _cover_poly(moved, width, height,
+                                [(p[0] + shift, p[1]) for p in uvs])
+
+            hits = bytearray(width * height)
+            n = 0
+
+            for i, bit in enumerate(moved):
+                if bit and not cover[i] and snapped[i] != backdrop:
+                    hits[i] = 1
+                    n += 1
+
+            if n:
+                out[sid] = hits
+                total += n
+
+        if total > best[0]:
+            best = (total, shift, out)
+
+    return best[2], best[1]
+
+
+def _linked_sets(width, height, islands, extra=None):
+    """[(sorted src ids, coverage)] - source ids whose own polys share texels.
+
+    A texel holds ONE index. Every material that samples it must read that
+    index as the same colour, so materials that overlap are planned together.
+    `extra` ({src id: texel mask}, e.g. dent_shadows) joins an id's coverage.
+    """
+    owner = [-1] * (width * height)
+    parent = {sid: sid for sid in islands}
+
+    def root(sid):
+        while parent[sid] != sid:
+            parent[sid] = parent[parent[sid]]
+            sid = parent[sid]
+        return sid
+
+    covers = {}
+
+    for sid in sorted(islands):
+        cover = bytearray(width * height)
+
+        for uvs in islands[sid] or []:
+            _cover_poly(cover, width, height, uvs)
+
+        for i, bit in enumerate((extra or {}).get(sid) or ()):
+            if bit:
+                cover[i] = 1
+
+        covers[sid] = cover
+
+        for i, bit in enumerate(cover):
+            if not bit:
+                continue
+
+            if owner[i] < 0:
+                owner[i] = sid
+            elif root(owner[i]) != root(sid):
+                parent[root(sid)] = root(owner[i])
+
+    sets = {}
+
+    for sid in sorted(islands):
+        sets.setdefault(root(sid), []).append(sid)
+
+    out = []
+
+    for members in sets.values():
+        cover = bytearray(width * height)
+
+        for sid in members:
+            for i, bit in enumerate(covers[sid]):
+                if bit:
+                    cover[i] = 1
+
+        out.append((members, cover))
+
+    return out
+
+
 def plan_islands(pixels, width, height, islands, split=True, extra_islands=None):
     """(indices, {id: 16 colours}, pieces) for a page that does not fit one row.
 
@@ -942,19 +1050,51 @@ def plan_islands(pixels, width, height, islands, split=True, extra_islands=None)
     pieces = []
     next_id = (max(islands) + 1) if islands else 1
     mask = page_coverage(width, height, islands) if split else None
+    # A wheel sprite must get a row of its own (below); body splits stop short
+    # of the ids it needs instead of taking them and failing the bake.
+    id_cap = MAX_TEX_IDS - len(extra_islands or ())
 
     if mask is not None and extra_islands:
         for extra in extra_islands:
             _cover_poly(mask, width, height, extra["uv"])
 
+    # Materials (alone or overlapping) whose OWN texels fit one row are
+    # planned exactly: one identical row per member id, indices written only
+    # on those texels. Bbox groups spill indices onto a neighbour's texels and
+    # repaint it from the wrong row (the red blotches on a big car page).
+    # The damage art a dented poly reads (dent_shadows) joins its material's
+    # row; a set that no longer fits with it is planned without it.
+    exact = []
+
+    if split:
+        shadows, _shift = dent_shadows(pixels, width, height, islands, mask)
+
+        for members, cover in _linked_sets(width, height, islands, shadows):
+            cols = _colours_in(pixels, width, (0, 0, width, height), cover)
+
+            if cols and len(cols) <= fourbpp.CLUT_ROW_ENTRIES:
+                exact.append((members, cover, cols))
+            elif shadows:
+                for sub, sub_cover in _linked_sets(
+                        width, height, {sid: islands[sid] for sid in members}):
+                    cols = _colours_in(pixels, width, (0, 0, width, height), sub_cover)
+
+                    if cols and len(cols) <= fourbpp.CLUT_ROW_ENTRIES:
+                        exact.append((sub, sub_cover, cols))
+
+    planned = {sid for members, _cover, _cols in exact for sid in members}
+
     for src_id in sorted(islands):
+        if src_id in planned:
+            continue
+
         groups = _cluster_uvs(pixels, width, height, islands[src_id], split,
                               mask)
 
         for number, group in enumerate(groups):
             if number == 0:
                 tex_id = src_id
-            elif next_id < MAX_TEX_IDS:
+            elif next_id < id_cap:
                 tex_id = next_id
                 next_id += 1
             else:
@@ -974,6 +1114,28 @@ def plan_islands(pixels, width, height, islands, split=True, extra_islands=None)
             for rect in rects:
                 pieces.append({"id": tex_id, "rect": [int(v) for v in rect],
                                "src": src_id})
+
+    for members, cover, cols in exact:
+        colours = _pad16(cols)
+        _scatter_exact(indices, pixels, width, [(0, 0, width, height)],
+                       colours, cover)
+
+        if mask is not None:        # damage art is not a leftover sprite
+            for i, bit in enumerate(cover):
+                if bit:
+                    mask[i] = 1
+
+        for src_id in members:
+            rows[src_id] = colours
+            seen = set()
+
+            for uvs in islands[src_id] or []:
+                rect = tuple(int(v) for v in _clip_rect(_bbox_uv(uvs), width, height))
+
+                if rect[2] > rect[0] and rect[3] > rect[1] and rect not in seen:
+                    seen.add(rect)
+                    pieces.append({"id": src_id, "rect": list(rect),
+                                   "src": src_id})
 
     # A wheel rect is its own island: it must not share a row with body art or
     # with the whole-page leftover piece. Give each one a fresh id and spread
