@@ -812,6 +812,16 @@ def _png_size(path):
     return struct.unpack(">II", head[16:24])
 
 
+def _wheel_png_key(path):
+    """Identity of a wheel png: its bytes, so wheeldam.png and an identical
+    wheelfast.png count as one sprite. Falls back to the path if unreadable."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError:
+        return os.path.normcase(os.path.abspath(path))
+
+
 def wheel_specs(bank, warnings, wheel_tex=None):
     """One entry per car in slot order, each naming its own wheel set.
 
@@ -863,8 +873,21 @@ def wheel_specs(bank, warnings, wheel_tex=None):
 
             island = wheel.island
             setid = wheel.set
-            share = (os.path.normcase(os.path.abspath(wheel.path))
-                     if wheel.path else None, variant, setid,
+            # Damaged and fast with the same png share one island (one texture
+            # id); clean always gets its own.
+            png = wheel.path
+
+            # A fast png byte-identical to this car's damaged one is the same
+            # sprite under another name: key it by the damaged path.
+            if variant == "fast" and png:
+                dam = dict(declared).get("damaged")
+
+                if (dam is not None and dam.path and dam.set == wheel.set
+                        and _wheel_png_key(dam.path) == _wheel_png_key(png)):
+                    png = dam.path
+
+            share = (os.path.normcase(os.path.abspath(png)) if png else None,
+                     "clean" if variant == "clean" else "worn", setid,
                      island if isinstance(island, str) or island is None
                      else tuple(island))
 
@@ -1503,7 +1526,13 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         if sprites:
             mask = list(mask) if mask else [False] * len(pixels)
 
+            carved = set()
+
             for variant, sprite_path, island in sprites:
+                if tuple(island) in carved:
+                    continue        # a shared damaged/fast island: carve once
+
+                carved.add(tuple(island))
                 sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
                 transparent = carbank_page.wheel_sprite_mask(
                     sprite, sprite_alpha, sw, sh)
