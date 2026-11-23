@@ -971,6 +971,20 @@ def dent_shadows(pixels, width, height, islands, cover=None):
     return best[2], best[1]
 
 
+def _quantize_cover(indices, pixels, cover):
+    """One 16-entry row for the texels `cover` marks; writes only those."""
+    texels = [i for i, bit in enumerate(cover) if bit]
+    owned = [pixels[t] for t in texels]
+    side = max(1, math.isqrt(len(owned) - 1) + 1)
+    grid = owned + [owned[0]] * (side * side - len(owned))
+    colours, local_idx = fourbpp.paletteize(grid, side, side)
+
+    for n, t in enumerate(texels):
+        indices[t] = local_idx[n]
+
+    return colours
+
+
 def _linked_sets(width, height, islands, extra=None):
     """[(sorted src ids, coverage)] - source ids whose own polys share texels.
 
@@ -1081,6 +1095,10 @@ def plan_islands(pixels, width, height, islands, split=True, extra_islands=None)
 
                     if cols and len(cols) <= fourbpp.CLUT_ROW_ENTRIES:
                         exact.append((sub, sub_cover, cols))
+                    elif cols:
+                        exact.append((sub, sub_cover, None))
+            elif cols:
+                exact.append((members, cover, None))
 
     planned = {sid for members, _cover, _cols in exact for sid in members}
 
@@ -1116,9 +1134,16 @@ def plan_islands(pixels, width, height, islands, split=True, extra_islands=None)
                                "src": src_id})
 
     for members, cover, cols in exact:
-        colours = _pad16(cols)
-        _scatter_exact(indices, pixels, width, [(0, 0, width, height)],
-                       colours, cover)
+        if cols is None:
+            # Too many colours for one row: quantize the set over its OWN
+            # texels into one row every member reads. Splitting it by bbox
+            # wrote indices onto neighbouring materials' texels, which then
+            # read them through the wrong row (blotches, holes).
+            colours = _quantize_cover(indices, pixels, cover)
+        else:
+            colours = _pad16(cols)
+            _scatter_exact(indices, pixels, width, [(0, 0, width, height)],
+                           colours, cover)
 
         if mask is not None:        # damage art is not a leftover sprite
             for i, bit in enumerate(cover):
@@ -1242,6 +1267,25 @@ def pack_indexed(indices, rows_by_id, mask=None, key=None, tolerance=0,
 
                 if key is None or _key_matches(colour, key, tolerance, chroma):
                     cleared.setdefault(tex_id, set()).add(at)
+
+    # Leftover-blob pieces (src=None) have no mask texels in their rect, so
+    # the vote loop above never fires for them.  Their CLUT rows are built
+    # from the sprite's own colours and may contain the key colour, which
+    # must be cleared to 0x0000 exactly as it is for body pieces.  Scan
+    # each leftover row directly: the first entry that matches the key wins.
+    if key is not None:
+        for piece in pieces or []:
+            if piece.get("src") is not None:
+                continue
+            tex_id = piece["id"]
+            if tex_id >= len(ordered):
+                continue
+            if tex_id in cleared:
+                continue
+            for at, colour in enumerate(ordered[tex_id]):
+                if _key_matches(colour, key, tolerance, chroma):
+                    cleared.setdefault(tex_id, set()).add(at)
+                    break
 
     raw = fourbpp.encode_indices(bytes(indices))
     stream = fourbpp.encode_literal(raw[::-1])

@@ -1225,6 +1225,20 @@ def _uv_islands(bank, setid):
     return islands
 
 
+def _bumps_black(page):
+    """True when pure black under a poly must not become transparent.
+
+    0x0000 is the engine's transparent marker and snap555 keeps a true 000000 on
+    it, so black panel outlines and undersides drew see-through (hairline holes
+    at seams, an invisible car bottom). A page that keys some OTHER colour keeps
+    its black as art; a page keying black (or keying by chroma) is left alone.
+    """
+    key = page.transparent
+    if page.transparent_chroma is not None or not isinstance(key, str):
+        return False
+    return key.strip().lstrip("#").lower() != "000000"
+
+
 def _page_source_hash(page, setid, sprites=None, uv_islands=None):
     """The (image hash, bake options, wheel sprites) a page was baked from.
 
@@ -1249,6 +1263,9 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
 
     if page.protect:
         record["protect"] = ["%02x%02x%02x" % tuple(c) for c in page.protect]
+
+    if _bumps_black(page):
+        record["black"] = "080808"      # pages baked before the bump re-bake once
 
     if page.palette:
         record["palette"] = list(page.palette)
@@ -1525,6 +1542,14 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
         pixels, alpha = carbank_page._load_rgb(page.image)
         key, mask = carbank_page._parse_key(page.transparent, pixels, alpha)
 
+        # `tolerance` shadows page.transparent_tolerance so it can be widened
+        # when key is promoted to DEFAULT_KEY below (a page with no explicit
+        # transparent declaration has tolerance=0, but after promotion the key
+        # is magenta and needs the same DEFAULT_KEY_TOLERANCE band so that
+        # post-quantisation rounding doesn't leave a near-magenta CLUT entry
+        # un-cleared).
+        tolerance = page.transparent_tolerance
+
         # A wheel island is CARVED, not inherited: whatever the page art carried
         # at the island is replaced by the declared sprite. Without this the
         # wheel came from the page image, so a stale pink square in the page
@@ -1552,6 +1577,10 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                 for index in masked:
                     mask[index] = True
 
+                if key is None and masked:
+                    key = (255, 0, 255)
+                    tolerance = max(tolerance, bankjson.DEFAULT_KEY_TOLERANCE)
+
                 u0, v0, u1, v1 = [int(v) for v in island]
 
                 # A pure-black interior texel would quantise to 0x0000, the
@@ -1575,6 +1604,22 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                                 % (setid, variant, os.path.basename(sprite_path),
                                    tuple(island)))
 
+        if _bumps_black(page):
+            covered = carbank_page.page_coverage(fourbpp.PAGE_W, fourbpp.PAGE_H,
+                                                 uv_islands)
+            bumped = 0
+
+            for index, bit in enumerate(covered):
+                if (bit and pixels[index] == (0, 0, 0)
+                        and not (mask and mask[index])):
+                    pixels[index] = (8, 8, 8)
+                    bumped += 1
+
+            if bumped:
+                warnings.append("page set %d: %d pure-black texel(s) under polys "
+                                "baked as 080808 - 000000 is the transparent "
+                                "marker" % (setid, bumped))
+
         pieces = None
         background = None
         use_split = (not page.palette and carbank_page.should_split(
@@ -1587,7 +1632,7 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                 split=True, extra_islands=extra_islands)
             blob, _ordered = carbank_page.pack_indexed(
                 indices, row_map, mask=mask, key=key,
-                tolerance=page.transparent_tolerance,
+                tolerance=tolerance,
                 chroma=page.transparent_chroma, pieces=pieces)
             colours = row_map.get(min(row_map)) if row_map else []
             old_rects = list(((previous_pages or {}).get(setid) or {}).get("clut_rects") or [])
@@ -1675,7 +1720,7 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
                 % (setid, len(row_map), sorted(row_map)))
         else:
             blob, colours, indices, _error, background = carbank_page.bake_page(
-                pixels, key=key, tolerance=page.transparent_tolerance, mask=mask,
+                pixels, key=key, tolerance=tolerance, mask=mask,
                 palette=page.palette, protect=page.protect,
                 chroma=page.transparent_chroma)
             entry.pop("clut_rects", None)
@@ -1734,7 +1779,7 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
             try:
                 rows, _raw = pages1.read_page(blob, 0, len(blob))
                 stray = carbank_page.stray_key_entries(
-                    rows, key, page.transparent_tolerance,
+                    rows, key, tolerance,
                     page.transparent_chroma, transparent=[background["index"]])
 
                 if stray:
