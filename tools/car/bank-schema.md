@@ -506,6 +506,126 @@ declaration. The engine has to read 205 itself (models.c, next to
 `CAR_IMPORT_LUMP_SIRENS`); an engine that predates it skips the segment by its
 size and keeps stock drive.
 
+### `handling.policeLights`
+
+Optional, in a car's `handling` block. How the car's police light bar looks. A
+car that leaves it out keeps the engine's default: the light bar of the car's
+source city, which for any bank city (not Driver 2's own four) is the generic
+two-lamp red/blue bar. Give exactly one of `style` or `lights`.
+
+**Wear a Driver 2 city's bar** - `style`:
+
+```json
+"policeLights": { "style": "HAVANA" }
+```
+
+`CHICAGO` (two red lamps, both sides), `HAVANA` and `RIO` (one blue lamp, one
+side, slow), `VEGAS` (three sliding red/blue lamps), or `HOST`: whichever city
+the level is running, which is what a level's own cop cars do. The bar is drawn
+from the car's `policeLight` anchor, exactly as in that city. Exporting a Driver
+2 city with `exportd2` writes this for the police car (model 0) from the city it
+came from, so a rebaked Havana cop keeps its one blue lamp; an existing
+`policeLights` is never overwritten.
+
+**Place every lamp yourself** - `lights` (1..8 lamps):
+
+```json
+"policeLights": {
+  "speed": 16,
+  "lights": [
+    { "name": "front L", "at": [-60, -135, -300], "color": "blue" },
+    { "name": "front R", "at": [ 60, -135, -300], "color": "blue", "phase": 128 },
+    { "name": "rear",    "pos": [0, -135, 250], "color": "amber", "mirror": true, "size": 60 }
+  ]
+}
+```
+
+| key | meaning |
+| --- | --- |
+| `at` | the lamp's point **in the model**, in the car's OBJ coordinates (what you see in Blender). Up is negative y, as in the OBJ. Nothing is converted and the COG plays no part: the engine draws the body at `cog + vertex` and a light at `cog + position`, so a light's vector *is* its OBJ point. (Stock cop cars confirm it: their `policeLight` sits about 25 units under the OBJ's roof.) |
+| `pos` | the same vector written the way `handling.policeLight` is. Identical numbers to `at`; give exactly one of `at` / `pos`. |
+| `color` | `red` (default), `blue`, `amber`, `white`, or `[r, g, b]` 0..255. The presets keep the stock bar's off-channels at 90, so red is `[255, 90, 90]`; at night every colour drops its weaker channels the way the stock bar does. |
+| `phase` | 0..255, where the lamp is in the flash cycle (default 0). `128` flashes exactly opposite `0`: that is what makes a pair alternate. |
+| `mirror` | `true` also draws the lamp at `-x`, so one entry makes a left/right pair. |
+| `size` | percent of a stock lamp, 1..255 (default 100). A small beacon wants 40-60. |
+| `speed` | (top level) flash cycle units per frame, 1..255 (default 16, about two flashes a second). Every lamp flashes at this rate, however many there are. |
+| `name` | a label for you; the bake ignores it. |
+
+A lamp is lit for half of its cycle and ramps up, as the stock bar's lamps do.
+The `super mini cars` cheat scales the lamp positions with the rest of the car.
+
+The bake writes `LUMP_CAR_LIGHTS` (206): a version word, the model count (13),
+13 offsets (0 = none), then one block per car that sets it - `mode` (1 style,
+2 custom), `style`, `count`, `speed`, and per lamp `i16 x, y, z` then `u8 r, g,
+b, phase, flags, size`. When no car sets it the segment is left out, so a bank
+that never mentions it bakes byte-identical. `verify_lights` checks the segment
+against the declaration. The engine reads it in `models.c`
+(`CAR_IMPORT_LUMP_LIGHTS`, `JerCarSlotCopLights`); an engine that predates it
+skips the segment by its size and keeps the default bar. A bad block is dropped
+with a warning in the log and that car keeps the default bar.
+
+#### Finding where a lamp goes: `copmarkers.py`
+
+Working the numbers out by hand is slow (the engine's axes are not Blender's, and a
+wrong sign puts the lamp inside the car). Put the lamp in the model instead:
+
+1. In Blender, put the 3D cursor on the beacon, add a small object there (a cube,
+   a plane or a single vertex) and name it `COPLIGHT_<words>`, for example
+   `COPLIGHT_L_blue`, `COPLIGHT_R_blue_p128`, `COPLIGHT_rear_amber_m_s60`. The words
+   after `COPLIGHT` set the lamp: a colour name, `p<n>` phase, `m`/`mirror`,
+   `s<n>` size percent; anything else is just the label. (`blender_add_coplight.py`
+   adds one at the cursor.)
+2. Export the OBJ the way you always do. The marker is exported with the car, so it
+   is in the car's own coordinates; nothing is converted by guesswork.
+3. `python copmarkers.py cars/<car>/handling.json` lists the lamps it found, in
+   the model's coordinates. Add `--write` to store them in `handling.json`
+   (`--replace-style` to swap out a `style`). It keeps the file's line endings
+   and every other key.
+4. Rebake. The bake drops marker objects from the car's geometry, so they never
+   show in the game.
+
+`--scale` defaults to the bank's `declare.scale`, as the bake reads it, and
+`--flip-y` / `--flip-z` must match the rebake mode you use (`flipy`, `full`);
+the tool prints the scale and where it came from. Markers are read from the
+`clean` OBJ (`--variant damaged|low` for another).
+
+### `handling.policeVoice`
+
+Whose police radio lines a cop car speaks with. One bank can mix cars from every
+city (COPSNRBRS does), and each keeps its own city's radio:
+
+```json
+"policeVoice": "HAVANA"
+```
+
+| Value | Lines |
+| --- | --- |
+| `CHICAGO`, `HAVANA`, `VEGAS`, `RIO` | that Driver 2 city's stock radio lines |
+| `HOST` | the level's own lines |
+| `OWN`, or the key absent | the source-city rule: the bank's `declare.police_voices`, else Driver 1 Miami's, else the host's |
+
+The bake writes `LUMP_CAR_VOICE` (207), one byte per model slot, only when some
+car sets it; the report lists it under `police_voice`. Each extra city costs 17
+voice samples and their sound memory; when either runs out the car keeps the
+host's lines (the game log says so).
+
+### Damage tables (computed, nothing to write)
+
+Every bake writes `LUMP_CAR_DENTING` (208): each model's own damage zones and
+per-poly damage levels, in the `.DEN` block layout (`dentgen.py`). It is computed
+from the BAKED model and pages, so its poly indices are the engine's and each
+shift is tested against the art and palette row it will actually draw:
+
+- zones split the car by side (x) and front/middle/rear (z, front is -z), the
+  way a hit picks one (bcollide.c);
+- a poly's level is +64 at light damage and/or +128 at heavy, whichever shift
+  lands on drawable art no poly covers, else it never moves;
+- the art at both shifts joins the material's palette row (`dent_shadows`).
+
+The report's `damage` block counts the polys per behaviour for each model. A car
+without the segment (an older bake) is left undented in game rather than using
+the host city's table.
+
 ### `remap`
 
 `set` and `id` are objects keyed by the source value as a string,

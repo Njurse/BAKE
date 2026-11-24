@@ -102,6 +102,27 @@ POLICE_VOICE_COUNT = 17
 # whatever the controller of the slot it loads into drives in stock.
 DRIVE_WHEELS = {"front": 1, "rear": 2, "all": 3}
 
+# handling.policeLights -> LUMP_CAR_LIGHTS (exportd2), the car's own police light
+# layout. Either `style` (wear a stock Driver 2 city's bar: CHICAGO 2 red lights
+# per side, HAVANA/RIO one blue light, VEGAS 3 sliding red/blue; the value is the
+# engine's city index) or `lights` (one entry per lamp, drawn exactly where it
+# says). HOST means "whichever city the level is", which is what the level's own
+# cars do. A car with no policeLights keeps the engine's source-city default.
+POLICE_LIGHT_CITIES = {"CHICAGO": 0, "HAVANA": 1, "VEGAS": 2, "RIO": 3}
+POLICE_LIGHT_HOST = 255
+POLICE_LIGHTS_MAX = 8           # lamps per car (engine JER_COP_LIGHTS_MAX)
+POLICE_LIGHT_SPEED = 16         # flash cycle units per frame when `speed` is absent
+# Presets, spelled the way the stock bar draws them: the off channels sit at 90 of
+# 255 (the engine drops them to 50 at night), so a red lamp is not pure red.
+POLICE_LIGHT_COLORS = {
+    "red": (255, 90, 90),
+    "blue": (90, 90, 255),
+    "amber": (255, 170, 40),
+    "white": (255, 255, 255),
+}
+POLICE_LIGHT_KEYS = {"style", "lights", "speed"}
+POLICE_LIGHT_LAMP_KEYS = {"name", "at", "pos", "color", "phase", "mirror", "size"}
+
 
 class BankError(Exception):
     """A bank.json that cannot be used, with the file and field named."""
@@ -201,6 +222,156 @@ def _drive_wheels(where, field, handling):
     return value
 
 
+# handling.policeVoice -> LUMP_CAR_VOICE (exportd2): whose police radio lines a cop
+# car speaks with. A Driver 2 city name speaks that game's stock lines for the city
+# (the byte is the engine's city index + 1), HOST the level's own, and OWN - or the
+# key absent - keeps the source-city rule (the bank's declare.police_voices, else
+# Driver 1 Miami's, else the host's). This is what lets one mixed bank (COPSNRBRS:
+# cars from all four cities) give each car its own city's radio.
+POLICE_VOICE_CITIES = {"CHICAGO": 1, "HAVANA": 2, "VEGAS": 3, "RIO": 4}
+POLICE_VOICE_HOST = 255
+
+
+def police_voice(where, field, handling):
+    """handling.policeVoice as the LUMP_CAR_VOICE byte, or None when the car does
+    not set it (or sets OWN, which is the same as not setting it)."""
+    if not isinstance(handling, dict) or "policeVoice" not in handling:
+        return None
+
+    value = handling["policeVoice"]
+    key = value.upper() if isinstance(value, str) else None
+
+    if key == "OWN":
+        return None
+    if key == "HOST":
+        return POLICE_VOICE_HOST
+    if key not in POLICE_VOICE_CITIES:
+        _fail(where, field + ".handling.policeVoice",
+              "%r is not one of %s, HOST, OWN"
+              % (value, ", ".join(sorted(POLICE_VOICE_CITIES))))
+
+    return POLICE_VOICE_CITIES[key]
+
+
+def _int_in(where, field, value, lo, hi):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail(where, field, "%r is not a number" % (value,))
+    value = int(round(value))
+    if not lo <= value <= hi:
+        _fail(where, field, "%d is outside %d..%d" % (value, lo, hi))
+    return value
+
+
+def _xyz(where, field, value):
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        _fail(where, field, "%r is not [x, y, z]" % (value,))
+    return [_int_in(where, "%s[%d]" % (field, i), v, -32768, 32767)
+            for i, v in enumerate(value)]
+
+
+def police_lights(where, field, handling):
+    """handling.policeLights, validated and in the form the lump is built from,
+    or None when the car does not set it (the engine then keeps the source-city
+    bar, so a bank that never mentions it bakes exactly as before).
+
+    {"mode": 1, "style": <city 0..3 | 255 host>}
+    {"mode": 2, "speed": n, "lights": [{x, y, z, r, g, b, phase, flags, size}]}
+
+    A lamp's position is a point in the car's model, in the units of its OBJ
+    (`at`; `pos` is the same vector written the way handling.policeLight is).
+    There is no COG to subtract: the engine draws the body at cog + vertex and a
+    light at cog + position, so a light's vector IS its OBJ coordinate. (Checked
+    against the stock cop cars, whose policeLight sits ~25 units under the OBJ's
+    roof with no COG involved.)"""
+    if not isinstance(handling, dict) or "policeLights" not in handling:
+        return None
+
+    spec = handling["policeLights"]
+    field = field + ".handling.policeLights"
+
+    if not isinstance(spec, dict):
+        _fail(where, field, "must be an object ({\"style\": ...} or {\"lights\": [...]})")
+
+    _check_keys(where, field, spec, POLICE_LIGHT_KEYS, "policeLights")
+
+    if ("style" in spec) == ("lights" in spec):
+        _fail(where, field, "give exactly one of `style` (a Driver 2 city's bar) "
+                            "or `lights` (your own lamps)")
+
+    if "style" in spec:
+        if "speed" in spec:
+            _fail(where, field + ".speed", "only applies to custom `lights`")
+
+        style = spec["style"]
+        key = style.upper() if isinstance(style, str) else style
+
+        if key == "HOST":
+            return {"mode": 1, "style": POLICE_LIGHT_HOST, "speed": 0, "lights": []}
+
+        if key not in POLICE_LIGHT_CITIES:
+            _fail(where, field + ".style",
+                  "%r is not one of %s, HOST"
+                  % (style, ", ".join(sorted(POLICE_LIGHT_CITIES))))
+
+        return {"mode": 1, "style": POLICE_LIGHT_CITIES[key], "speed": 0, "lights": []}
+
+    lamps = spec["lights"]
+
+    if not isinstance(lamps, list) or not 1 <= len(lamps) <= POLICE_LIGHTS_MAX:
+        _fail(where, field + ".lights",
+              "must be a list of 1..%d lamps" % POLICE_LIGHTS_MAX)
+
+    speed = POLICE_LIGHT_SPEED
+    if "speed" in spec:
+        speed = _int_in(where, field + ".speed", spec["speed"], 1, 255)
+
+    out = []
+
+    for i, lamp in enumerate(lamps):
+        f = "%s.lights[%d]" % (field, i)
+
+        if not isinstance(lamp, dict):
+            _fail(where, f, "must be an object")
+
+        _check_keys(where, f, lamp, POLICE_LIGHT_LAMP_KEYS, "lamp")
+
+        if ("at" in lamp) == ("pos" in lamp):
+            _fail(where, f, "give exactly one of `at` (a point in the model, as in "
+                            "the OBJ) or `pos` (the same vector, written like "
+                            "policeLight)")
+
+        x, y, z = _xyz(where, f + (".pos" if "pos" in lamp else ".at"),
+                       lamp["pos"] if "pos" in lamp else lamp["at"])
+
+        color = lamp.get("color", "red")
+
+        if isinstance(color, str):
+            if color.lower() not in POLICE_LIGHT_COLORS:
+                _fail(where, f + ".color", "%r is not one of %s or [r, g, b]"
+                      % (color, ", ".join(sorted(POLICE_LIGHT_COLORS))))
+            r, g, b = POLICE_LIGHT_COLORS[color.lower()]
+        else:
+            if not isinstance(color, (list, tuple)) or len(color) != 3:
+                _fail(where, f + ".color", "%r is not a colour name or [r, g, b]"
+                      % (color,))
+            r, g, b = [_int_in(where, "%s.color[%d]" % (f, k), v, 0, 255)
+                       for k, v in enumerate(color)]
+
+        mirror = lamp.get("mirror", False)
+
+        if not isinstance(mirror, bool):
+            _fail(where, f + ".mirror", "%r is not true or false" % (mirror,))
+
+        out.append({
+            "x": x, "y": y, "z": z, "r": r, "g": g, "b": b,
+            "phase": _int_in(where, f + ".phase", lamp.get("phase", 0), 0, 255),
+            "flags": 1 if mirror else 0,
+            "size": _int_in(where, f + ".size", lamp.get("size", 100), 1, 255),
+        })
+
+    return {"mode": 2, "style": 0, "speed": speed, "lights": out}
+
+
 def _bake_scale(where, field, value):
     """A vertex multiplier. 1 is a Driver 2 OBJ; 2048/3000 is a Driver 1 OBJ."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -283,6 +454,9 @@ class Car(object):
         # block by Bank (_drive_wheels). None: the stock drive of the resident
         # slot's controller, which is what every retail car gets.
         self.drive_wheels = None
+        # Optional police light layout (handling.policeLights), validated by
+        # police_lights(). None: the engine's source-city bar.
+        self.police_lights = None
 
         self.palette_source = None
         palette = data.get("palette") or {}
@@ -1025,6 +1199,7 @@ class Bank(object):
         for name, data in cars.items():
             base = self.base
             drive = None
+            lights = None
             if isinstance(data, str):
                 # a car may live in its own file (cars/<car>/handling.json):
                 # its paths are relative to that file, and keys the bake does
@@ -1038,6 +1213,10 @@ class Bank(object):
                           "cannot read %s (%s)" % (data, e))
                 drive = _drive_wheels(where, "declare.cars.%s" % name,
                                       filed.get("handling"))
+                lights = police_lights(where, "declare.cars.%s" % name,
+                                       filed.get("handling"))
+                police_voice(where, "declare.cars.%s" % name,
+                             filed.get("handling"))
                 data = {k: v for k, v in filed.items() if k in CAR_KEYS}
                 base = os.path.dirname(carfile)
             if not isinstance(data, dict):
@@ -1057,6 +1236,7 @@ class Bank(object):
             _check_keys(where, label, data, CAR_KEYS, "car")
             self.cars[name] = Car(label, path, data, base, where)
             self.cars[name].drive_wheels = drive
+            self.cars[name].police_lights = lights
 
         seen = set()
 

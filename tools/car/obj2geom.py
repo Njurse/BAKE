@@ -19,8 +19,79 @@ import os
 import sys
 
 
+# JERICHO: an object whose name starts with this is a MARKER, not part of the car: a
+# point the author placed to say where something goes (COPLIGHT_* = a police light,
+# see copmarkers.py). It exports with the car, so it sits in the same coordinates as
+# the mesh and needs no axis or unit conversion, but it must never bake into the
+# car's polys. parse_obj drops its vertices and any face that touches them.
+MARKER_PREFIX = "coplight"
+
+
+def is_marker_name(name):
+    return name.strip().lower().startswith(MARKER_PREFIX)
+
+
+def _without_vertices(verts, faces, mats, drop):
+    """verts/faces/mats with the vertex indices in `drop` removed. A face that
+    uses one of them goes too; the rest are renumbered."""
+    remap = {}
+    kept = []
+
+    for i, v in enumerate(verts):
+        if i not in drop:
+            remap[i] = len(kept)
+            kept.append(v)
+
+    out_faces = []
+    out_mats = []
+
+    for n, (vi, ti) in enumerate(faces):
+        if any(i in drop for i in vi):
+            continue
+        out_faces.append(([remap[i] for i in vi], ti))
+        if mats:
+            out_mats.append(mats[n])
+
+    return kept, out_faces, out_mats
+
+
+def read_markers(path):
+    """[(group name, (x, y, z))] for every marker object in an OBJ, in file order.
+    The point is the middle of the marker's bounding box, in the OBJ's own units:
+    a cube, a plane or a single vertex all give the point you would expect. Raw
+    OBJ coordinates, before any flip or scale a bake applies (copmarkers.py)."""
+    groups = {}
+    order = []
+    group = ""
+
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if not parts or parts[0].startswith("#"):
+                continue
+            if parts[0] in ("g", "o"):
+                group = line.strip()[len(parts[0]):].strip()
+            elif parts[0] == "v" and len(parts) >= 4 and is_marker_name(group):
+                if group not in groups:
+                    groups[group] = []
+                    order.append(group)
+                groups[group].append((float(parts[1]), float(parts[2]),
+                                      float(parts[3])))
+
+    out = []
+
+    for name in order:
+        pts = groups[name]
+        out.append((name, tuple((min(p[k] for p in pts) + max(p[k] for p in pts)) / 2.0
+                                for k in range(3))))
+
+    return out
+
+
 def parse_obj(path, with_materials=False):
     """(verts, uvs, faces) - plus a per-face material name when asked.
+
+    Marker objects (see MARKER_PREFIX) are left out.
 
     The material name is what carries a poly's texture page: carbank_export
     writes "set<S>_id<T>" per (set, id) group and "flat" for untextured panels,
@@ -32,13 +103,19 @@ def parse_obj(path, with_materials=False):
     faces = []          # list of (v_indices, uv_indices)  (0-based)
     mats = []           # per-face material name ("" when the OBJ names none)
     current = ""
+    group = ""          # the g/o object the next vertices belong to
+    marker_verts = set()
     with open(path) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             parts = line.split()
-            if parts[0] == "v" and len(parts) >= 4:
+            if parts[0] in ("g", "o"):
+                group = line[len(parts[0]):].strip()
+            elif parts[0] == "v" and len(parts) >= 4:
+                if is_marker_name(group):
+                    marker_verts.add(len(verts))
                 verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
             elif parts[0] == "vt" and len(parts) >= 3:
                 uvs.append((float(parts[1]), float(parts[2])))
@@ -53,6 +130,9 @@ def parse_obj(path, with_materials=False):
                 if len(vi) >= 3:
                     faces.append((vi, ti))
                     mats.append(current)
+
+    if marker_verts:
+        verts, faces, mats = _without_vertices(verts, faces, mats, marker_verts)
 
     if with_materials:
         return verts, uvs, faces, mats

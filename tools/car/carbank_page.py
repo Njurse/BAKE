@@ -461,7 +461,8 @@ def clut_dump_text(records, budget=CIV_CLUT_ROWS):
     lines = ["civ_clut budget %d" % budget]
 
     for entry in civ_row_map(sets, budget):
-        note = "  OVERFLOW -> row 0 (first page's palette)" if entry["overflow"] else ""
+        note = ("  OVERFLOW -> row 0 if played as a host level (an import gets its own row)"
+                if entry["overflow"] else "")
         lines.append("set %d -> civ row %d%s" % (entry["set"], entry["row"], note))
 
     for record in records:
@@ -924,15 +925,18 @@ def _paginate_leftovers(indices, pixels, width, height, blobs, rows, next_id):
 
 # denting.c: a dented HD poly samples its UVs shifted by `64 * n` in u - the
 # damage art sits beside the clean art on the same page, read through the
-# SAME CLUT row. Which n a poly gets comes from the host slot's denting table
-# at run time, so the bake plans whichever shift lands on art no poly covers.
+# SAME CLUT row. Which n a poly gets comes from the car's OWN damage table
+# (LUMP_CAR_DENTING, which dentgen.py writes from the baked mesh and these
+# pages): per poly, +64 at light damage and/or +128 at heavy, wherever that
+# shift lands on art. So the art at BOTH shifts joins the material's row.
 DENT_SHIFTS = (128, 64)
 
 
 def dent_shadows(pixels, width, height, islands, cover=None):
     """({src id: texel mask}, shift) - the damage art each material's polys read
     when dented. Only texels no poly covers and that are not the page backdrop
-    count; of the shifts in DENT_SHIFTS the one that reaches most art wins."""
+    count. The masks are the UNION over DENT_SHIFTS (a poly may use either,
+    dentgen decides per poly); `shift` is still the one reaching most art."""
     if not pixels or not islands:
         return {}, None
 
@@ -940,6 +944,10 @@ def dent_shadows(pixels, width, height, islands, cover=None):
     snapped = [fourbpp.snap555(p) for p in pixels]
     backdrop = snapped[0]
     best = (0, None, {})
+    # a texel joins ONE material's row: the first shift to claim it keeps it
+    # (128 first, Driver 2's own damage convention), so a material reaching the
+    # same art at +64 cannot pull it onto a second row
+    owner = [None] * (width * height)
 
     for shift in DENT_SHIFTS:
         out = {}
@@ -957,7 +965,8 @@ def dent_shadows(pixels, width, height, islands, cover=None):
             n = 0
 
             for i, bit in enumerate(moved):
-                if bit and not cover[i] and snapped[i] != backdrop:
+                if (bit and not cover[i] and snapped[i] != backdrop
+                        and owner[i] in (None, sid)):
                     hits[i] = 1
                     n += 1
 
@@ -966,7 +975,21 @@ def dent_shadows(pixels, width, height, islands, cover=None):
                 total += n
 
         if total > best[0]:
-            best = (total, shift, out)
+            best = (total, shift, best[2])
+
+        for sid, hits in out.items():
+            for i, bit in enumerate(hits):
+                if bit:
+                    owner[i] = sid
+
+            have = best[2].get(sid)
+
+            if have is None:
+                best[2][sid] = hits
+            else:
+                for i, bit in enumerate(hits):
+                    if bit:
+                        have[i] = 1
 
     return best[2], best[1]
 

@@ -1048,8 +1048,8 @@ def build_pallet(page_list, levels_dir, remap, tex_remap, items=None, wheels=Non
         overflow = [m for m in carbank_page.civ_row_map(seen_sets)
                     if m["overflow"]]
         if overflow:
-            print("   palette: WARNING %d set(s) past civ_clut's %d rows draw "
-                  "row 0 (the first page's palette): %s"
+            print("   palette: note - %d set(s) past the %d civ_clut rows a host "
+                  "level binds (an import gives each its own row): %s"
                   % (len(overflow), carbank_page.CIV_CLUT_ROWS,
                      ", ".join(str(m["set"]) for m in overflow)))
 

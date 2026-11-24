@@ -113,6 +113,25 @@ LUMP_CAR_WHEELS2 = 204
 # (1 front, 2 rear, 3 all). Written only when some car sets it. 204 is
 # LUMP_CAR_WHEELS2, so the next free id is 205.
 LUMP_CAR_DRIVE = 205
+# JERICHO: per-model police light layout (handling.policeLights): a Driver 2 city's
+# stock bar to wear, or the car's own list of lamps. A table of 13 offsets then one
+# block per car that sets it; written only when some car does, so a bank without it
+# bakes byte-identical. The engine reads it in models.c (CAR_IMPORT_LUMP_LIGHTS)
+# and an engine that predates it skips the segment by its size. 205 is
+# LUMP_CAR_DRIVE, so the next free id is 207.
+LUMP_CAR_LIGHTS = 206
+# JERICHO: per-model police radio voice (handling.policeVoice). 13 bytes, one per
+# model slot, padded to 16: 0 = the source-city rule, 1..4 = a Driver 2 city's stock
+# lines (CHICAGO, HAVANA, VEGAS, RIO), 255 = the host level's. Written only when
+# some car sets it. The engine reads it in models.c (CAR_IMPORT_LUMP_VOICE); one
+# that predates it skips the segment. 206 is LUMP_CAR_LIGHTS, so this is 207.
+LUMP_CAR_VOICE = 207
+# JERICHO: per-model damage table (dentgen.py), .DEN block layout, generated from
+# the baked models and pages so an imported car dents its OWN polys onto its OWN
+# damage art instead of using the host city's table for the same model number.
+LUMP_CAR_DENTING = 208
+LIGHTS_VERSION = 1
+LIGHT_BYTES = 12             # i16 x y z, u8 r g b phase flags size
 SOUND_SAMPLES = 3            # engine, idle, then the horn/siren
 # Per-sample byte budgets and a rate ceiling. See _sound_sample: the
 # engine's SPU write is unchecked, so these are a safety limit, not taste.
@@ -987,6 +1006,16 @@ def write_bank_json(city_dir, city, cars, included_sets, bank_order, lev_name,
         doc_car.update(entry)
         if "fields" in old or "handling" in old:
             doc_car["handling"] = old.get("handling", old.get("fields"))
+        # JERICHO: the police car (model 0) takes its light bar from the city it was
+        # exported from. Written down here, the bank keeps saying "HAVANA's one
+        # blue lamp" after the cars are rebaked into a city of their own; left out,
+        # the engine would give a rebaked cop the generic two-light red/blue bar.
+        # An existing policeLights (the author's own) is never touched.
+        police = doc_car.get("handling")
+        if (c["model"] == 0 and isinstance(police, dict)
+                and str(city).upper() in bankjson.POLICE_LIGHT_CITIES
+                and "policeLights" not in police):
+            police["policeLights"] = {"style": str(city).upper()}
         for k in ("note", "raw"):
             if k in old:
                 doc_car[k] = old[k]
@@ -1883,6 +1912,111 @@ def build_drive_body(order, cars):
     return bytes(flags) + bytes(3)
 
 
+def build_voice_body(order, cars):
+    """LUMP_CAR_VOICE: one byte per model slot, or None when no car sets
+    handling.policeVoice (so a bank without it bakes byte-identical)."""
+    voices = bytearray(MAX_CAR_MODELS)
+
+    for slot, car_id in order:
+        handling = (cars.get(car_id) or {}).get("handling") or {}
+        value = bankjson.police_voice(car_id, "cars", handling)
+
+        if value is not None and 0 <= slot < MAX_CAR_MODELS:
+            voices[slot] = value
+
+    if not any(voices):
+        return None
+
+    return bytes(voices) + bytes(3)
+
+
+def _voice_label(value):
+    """A LUMP_CAR_VOICE byte in words, for the bake report."""
+    if value == bankjson.POLICE_VOICE_HOST:
+        return "host"
+    for name, index in bankjson.POLICE_VOICE_CITIES.items():
+        if index == value:
+            return name
+    return "voice %d" % value
+
+
+def verify_voice(lev_path, wanted):
+    """LUMP_CAR_VOICE must be present exactly when a car declares policeVoice,
+    and carry the declared byte per model slot."""
+    with open(lev_path, "rb") as f:
+        blob = f.read()
+
+    got = d2_lump(blob, LUMP_CAR_VOICE)
+
+    if wanted is None:
+        return (["voice: the bank has a police voice segment no car declares"]
+                if got is not None else [])
+
+    if got is None:
+        return ["voice: no police voice segment, the declaration wants %s"
+                % list(wanted[:MAX_CAR_MODELS])]
+
+    body, size = got
+
+    if size < MAX_CAR_MODELS or blob[body:body + MAX_CAR_MODELS] != wanted[:MAX_CAR_MODELS]:
+        return ["voice: segment does not match the declaration %s"
+                % list(wanted[:MAX_CAR_MODELS])]
+
+    return []
+
+
+def build_lights_body(order, cars):
+    """LUMP_CAR_LIGHTS, or None when no car sets handling.policeLights.
+
+        i32 version   i32 numModels   i32 offset[numModels]   blocks
+        block: u8 mode (1 style, 2 custom)  u8 style  u8 count  u8 speed
+               then `count` lamps: i16 x y z   u8 r g b phase flags size
+
+    Offsets count from the start of the body; 0 means "this model says nothing".
+    Every block is a multiple of 4 bytes, so offsets stay aligned."""
+    blocks = {}
+
+    for slot, car_id in order:
+        handling = (cars.get(car_id) or {}).get("handling") or {}
+        spec = bankjson.police_lights(car_id, "cars", handling)
+
+        if spec is None:
+            continue
+
+        if not 0 <= slot < MAX_CAR_MODELS:
+            raise bankjson.BankError("%s: model slot %d is outside 0..%d"
+                                     % (car_id, slot, MAX_CAR_MODELS - 1))
+
+        if spec["mode"] == 1:
+            blocks[slot] = struct.pack("<4B", 1, spec["style"], 0, 0)
+            continue
+
+        block = bytearray(struct.pack("<4B", 2, 0, len(spec["lights"]),
+                                      spec["speed"]))
+
+        for lamp in spec["lights"]:
+            # 100% is spelled 0 in the lump: the engine's "stock size"
+            size = 0 if lamp["size"] == 100 else lamp["size"]
+            block += struct.pack("<3h6B", lamp["x"], lamp["y"], lamp["z"],
+                                 lamp["r"], lamp["g"], lamp["b"],
+                                 lamp["phase"], lamp["flags"], size)
+
+        blocks[slot] = bytes(block)
+
+    if not blocks:
+        return None
+
+    head = 8 + 4 * MAX_CAR_MODELS
+    body = bytearray(head)
+    struct.pack_into("<ii", body, 0, LIGHTS_VERSION, MAX_CAR_MODELS)
+
+    for slot in sorted(blocks):
+        struct.pack_into("<i", body, 8 + 4 * slot, len(body))
+        body += blocks[slot]
+
+    return bytes(body)
+
+
 def _load_sounds(manifest):
     """The manifest's `sounds` block, or {} when the bank declares none."""
     specs = manifest.get("sounds") or {}
@@ -2059,7 +2193,8 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
                   texture_names_body=None, model_names_body=None,
                   wheels_body=None, sounds_body=None, sirens_body=None,
                   wheels2_body=None, police_voices_body=None,
-                  drive_body=None):
+                  drive_body=None, lights_body=None, voice_body=None,
+                  dent_body=None):
     """A loadable car-data bank: header, table, DATA1, sector-aligned pages."""
     seg = bytearray()
 
@@ -2081,6 +2216,12 @@ def assemble_bank(models_body, texinfo_body, pallet_body, page_blobs,
         add(LUMP_POLICE_VOICES, police_voices_body)
     if drive_body:
         add(LUMP_CAR_DRIVE, drive_body)
+    if lights_body:
+        add(LUMP_CAR_LIGHTS, lights_body)
+    if voice_body:
+        add(LUMP_CAR_VOICE, voice_body)
+    if dent_body:
+        add(LUMP_CAR_DENTING, dent_body)
     add(LUMP_TEXTUREINFO, texinfo_body)
     add(LUMP_PALLET, pallet_body)
     if texture_names_body:
@@ -2314,13 +2455,25 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     police_voices_body = build_police_voices_body(
         _load_police_voices(manifest), warnings)
     drive_body = build_drive_body(order, cars)
+    lights_body = build_lights_body(order, cars)
+    voice_body = build_voice_body(order, cars)
+
+    import dentgen
+    try:
+        dent_body, dent_report = dentgen.build_dent_body(
+            models_body, {s: d for (s, _z), d in zip(perms + specs, page_blobs)})
+    except Exception as e:      # never block a bake on the damage table
+        warnings.append("damage table: not written (%s) - imported cars stay "
+                        "undented rather than wearing the host's" % e)
+        dent_body, dent_report = None, {}
 
     bank_blob = assemble_bank(models_body, texinfo_body, pal_blob, page_blobs,
                               texture_names_body, model_names_body,
                               wheels_body, sounds_body, sirens_body,
                               wheels2_body=wheels2_body,
                               police_voices_body=police_voices_body,
-                              drive_body=drive_body)
+                              drive_body=drive_body, lights_body=lights_body,
+                              voice_body=voice_body, dent_body=dent_body)
 
     lev_path = os.path.join(out_dir, "%s.LEV" % city)
     with open(lev_path, "wb") as f:
@@ -2361,6 +2514,18 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
         report["drive_wheels"] = {str(m): drive_body[m]
                                   for m in range(MAX_CAR_MODELS) if drive_body[m]}
 
+    if lights_body:
+        report["police_lights"] = {
+            str(slot): _lights_label(mode, style, count)
+            for slot, mode, style, count in _lights_summary(lights_body)}
+
+    if dent_report:
+        report["damage"] = {str(m): v for m, v in sorted(dent_report.items())}
+
+    if voice_body:
+        report["police_voice"] = {str(m): _voice_label(voice_body[m])
+                                  for m in range(MAX_CAR_MODELS) if voice_body[m]}
+
     texture_moves = manifest.get("texture_moves") or []
 
     if texture_moves:
@@ -2370,7 +2535,9 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
                                    manifest_dir, included, wheel_specs,
                                    sound_specs, car_wheels)
     voice_problems = (verify_police_voices(lev_path)
-                      + verify_drive(lev_path, build_drive_body(order, cars)))
+                      + verify_drive(lev_path, build_drive_body(order, cars))
+                      + verify_lights(lev_path, lights_body)
+                      + verify_voice(lev_path, voice_body))
 
     if voice_problems:
         report["checks"]["problems"].extend(voice_problems)
@@ -2743,6 +2910,58 @@ def verify_sounds(blob, specs):
                             % (flagged, wanted))
 
     return problems
+
+
+def _lights_summary(body):
+    """[(slot, mode, style, count)] for each model a LUMP_CAR_LIGHTS body names."""
+    out = []
+    num = struct.unpack_from("<i", body, 4)[0]
+
+    for slot in range(min(num, MAX_CAR_MODELS)):
+        off = struct.unpack_from("<i", body, 8 + 4 * slot)[0]
+
+        if off:
+            mode, style, count, _speed = struct.unpack_from("<4B", body, off)
+            out.append((slot, mode, style, count))
+
+    return out
+
+
+def _lights_label(mode, style, count):
+    """A light block in words, for the bake report."""
+    if mode == 2:
+        return "%d custom" % count
+    if style == bankjson.POLICE_LIGHT_HOST:
+        return "host"
+    for name, index in bankjson.POLICE_LIGHT_CITIES.items():
+        if index == style:
+            return name
+    return "style %d" % style
+
+
+def verify_lights(lev_path, wanted):
+    """LUMP_CAR_LIGHTS must be present exactly when a car declares policeLights,
+    and read back byte for byte."""
+    with open(lev_path, "rb") as f:
+        blob = f.read()
+
+    got = d2_lump(blob, LUMP_CAR_LIGHTS)
+
+    if wanted is None:
+        return (["lights: the bank has a light segment no car declares"]
+                if got is not None else [])
+
+    if got is None:
+        return ["lights: no light segment, the declaration wants %d bytes"
+                % len(wanted)]
+
+    body, size = got
+
+    if blob[body:body + len(wanted)] != wanted or size < len(wanted):
+        return ["lights: segment (%d bytes) does not match the declaration "
+                "(%d bytes)" % (size, len(wanted))]
+
+    return []
 
 
 def verify_drive(lev_path, wanted):

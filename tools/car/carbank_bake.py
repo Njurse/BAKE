@@ -2062,8 +2062,15 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
     overflow = [line for line in dump.splitlines() if "OVERFLOW" in line]
 
     if overflow:
-        warnings.append("palette: %d set(s) past civ_clut's %d rows draw the "
-                        "first page's colours — see %s"
+        # JERICHO: only a HOST level binds civ_clut through carTpages[city][0..7]. A
+        # bank is loaded as an IMPORT, and the engine gives every (city, set) its own
+        # row from the import pool (civ_clut 8..127, CarPalIndexForBuild), so these
+        # sets keep their colours in game. Said as a note, not a failure: it used to
+        # read as the cause of palette bugs it never caused.
+        warnings.append("palette: note - %d set(s) are past the %d civ_clut rows a "
+                        "HOST level binds; as an import each set gets its own row, "
+                        "so this only matters if the bank is played as a level — "
+                        "see %s"
                         % (len(overflow), getattr(bank, "clut_rows", 8),
                            os.path.basename(dump_path)))
     else:
