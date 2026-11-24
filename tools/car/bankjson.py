@@ -102,6 +102,29 @@ POLICE_VOICE_COUNT = 17
 # whatever the controller of the slot it loads into drives in stock.
 DRIVE_WHEELS = {"front": 1, "rear": 2, "all": 3}
 
+# handling.damage -> dentgen.py damage_modes: how the bake decides which
+# texture UV shift (0, +64, +128) each poly gets when the car is dented.
+# "d1"  (default, omitting the key) - every textured denting poly uses D=1:
+#        +64 at light damage, +128 at heavy. Matches vanilla D1/D2 behaviour
+#        where every painted body panel has a damage strip at those offsets.
+# "auto" - probe the baked page and assign D based on where drawable art
+#        actually lands. Use for unusual page layouts.
+DAMAGE_MODES = {"d1", "auto"}
+
+
+def damage_mode(where, field, handling):
+    """handling.damage as a string ("d1" or "auto"), or None when absent."""
+    if handling is None:
+        return None
+    v = handling.get("damage")
+    if v is None:
+        return None
+    if v not in DAMAGE_MODES:
+        _fail(where, field + ".handling.damage",
+              "must be one of: " + ", ".join(sorted(DAMAGE_MODES)))
+    return v
+
+
 # handling.policeLights -> LUMP_CAR_LIGHTS (exportd2), the car's own police light
 # layout. Either `style` (wear a stock Driver 2 city's bar: CHICAGO 2 red lights
 # per side, HAVANA/RIO one blue light, VEGAS 3 sliding red/blue; the value is the
@@ -1217,6 +1240,8 @@ class Bank(object):
                                        filed.get("handling"))
                 police_voice(where, "declare.cars.%s" % name,
                              filed.get("handling"))
+                damage_mode(where, "declare.cars.%s" % name,
+                            filed.get("handling"))
                 data = {k: v for k, v in filed.items() if k in CAR_KEYS}
                 base = os.path.dirname(carfile)
             if not isinstance(data, dict):

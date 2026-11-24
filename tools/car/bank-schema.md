@@ -609,22 +609,36 @@ car sets it; the report lists it under `police_voice`. Each extra city costs 17
 voice samples and their sound memory; when either runs out the car keeps the
 host's lines (the game log says so).
 
-### Damage tables (computed, nothing to write)
+### Damage tables
 
 Every bake writes `LUMP_CAR_DENTING` (208): each model's own damage zones and
-per-poly damage levels, in the `.DEN` block layout (`dentgen.py`). It is computed
-from the BAKED model and pages, so its poly indices are the engine's and each
-shift is tested against the art and palette row it will actually draw:
+per-poly damage levels, in the `.DEN` block layout (`dentgen.py`). Its poly
+indices are the engine's (from the baked model), so the right polys shift for
+every car.
 
-- zones split the car by side (x) and front/middle/rear (z, front is -z), the
-  way a hit picks one (bcollide.c);
-- a poly's level is +64 at light damage and/or +128 at heavy, whichever shift
-  lands on drawable art no poly covers, else it never moves;
-- the art at both shifts joins the material's palette row (`dent_shadows`).
+Zones split the car by side (x) and front/middle/rear (z, front is −z), the same
+way a collision hit picks one (bcollide.c). The art at the shifted positions joins
+the material's palette row (`dent_shadows`).
 
-The report's `damage` block counts the polys per behaviour for each model. A car
-without the segment (an older bake) is left undented in game rather than using
-the host city's table.
+#### `handling.damage`
+
+Optional, in a car's `handling` block. Controls how `dentgen.py` decides the UV
+shift for each body poly when the car is dented.
+
+| value | behaviour |
+|-------|----------|
+| `"d1"` (default, key absent) | every textured denting poly gets D=1: **+64 px at light damage, +128 px at heavy**. This is the vanilla D1/D2 behaviour. The bank author is responsible for placing damage art at those offsets on the texture page. |
+| `"auto"` | probe the baked page for each poly. A shift is only used when enough of the poly's texels land on drawable art that no other poly already occupies. Use for unusual page layouts where the damage strip is not at the standard +64/+128 position. |
+
+Example:
+
+```json
+"handling": { "damage": "auto" }
+```
+
+The report's `damage` block counts the polys per behaviour for each model
+(`shift_64_128`, `shift_128`, `shift_64`, `still`). A car without the segment
+(an older bake) is left undented in game rather than using the host city's table.
 
 ### `remap`
 

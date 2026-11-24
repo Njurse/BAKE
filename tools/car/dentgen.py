@@ -22,6 +22,15 @@ A poly gets the D whose shifts land on damage art: texels no poly covers that
 the poly's OWN palette row draws opaque. Everything else is D=2, so a car with
 no damage art drawn simply does not change texture when hit.
 
+Damage modes (handling.damage in the bank JSON, per slot):
+  "d1"   (default) every textured poly that could dent gets D=1:
+         +64 at light damage, +128 at heavy. This matches vanilla
+         D1/D2 behaviour where every painted body panel has a damage
+         strip at those offsets on the texture page.
+  "auto"  probe the baked page for each poly: a shift is only used
+         when enough of its texels land on drawable art that no other
+         poly already occupies. Use for non-standard layouts.
+
 Block layout (one .DEN model block, 976 bytes): u8 zone_verts[6][50],
 u8 zone_polys[6][70], u8 levels[256]; 0xFF ends a zone list.
 Lump body: i32 version 1, i32 13, i32 offset[13] (0 = none), blocks.
@@ -128,10 +137,15 @@ def decode_clean_models(models_body):
     return out
 
 
-def build_dent_body(models_body, pages_by_set):
+def build_dent_body(models_body, pages_by_set, damage_modes=None):
     """(LUMP_CAR_DENTING body or None, {slot: summary}).
 
-    `pages_by_set` is {set: baked page entry bytes}."""
+    `pages_by_set` is {set: baked page entry bytes}.
+    `damage_modes` is {slot: "d1"|"auto"}; absent slots default to "d1".
+    "d1": D=1 for all textured denting polys (vanilla: +64 light, +128 heavy).
+    "auto": probe page art to pick D per poly."""
+    if damage_modes is None:
+        damage_modes = {}
     models = decode_clean_models(models_body)
     pages = {s: page_from_entry(d) for s, d in pages_by_set.items()}
 
@@ -173,12 +187,20 @@ def build_dent_body(models_body, pages_by_set):
 
         levels = bytearray([2] * LEVELS)
         counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        mode = damage_modes.get(slot, "d1")
         for pi, p in enumerate(m.polys[:LEVELS]):
             tx = poly_texels.get((slot, pi))
             d = 2
             if tx:
-                h64, h128 = hit(p, tx, 64), hit(p, tx, 128)
-                d = 1 if (h64 and h128) else 0 if h128 else 3 if h64 else 2
+                if mode == "auto":
+                    # probe the page: only shift if damage art lands there
+                    h64, h128 = hit(p, tx, 64), hit(p, tx, 128)
+                    d = 1 if (h64 and h128) else 0 if h128 else 3 if h64 else 2
+                else:
+                    # "d1" mode (default): assume damage art at +64/+128,
+                    # matching vanilla D1/D2 behavior. Every textured
+                    # denting poly shifts progressively: +64 light, +128 heavy.
+                    d = 1
             levels[pi] = d
             counts[d] += 1
 

@@ -2459,9 +2459,18 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     voice_body = build_voice_body(order, cars)
 
     import dentgen
+    # Collect per-slot damage modes from handling.damage (default "d1").
+    _dent_modes = {}
+    for slot, car_id in order:
+        handling = (cars.get(car_id) or {}).get("handling") or {}
+        m = bankjson.damage_mode(car_id, "cars", handling)
+        if m is not None:
+            _dent_modes[slot] = m
     try:
         dent_body, dent_report = dentgen.build_dent_body(
-            models_body, {s: d for (s, _z), d in zip(perms + specs, page_blobs)})
+            models_body,
+            {s: d for (s, _z), d in zip(perms + specs, page_blobs)},
+            damage_modes=_dent_modes)
     except Exception as e:      # never block a bake on the damage table
         warnings.append("damage table: not written (%s) - imported cars stay "
                         "undented rather than wearing the host's" % e)
