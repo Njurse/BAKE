@@ -214,6 +214,33 @@ what the images produced: size, palette row, the image's sha256, the preview pat
 
 #### Paints (colour variants)
 
+The short way: one list for the whole car, in `handling.json`:
+
+```json
+"textures": {
+  "54": "textures/PAGE_54.png",
+  "paints": ["red", "blue", "silver"]
+}
+```
+
+* Colours are names (`red maroon orange yellow gold cream beige brown green darkgreen
+  lime teal cyan blue navy lightblue purple pink white silver grey black`) or `rrggbb`.
+  Up to five. Colour 0 is always the car's own paint; these are colours 1..5.
+* The list goes to every page whose image is in **the car's own folder**. Shared pages
+  (`../../shared/...`, the stock wheel/trim pages several cars draw) are left alone,
+  because a page's colour columns belong to every car that uses it; the bake says which
+  it skipped. A page's own `"paints"` always wins.
+* What gets recoloured is **measured**: the hue covering the most of the page is the
+  body, and only entries near that hue move (shading, glass, trim, lights and anything
+  `protect`ed stay). The bake prints what it found, e.g. `set 54: paint body detected as
+  yellow (55 colour(s), 81% of the page)`. A page with no coloured body - a white, grey
+  or black car - is left unchanged and the bake says so; list its body colours in
+  `paint_body` to paint it.
+* Every paint gets a preview beside the page preview:
+  `build/pages/PAGE_<set>_paint<k>_<name>.png`. Look at those before driving it.
+
+The per-page form below is still there for full control (image paints, one panel).
+
     "1": { "png": "art/textures/firebird.png",
            "protect": ["ebebe8", "4b0a08"],
            "paints": { "yellow": "e0c020", "red": "c02020",
@@ -224,12 +251,13 @@ Column 0 is ALWAYS the page's own colours - the original paint. Each declared
 paint becomes one more palette record (lump `palette` k -> column k+1), so the
 example above gives 0 blue, 1 yellow, 2 red, 3 green, 4 grey.
 
-A hex paint copies the page's 16-colour row and recolours only the BODY entries:
-hue and saturation from the paint, shading kept (the brightest body entry lands
-on the paint colour's own lightness). Never touched: `0x0000` (transparent),
-`protect` colours (lights), and anything that is not body - by default the
-dark/near-grey entries (glass, trim, tyres). If glass is a light blue and gets
-painted, list the body colours explicitly in `paint_body`.
+A hex (or named) paint copies the page's 16-colour row and recolours only the BODY
+entries: hue and saturation from the paint, shading kept (the brightest body entry
+lands on the paint colour's own lightness). Never touched: `0x0000` (transparent),
+`protect` colours (lights), and anything that is not body. With no `paint_body` the
+body is the page's dominant hue, measured as above (it used to be "every mid/light
+blue entry", which painted nothing on a car that was not blue). If the measurement
+picks the wrong thing, list the body colours explicitly in `paint_body`.
 
 An **image paint** is a recolour of the same atlas (or of one panel), already
 paletted or close to it. Each source index takes the colour that image shows

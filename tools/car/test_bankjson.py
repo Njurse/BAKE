@@ -787,5 +787,81 @@ class TexturesBlockTests(BankFixture):
         self.assertEqual(keyed[portrait.PAGE_W * 20 + 20], plain[portrait.PAGE_W * 20 + 20])
 
 
+class PaintsTests(BankFixture):
+    """Colour variants: names, a plain list, one list for the whole car."""
+
+    def load_car(self, **over):
+        car = {"clean": "clean.obj", "low": "low.obj"}
+        car.update(over)
+        return bankjson.load(self.write(self.declare(car=car))).cars["car1"]
+
+    def test_a_car_wide_list_of_names_reaches_every_page(self):
+        car = self.load_car(textures={"1": "body.png", "2": "atlas.png",
+                                      "paints": ["red", "Silver", "1a2b3c"]})
+        self.assertEqual(sorted(t.set for t in car.textures), [1, 2])
+        for t in car.textures:
+            self.assertEqual([n for n, _ in t.paints], ["red", "Silver", "1a2b3c"])
+            self.assertEqual(t.paints[0][1]["rgb"], (0xc0, 0x20, 0x20))
+            self.assertEqual(t.paints[2][1]["rgb"], (0x1a, 0x2b, 0x3c))
+
+    def test_a_shared_page_is_not_painted_by_one_car(self):
+        car_dir = os.path.join(self.dir, "cars", "car1")
+        os.makedirs(car_dir)
+        for name in ("clean.obj", "low.obj", "own.png"):
+            with open(os.path.join(car_dir, name), "w") as f:
+                f.write("x")
+        with open(os.path.join(car_dir, "handling.json"), "w") as f:
+            json.dump({"clean": "clean.obj", "low": "low.obj",
+                       "textures": {"5": "own.png", "21": "../../body.png",
+                                    "paints": ["red"]}}, f)
+        decl = self.declare()
+        decl["cars"]["car1"] = "cars/car1/handling.json"
+        car = bankjson.load(self.write(decl)).cars["car1"]
+        by = {t.set: [n for n, _ in t.paints] for t in car.textures}
+        self.assertEqual(by, {5: ["red"], 21: []})
+        self.assertEqual(car.paints_skipped, [21])
+
+    def test_a_page_s_own_paints_win(self):
+        car = self.load_car(textures={"1": {"png": "body.png", "paints": {"cop": "black"}},
+                                      "2": "atlas.png", "paints": ["red"]})
+        by = {t.set: [n for n, _ in t.paints] for t in car.textures}
+        self.assertEqual(by, {1: ["cop"], 2: ["red"]})
+
+    def test_an_unknown_name_lists_the_known_ones(self):
+        with self.assertRaises(bankjson.BankError) as caught:
+            self.load_car(textures={"1": "body.png", "paints": ["chartreuse"]})
+        self.assertIn("silver", str(caught.exception))
+
+    def test_body_detection_finds_a_red_car(self):
+        import carbank_palette
+        import fourbpp
+
+        def row(colours):
+            words = [0] + [fourbpp.rgb555(c) for c in colours]
+            words += [fourbpp.rgb555((40, 40, 40))] * (16 - len(words))
+            return b"".join(w.to_bytes(2, "little") for w in words)
+
+        # entries 1-3 red shades (most of the page), 4 a blue light, 5 grey trim
+        r = row([(200, 30, 30), (150, 20, 20), (230, 60, 50), (40, 60, 220), (128, 128, 128)])
+        idx = [1] * 30000 + [2] * 20000 + [3] * 5000 + [4] * 500 + [5] * 10036
+        body, info = carbank_palette.detect_body_colours([r], idx)
+        self.assertEqual(info["hue"], "red")
+        self.assertEqual(len(body), 3)
+
+        painted, n = carbank_palette.paint_row(r, (0x20, 0x50, 0xc0), body)
+        self.assertEqual(n, 3)
+        rgb = fourbpp.clut_rgb(painted)
+        self.assertGreater(rgb[1][2], rgb[1][0])        # the body went blue
+        self.assertEqual(painted[8:12], r[8:12])         # entry 4 (the blue light) untouched
+
+    def test_a_grey_page_has_no_body_to_paint(self):
+        import carbank_palette
+        import fourbpp
+        words = [0] + [fourbpp.rgb555((v, v, v)) for v in range(30, 240, 14)]
+        r = b"".join(w.to_bytes(2, "little") for w in words[:16])
+        body, info = carbank_palette.detect_body_colours([r], [k % 16 for k in range(65536)])
+        self.assertIsNone(body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

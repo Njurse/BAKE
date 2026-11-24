@@ -82,7 +82,18 @@ WHEEL_KEYS = {"clean", "damaged", "fast"}
 KEY_ENTRY_KEYS = {"transparent", "transparent_tolerance", "transparent_chroma"}
 WHEEL_ENTRY_KEYS = {"png", "set", "island"} | KEY_ENTRY_KEYS
 PORTRAIT_ENTRY_KEYS = {"png"} | KEY_ENTRY_KEYS
-TEXTURES_RESERVED = ("wheels", "portrait")
+TEXTURES_RESERVED = ("wheels", "portrait", "paints")
+# Named paint colours, so a colour variant can be "red" rather than a hex code.
+# Mid-tone car paints: the recolour keeps each panel's own shading, and the
+# brightest body entry lands on this colour's lightness.
+PAINT_NAMES = {
+    "red": "c02020", "maroon": "701818", "orange": "e07020", "yellow": "e0c020",
+    "gold": "c0a040", "cream": "e8dcb0", "beige": "c8b890", "brown": "704828",
+    "green": "20a040", "darkgreen": "1c5a2c", "lime": "80d030", "teal": "208888",
+    "cyan": "40b8d0", "blue": "2050c0", "navy": "182c68", "lightblue": "70a0e0",
+    "purple": "7030a0", "pink": "e070a0", "white": "f0f0f0", "silver": "b8b8c0",
+    "grey": "808080", "gray": "808080", "black": "202020",
+}
 # what a wheel sprite / portrait does when it declares no key: the corner colour,
 # per-channel slack 8 (alpha wins when the art has any)
 DEFAULT_SPRITE_TOLERANCE = 8
@@ -564,6 +575,33 @@ class Car(object):
         if not self.atlas and not self.textures:
             _fail(where, "atlas", "a car needs an atlas or a textures map")
 
+        # textures.paints: ONE list of colour variants for the whole car. Every page
+        # of this car that names no paints of its own gets it; the body colour each
+        # page recolours is measured from that page (carbank_palette
+        # .detect_body_colours), so a page with no coloured body - the shared wheel
+        # page, say - simply stays as it is.
+        # Only pages whose image is in THIS car's folder: a page from elsewhere
+        # (../../shared/ - the stock wheel and trim pages several cars use) is left
+        # alone, because a palette column is per page and painting it would recolour
+        # every car that draws it.
+        tex_block = data.get("textures") if isinstance(data.get("textures"), dict) else {}
+        self.paints = parse_paints(where, "textures.paints", tex_block.get("paints"), self._file)
+        self.paints_skipped = []
+        if self.paints:
+            own = os.path.normcase(os.path.abspath(self.base))
+            for t in self.textures:
+                if t.paints:
+                    continue
+                img = os.path.normcase(os.path.abspath(t.image or ""))
+                try:
+                    mine = os.path.commonpath([own, img]) == own
+                except ValueError:
+                    mine = False
+                if mine:
+                    t.paints = list(self.paints)
+                else:
+                    self.paints_skipped.append(t.set)
+
         self.wheels = {}
         wheels = wheels_decl or {}
 
@@ -824,16 +862,7 @@ class Texture(object):
         # column order. Column 0 is always the page's own colours. Only the
         # body entries of the page row are recoloured (paint_body, or every
         # mid/light blue by default); protect colours and 0x0000 never move.
-        paints = data.get("paints") or {}
-        if not isinstance(paints, dict):
-            _fail(where, field + ".paints",
-                  "must be an object of name -> rrggbb or {image: path}")
-        if len(paints) > 5:
-            _fail(where, field + ".paints",
-                  "at most 5 variants (civ_clut columns 1..5), not %d" % len(paints))
-        self.paints = [(str(name), _paint_spec(where, field + ".paints." + str(name),
-                                               spec, file_of))
-                       for name, spec in paints.items()]
+        self.paints = parse_paints(where, field + ".paints", data.get("paints"), file_of)
         split = data.get("split", "auto")
         if split is True:
             split = "auto"
@@ -896,6 +925,28 @@ class Texture(object):
                 "max_error": self.max_error}
 
 
+def parse_paints(where, field, paints, file_of):
+    """A `paints` declaration -> [(name, spec)] in column order.
+
+    Either form:
+        "paints": ["red", "yellow", "silver"]              colour names or rrggbb, in order
+        "paints": {"police": "202020", "night": {"image": ...}}  named, any spec
+    At most five: the engine keeps six colour columns and column 0 is the page's own.
+    """
+    if not paints:
+        return []
+    if isinstance(paints, list):
+        paints = dict((str(c), c) for c in paints)
+    if not isinstance(paints, dict):
+        _fail(where, field,
+              "must be a list of colours or an object of name -> colour or {image: path}")
+    if len(paints) > 5:
+        _fail(where, field,
+              "at most 5 variants (civ_clut columns 1..5), not %d" % len(paints))
+    return [(str(name), _paint_spec(where, field + "." + str(name), spec, file_of))
+            for name, spec in paints.items()]
+
+
 def _paint_spec(where, field, spec, file_of):
     """A paint is a hex colour, or a paletted image that supplies the new CLUT.
 
@@ -935,12 +986,14 @@ def _paint_spec(where, field, spec, file_of):
 
 
 def _hex_colour(where, field, text):
-    """Validate '#rrggbb' / 'rrggbb' and return (r, g, b)."""
-    value = str(text).strip().lower()
+    """Validate '#rrggbb' / 'rrggbb' (or a PAINT_NAMES name) and return (r, g, b)."""
+    value = str(text).strip().lower().replace(" ", "")
+    value = PAINT_NAMES.get(value, value)
     digits = value[1:] if value.startswith("#") else value
 
     if len(digits) != 6:
-        _fail(where, field, "%r is not a hex colour (rrggbb)" % (text,))
+        _fail(where, field, "%r is not a hex colour (rrggbb) or a colour name (%s)"
+              % (text, ", ".join(sorted(PAINT_NAMES))))
 
     try:
         return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))

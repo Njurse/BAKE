@@ -2070,6 +2070,14 @@ def _sync_palette_from_pages(manifest, bank, bank_dir, warnings):
                                            regions, notes)
     warnings.extend(notes)
 
+    for name, car in sorted(bank.cars.items()):
+        skipped = getattr(car, "paints_skipped", None)
+        if skipped:
+            warnings.append("%s: textures.paints not applied to shared page(s) %s - their "
+                            "image is outside the car's folder, and a page's paint columns "
+                            "are every car's that draws it. Give that page its own "
+                            "\"paints\" if you mean it" % (name, ", ".join(map(str, sorted(skipped)))))
+
     if not rows:
         warnings.append("palette_from_pages: no pages to take a palette from")
         return

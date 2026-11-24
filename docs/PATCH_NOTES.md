@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Colour variants: one list per car, colour names, measured body, previews
+
+- `"textures": {"paints": ["red", "blue", "silver"]}` in a car's `handling.json` gives every page in the car's own folder those variants. Shared pages are skipped (a page's colour columns are every car's that draws it) and the bake names them. A page's own `paints` still wins.
+- Paint colours can be names (`red`, `silver`, `navy`, ...) as well as `rrggbb`, in `paints`, `paint_body` and `protect`. `paints` can also be a plain list.
+- The body a hex paint recolours is measured from the page: the hue covering the most texels. It was "every mid/light blue entry", so a red, yellow or green car got variants that looked identical to the original. A page with no coloured body is left alone, with a note.
+- Each paint writes a preview, `build/pages/PAGE_<set>_paint<k>_<name>.png`.
+
 ### `handling.damage: {"stock": CITY, "model": N}` - a repackaged stock car keeps the stock damage
 
 - A bank car built from a stock Driver 2 car can name it. The bake reads that car's table from `LEVELS/<CITY>.DEN` and carries it onto the baked mesh by geometry, so it dents and changes texture exactly as the original did. Added parts (light bars) never shift.

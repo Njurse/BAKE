@@ -174,6 +174,114 @@ def embedded_palette_body(path, sets):
     return exportd2.filter_palette(pal, sets)[0], len(pal["records"])
 
 
+# Body detection for a hex paint with no `paint_body`. The old default treated every
+# mid/light BLUE entry as body, which is right for the stock Driver 2 cars (their
+# paint is blue on the page) and paints nothing at all on a red, yellow or green
+# custom car. Now the body is MEASURED: the hue that covers the most texels of the
+# page wins, and every entry within BODY_HUE_WINDOW of it is body.
+HUE_BINS = 24
+BODY_HUE_WINDOW = 2             # bins either side of the winning one (+-30 degrees)
+BODY_MIN_SHARE = 0.15           # the winning hue must cover this share of the page's
+                                # opaque texels, or the car has no coloured body (a
+                                # white/grey/black car: name `paint_body` for those)
+_HUE_NAMES = ((15, "red"), (45, "orange"), (70, "yellow"), (160, "green"),
+              (200, "cyan"), (260, "blue"), (300, "purple"), (345, "pink"),
+              (360, "red"))
+
+
+def hue_name(h):
+    deg = (h % 1.0) * 360.0
+    return next(name for top, name in _HUE_NAMES if deg <= top)
+
+
+def _chromatic(rgb):
+    import colorsys
+    h, l, s = colorsys.rgb_to_hls(*(c / 255.0 for c in rgb))
+    return (s >= 0.20 and 0.12 <= l <= 0.90), h
+
+
+def detect_body_colours(rows, indices, pieces=(), protect=(), tolerance=8):
+    """(body colours, summary) for a page, or (None, summary) when it has no coloured body.
+
+    Every texel is counted under the CLUT row that draws it (its texture id's rect
+    from the page plan; a one-row page or a page with no plan uses row 0), so the
+    answer is weighted by what the car actually shows, not by how many palette
+    entries a colour happens to take.
+    """
+    weight = {}
+    n = len(indices)
+    owners = [(0, None)]
+
+    if len(rows) > 1 and pieces:
+        owners = []
+        for t in range(len(rows)):
+            rects = [pc["rect"] for pc in pieces if pc.get("id") == t]
+            if rects:
+                owners.append((t, _rect_mask(rects, n)))
+
+    for t, mask in owners:
+        rgb = fourbpp.clut_rgb(rows[t])
+        raw = [int.from_bytes(rows[t][i * 2:i * 2 + 2], "little") for i in range(16)]
+        counts = [0] * 16
+        for k, ix in enumerate(indices):
+            if mask is None or mask[k]:
+                counts[ix] += 1
+        for e in range(16):
+            if counts[e] and raw[e] != 0 and not any(
+                    all(abs(x - y) <= tolerance for x, y in zip(rgb[e], pr)) for pr in protect):
+                weight[rgb[e]] = weight.get(rgb[e], 0) + counts[e]
+
+    opaque = sum(weight.values()) or 1
+    bins = [0] * HUE_BINS
+    hues = {}
+    for c, w in weight.items():
+        chroma, h = _chromatic(c)
+        if chroma:
+            hues[c] = h
+            bins[int(h * HUE_BINS) % HUE_BINS] += w
+
+    if not hues:
+        return None, {"share": 0.0, "hue": None}
+
+    def window(b):
+        return sum(bins[(b + d) % HUE_BINS] for d in range(-BODY_HUE_WINDOW, BODY_HUE_WINDOW + 1))
+
+    best = max(range(HUE_BINS), key=window)
+    share = window(best) / float(opaque)
+    centre = (best + 0.5) / HUE_BINS
+    reach = (BODY_HUE_WINDOW + 0.5) / HUE_BINS
+
+    if share < BODY_MIN_SHARE:
+        return None, {"share": share, "hue": hue_name(centre)}
+
+    body = [c for c, h in hues.items()
+            if min(abs(h - centre), 1.0 - abs(h - centre)) <= reach]
+    return body, {"share": share, "hue": hue_name(centre), "colours": len(body)}
+
+
+def write_paint_preview(path, rows, indices, pieces=()):
+    """A PNG of the page drawn with `rows` (one variant's CLUTs), for checking a paint."""
+    from PIL import Image
+
+    owner = [0] * len(indices)
+    if len(rows) > 1:
+        for pc in pieces or ():
+            t = pc.get("id")
+            if t is None or t >= len(rows):
+                continue
+            x0, y0, x1, y1 = pc["rect"]
+            for y in range(max(0, y0), min(fourbpp.PAGE_H, y1)):
+                for x in range(max(0, x0), min(fourbpp.PAGE_W, x1)):
+                    owner[y * fourbpp.PAGE_W + x] = t
+
+    rgb = [fourbpp.clut_rgb(r) for r in rows]
+    raw = [[int.from_bytes(r[i * 2:i * 2 + 2], "little") for i in range(16)] for r in rows]
+    im = Image.new("RGBA", (fourbpp.PAGE_W, fourbpp.PAGE_H))
+    im.putdata([(0, 0, 0, 0) if raw[owner[k]][ix] == 0 else rgb[owner[k]][ix] + (255,)
+                for k, ix in enumerate(indices)])
+    im.save(path)
+
+
 def _is_body(rgb):
     """Default body test for paints: a mid/light blue-ish entry."""
     import colorsys
@@ -676,6 +784,28 @@ def rows_from_pages(bank_dir, sets=None, paints=None, regions=None, notes=None):
 
             continue
 
+        # hex paints with no paint_body: measure the body (see detect_body_colours)
+        body = spec.get("body")
+        if body is None and any(not (isinstance(pt, dict) and pt.get("image"))
+                                for _n, pt in spec["paints"]):
+            import fourbpp as _fb
+            indices = _fb.decode_indices(raw)
+            body, info = detect_body_colours(rows, indices, pieces, spec.get("protect") or ())
+            if notes is not None:
+                if body:
+                    notes.append("set %d: paint body detected as %s (%d colour(s), %d%% of the page) - "
+                                 "list paint_body on the page to choose it yourself"
+                                 % (page_set, info["hue"], info["colours"], int(info["share"] * 100)))
+                else:
+                    notes.append("set %d: no coloured body found (the strongest hue, %s, covers %d%% of "
+                                 "the page) - hex paints leave it unchanged; a white/grey/black car "
+                                 "needs paint_body" % (page_set, info["hue"] or "none",
+                                                       int(info["share"] * 100)))
+            if not body:
+                body = []          # paint nothing rather than fall back to "blue"
+
+        variant_rows = {}
+
         if body_rows is not None and notes is not None:
             notes.append("set %d: paints fill civ_clut slots 1..5, so body_rows "
                          "is not also read" % page_set)
@@ -717,11 +847,27 @@ def rows_from_pages(bank_dir, sets=None, paints=None, regions=None, notes=None):
                                                spec.get("protect") or ())
                 else:
                     colour = paint["rgb"] if isinstance(paint, dict) else paint
-                    painted, _n = paint_row(row, colour, spec.get("body"),
+                    painted, _n = paint_row(row, colour, body,
                                             spec.get("protect") or ())
 
+                variant_rows.setdefault(k, list(rows))[texnum] = painted
                 out.append({"palette": k, "texnum": texnum, "tpageindex": page_set,
                             "clut_number": -1, "clut": painted, "paint": name})
+
+        # one preview per paint beside the page's own (pages/PAGE_<set>_paint<k>_<name>.png)
+        try:
+            import fourbpp as _fb
+            if indices is None:
+                indices = _fb.decode_indices(raw)
+            for k, (name, _paint) in enumerate(spec["paints"]):
+                if k in variant_rows:
+                    safe = "".join(ch if ch.isalnum() else "_" for ch in str(name))[:24]
+                    write_paint_preview(os.path.join(bank_dir, "pages", "PAGE_%d_paint%d_%s.png"
+                                                     % (page_set, k + 1, safe)),
+                                        variant_rows[k], indices, pieces)
+        except Exception as e:      # a preview never blocks a bake
+            if notes is not None:
+                notes.append("set %d: paint previews not written (%s)" % (page_set, e))
 
     return out
 
