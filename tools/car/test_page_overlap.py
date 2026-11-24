@@ -46,6 +46,37 @@ class OverlapTest(unittest.TestCase):
 
         self.assertEqual({p["id"] for p in pieces if p.get("src") is not None}, {1, 2})
 
+    def test_overlapping_materials_past_16_colours_never_repaint_a_neighbour(self):
+        # Two overlapping materials need 24 colours between them. They share
+        # texels, so they must read ONE row: splitting them by bbox wrote one
+        # row's indices onto the other's texels (red blotches, black holes).
+        pixels = [(8, 8, 8)] * (W * H)
+        red = [(64 + 8 * i, 0, 0) for i in range(12)]
+        blue = [(0, 0, 64 + 8 * i) for i in range(12)]
+
+        for y in range(64):
+            for x in range(96):
+                pixels[y * W + x] = red[(x + y) % 12] if x < 64 else blue[(x + y) % 12]
+
+        # id 1 alone fits (12 reds); id 2 overlaps half of it and adds 12 blues
+        islands = {1: [[(0, 0), (63, 0), (63, 63), (0, 63)]],
+                   2: [[(32, 0), (95, 0), (95, 63), (32, 63)]]}
+        indices, rows, _pieces = carbank_page.plan_islands(pixels, W, H, islands, True)
+        self.assertEqual([tuple(c) for c in rows[1]], [tuple(c) for c in rows[2]])
+
+        for tex_id, uvs in ((1, islands[1][0]), (2, islands[2][0])):
+            cover = bytearray(W * H)
+            carbank_page._cover_poly(cover, W, H, uvs)
+
+            for i, bit in enumerate(cover):
+                if bit:
+                    got = rows[tex_id][indices[i]]
+                    src = fourbpp.snap555(pixels[i])
+                    # quantized, but a red texel stays red and a blue one blue
+                    self.assertEqual(max(range(3), key=lambda c: got[c]),
+                                     max(range(3), key=lambda c: src[c]), (tex_id, i % W, i // W))
+                    self.assertLessEqual(max(abs(got[c] - src[c]) for c in range(3)), 24)
+
     def test_dent_art_reads_through_the_material_row(self):
         # denting.c shifts a dented poly's u by 64*n. The damage art at u+128
         # is covered by no poly; it must sit on the material's own row rather
@@ -90,6 +121,19 @@ class OverlapTest(unittest.TestCase):
         ids = [p["id"] for p in pieces if p.get("kind") == "wheel"]
         self.assertEqual(len(ids), 1)
         self.assertLess(ids[0], carbank_page.MAX_TEX_IDS)
+
+
+    def test_black_under_polys_is_bumped_only_when_black_is_not_the_key(self):
+        import types
+        import carbank_bake
+
+        def page(key, chroma=None):
+            return types.SimpleNamespace(transparent=key, transparent_chroma=chroma)
+
+        self.assertTrue(carbank_bake._bumps_black(page("FF00FF")))
+        self.assertFalse(carbank_bake._bumps_black(page("000000")))
+        self.assertFalse(carbank_bake._bumps_black(page("FF00FF", chroma=40)))
+        self.assertFalse(carbank_bake._bumps_black(page(None)))
 
 
 if __name__ == "__main__":
