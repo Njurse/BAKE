@@ -1,0 +1,35 @@
+# Line endings. The repository stores LF; a checkout gets the platform's own (CRLF
+# on Windows). Without this a Windows checkout and a Linux/WSL one disagree about
+# every text file, and `git status` lists hundreds that differ only in CR.
+* text=auto
+
+# cmd.exe mis-reads labels and GOTO in an LF batch file; a shell script with CR
+# fails under bash. These two keep their endings wherever they are checked out.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
+
+# Game and bake data: exact bytes, never a newline rewrite.
+*.LEV    binary
+*.lev    binary
+*.LCF    binary
+*.lcf    binary
+*.RAW    binary
+*.raw    binary
+*.bin    binary
+*.DEN    binary
+*.clut   binary
+*.SBK    binary
+*.TIM    binary
+*.png    binary
+*.tga    binary
+*.bmp    binary
+*.wav    binary
+*.blend  binary
+*.blend1 binary
+*.spp    binary
+*.zip    binary
+*.exe    binary
+*.dll    binary
+*.lib    binary
+*.pdb    binary
