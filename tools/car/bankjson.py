@@ -75,7 +75,17 @@ SOUND_SAMPLE_DEFAULTS = {
     "fade_out": 0.0,
 }
 WHEEL_KEYS = {"clean", "damaged", "fast"}
-WHEEL_ENTRY_KEYS = {"png", "set", "island"}
+# A wheel sprite and the car-select portrait are TEXTURES: both live under the car's
+# `textures` object (next to the numeric page ids) and take the same backdrop keys a
+# page does. A top-level `wheels` / `portrait` is the older spelling; it still loads
+# and the bake moves it under `textures` (migrate_car_data).
+KEY_ENTRY_KEYS = {"transparent", "transparent_tolerance", "transparent_chroma"}
+WHEEL_ENTRY_KEYS = {"png", "set", "island"} | KEY_ENTRY_KEYS
+PORTRAIT_ENTRY_KEYS = {"png"} | KEY_ENTRY_KEYS
+TEXTURES_RESERVED = ("wheels", "portrait")
+# what a wheel sprite / portrait does when it declares no key: the corner colour,
+# per-channel slack 8 (alpha wins when the art has any)
+DEFAULT_SPRITE_TOLERANCE = 8
 WHEEL_VARIANTS = ("clean", "damaged", "fast")
 
 # a declared page describes its own BAKE, not just an image: the refresh path has
@@ -164,10 +174,92 @@ DEFAULT_KEY_TOLERANCE = 96
 DEFAULT_TRANSPARENT = {"transparent": "000000", "transparent_tolerance": 0}
 
 
+def migrate_car_data(data):
+    """Move a car json's top-level `wheels` / `portrait` under `textures`.
+
+    Returns the names moved. A name already present under `textures` is left
+    alone (load() reports the clash), as is an empty value (dropped)."""
+    moved = []
+
+    for name in TEXTURES_RESERVED:
+        if name not in data:
+            continue
+
+        if data[name] in (None, "", {}):
+            data.pop(name)
+            continue
+
+        textures = data.get("textures")
+
+        if textures is None:
+            textures = data["textures"] = {}
+
+        if not isinstance(textures, dict) or name in textures:
+            continue
+
+        textures[name] = data.pop(name)
+        moved.append(name)
+
+    return moved
+
+
+def split_textures(where, data):
+    """(pages, wheels, portrait) from a car json, either spelling."""
+    textures = data.get("textures") or {}
+
+    if not isinstance(textures, dict):
+        _fail(where, "textures", "must be an object of set id -> image")
+
+    out = []
+
+    for name in TEXTURES_RESERVED:
+        new, old = textures.get(name), data.get(name)
+
+        if new not in (None, "", {}) and old not in (None, "", {}):
+            _fail(where, name, "is declared at the top level AND under textures; "
+                  "keep the one under textures")
+
+        out.append(new if new not in (None, "", {}) else old)
+
+    pages = {k: v for k, v in textures.items() if k not in TEXTURES_RESERVED}
+    return pages, out[0], out[1]
+
+
+def _key_opts(where, field, data):
+    """The backdrop declaration of a wheel / portrait entry, or None when absent."""
+    if not any(k in data for k in KEY_ENTRY_KEYS):
+        return None
+
+    colour = data.get("transparent")
+    tolerance = data.get("transparent_tolerance")
+    chroma = data.get("transparent_chroma")
+
+    if colour is not None:
+        text = str(colour).strip().lower().lstrip("#")
+
+        if text not in ("auto", "alpha") and not (
+                len(text) == 6 and all(c in "0123456789abcdef" for c in text)):
+            _fail(where, field + ".transparent",
+                  "%r is not a hex colour (rrggbb), \"auto\" or \"alpha\"" % (colour,))
+
+        colour = text
+
+    for name, value in (("transparent_tolerance", tolerance),
+                        ("transparent_chroma", chroma)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or not 0 <= value <= 255):
+            _fail(where, field + "." + name, "%r is not 0..255" % (value,))
+
+    return {"transparent": colour,
+            "tolerance": tolerance,
+            "chroma": chroma}
+
+
 def stamp_transparent(bank_path):
     """Give every texture entry in the bank's car json files a `transparent`
     key, so the colour that bakes to 0x0000 can be changed in place. Entries
-    that already name one are left alone. Returns the files rewritten."""
+    that already name one are left alone. Also moves a top-level `wheels` /
+    `portrait` under `textures` (migrate_car_data). Returns the files rewritten."""
     with open(bank_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     base = os.path.dirname(os.path.abspath(bank_path))
@@ -180,11 +272,13 @@ def stamp_transparent(bank_path):
                 data = json.load(f)
         except (OSError, ValueError):
             continue                       # load() reports it properly
+        changed = bool(migrate_car_data(data))
         textures = data.get("textures")
         if not isinstance(textures, dict):
             continue
-        changed = False
         for key, value in list(textures.items()):
+            if key in TEXTURES_RESERVED:
+                continue
             if isinstance(value, str):
                 value = {"png": value}
             if not isinstance(value, dict) or "transparent" in value:
@@ -431,10 +525,7 @@ class Car(object):
                   "png is a bake output and is not an input.")
 
         self.textures = []
-        textures = data.get("textures") or {}
-
-        if not isinstance(textures, dict):
-            _fail(where, "textures", "must be an object of set id -> image")
+        textures, wheels_decl, portrait_decl = split_textures(where, data)
 
         for key, value in sorted(textures.items()):
             try:
@@ -454,17 +545,17 @@ class Car(object):
             _fail(where, "atlas", "a car needs an atlas or a textures map")
 
         self.wheels = {}
-        wheels = data.get("wheels") or {}
+        wheels = wheels_decl or {}
 
         if not isinstance(wheels, dict):
-            _fail(where, "wheels", "must be an object")
+            _fail(where, "textures.wheels", "must be an object")
 
-        _check_keys(where, "wheels", wheels, WHEEL_KEYS, "wheels")
+        _check_keys(where, "textures.wheels", wheels, WHEEL_KEYS, "wheels")
 
         for variant in WHEEL_VARIANTS:
             # deliberately allowed to be absent: the engine keeps the host's
             # wheel texture for a variant the bank does not carry
-            self.wheels[variant] = _wheel(where, "wheels.%s" % variant,
+            self.wheels[variant] = _wheel(where, "textures.wheels.%s" % variant,
                                           wheels.get(variant), self._file)
 
         self.sounds = None
@@ -524,7 +615,14 @@ class Car(object):
         # "<name>.clut" of 32 bytes is its private CLUT. A raster is drawn
         # with the stock CLUT, so a sibling .clut beside one is not copied.
         # The RAW does not carry CLUTs either way.
-        portrait_rel = data.get("portrait")
+        portrait_rel = portrait_decl
+        self.portrait_key = None
+
+        if isinstance(portrait_rel, dict):
+            _check_keys(where, "textures.portrait", portrait_rel,
+                        PORTRAIT_ENTRY_KEYS, "portrait")
+            self.portrait_key = _key_opts(where, "textures.portrait", portrait_rel)
+            portrait_rel = portrait_rel.get("png")
 
         if portrait_rel not in (None, ""):
             _check_not_output(where, "portrait", portrait_rel, self.base)
@@ -534,11 +632,17 @@ class Car(object):
         self.portrait_page = None
 
         if self.portrait is not None:
+            if self.portrait_key and not _portrait_is_raster(self.portrait):
+                _fail(where, "textures.portrait",
+                      "transparent keys apply to a .png/.tga/.bmp portrait; a "
+                      "pre-packed page already says which index is transparent")
+
             if _portrait_is_raster(self.portrait):
                 import portrait
 
                 try:
-                    self.portrait_page = portrait.encode_path(self.portrait)
+                    self.portrait_page = portrait.encode_path(
+                        self.portrait, self.portrait_key)
                 except portrait.PortraitError as exc:
                     _fail(where, "portrait", str(exc))
                 except ImportError:
@@ -858,10 +962,12 @@ class Wheel(object):
     a rect (the same tyre redrawn).
     """
 
-    def __init__(self, path, setid, island):
+    def __init__(self, path, setid, island, key=None):
         self.path = path
         self.set = setid
         self.island = island
+        # the backdrop declaration (see _key_opts), None = the default key
+        self.key = key
 
 
 def _wheel(where, field, data, file_of):
@@ -872,7 +978,7 @@ def _wheel(where, field, data, file_of):
     if isinstance(data, str):
         # the plain form: art but no page, so no wheel model (see Wheel)
         _check_not_output(where, field, data, None)
-        return Wheel(file_of(where, field, data), None, None)
+        return Wheel(file_of(where, field, data), None, None, None)
 
     if not isinstance(data, dict):
         _fail(where, field, "must be a path string or {png, set, island}")
@@ -884,6 +990,7 @@ def _wheel(where, field, data, file_of):
     path = file_of(where, field + ".png", data.get("png"))
     _check_not_output(where, field + ".png", data.get("png"), None)
 
+    key = _key_opts(where, field, data)
     setid = data.get("set")
 
     if setid is not None and (not isinstance(setid, int)
@@ -896,7 +1003,7 @@ def _wheel(where, field, data, file_of):
     if island == "auto":
         # "auto": the bake places this sprite in the first free rect on `set`,
         # after subtracting the body art and the wheels already placed there
-        return Wheel(path, setid, "auto")
+        return Wheel(path, setid, "auto", key)
 
     if island is not None:
         if not isinstance(island, (list, tuple)) or len(island) != 4:
@@ -922,7 +1029,7 @@ def _wheel(where, field, data, file_of):
               "names a page but no crop rect: give \"island\", or a \"png\" to "
               "measure one from")
 
-    return Wheel(path, setid, island)
+    return Wheel(path, setid, island, key)
 
 
 class Sounds(object):

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Wheels and portrait live under `textures`, with the page backdrop keys
+
+- `wheels` and `portrait` now sit in the car's `textures` block next to the page ids. A top-level `wheels`/`portrait` still loads and is moved under `textures` the next time the bake stamps the car json; declaring both is an error.
+- A wheel entry and a portrait object accept `transparent` (`auto` / `alpha` / `rrggbb`), `transparent_tolerance` and `transparent_chroma`, same meaning as a page. Left out, a wheel behaves exactly as before (top-left colour, tolerance 8) and the page hash does not change, so nothing re-bakes. A portrait key sends the keyed texels to CLUT index 0.
+
 ### A Tanner model keeps Tanner's part names
 
 - Slots 0-5 are addressed by number. Their archive names are the base Jericho set (`JERI_*`), but a character built from Tanner's torso/head/arms (tannerd3) names the same slots `TORSO`, `HEAD`, `U_ARM_*`, `L_ARM_*`. The splitter, importer and textured export accept either name, adopt the names the model uses, and switch the bind variant with them, so a Blender export is not relabelled as Jericho.

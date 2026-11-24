@@ -224,7 +224,8 @@ def fix_page(car, st, png, tex, isl):
 
 def wheels_report(car, h, fix):
     print("\n== wheels (each sprite gets its own CLUT row; >16 is quantized by the bake)")
-    for var, w in sorted((h.get("wheels") or {}).items()):
+    # wheels live under textures now; a top-level block is the older spelling
+    for var, w in sorted((((h.get("textures") or {}).get("wheels")) or h.get("wheels") or {}).items()):
         if not isinstance(w, dict) or "png" not in w: continue
         png = os.path.normpath(os.path.join(car, w["png"]))
         if not os.path.exists(png): print(f"  {var:8} {w['png']}  (missing)"); continue

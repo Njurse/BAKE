@@ -1382,8 +1382,14 @@ def sprite_mask(texels, alpha):
     return [max(abs(t[c] - key[c]) for c in range(3)) <= 8 for t in texels]
 
 
-def wheel_sprite_mask(texels, alpha, width, height):
+def wheel_sprite_mask(texels, alpha, width, height, opts=None):
     """The sprite's backdrop only, not same-coloured interior art.
+
+    `opts` is the wheel's own transparency declaration (textures.wheels.<variant>):
+    {"transparent": "auto" | "alpha" | "rrggbb", "tolerance": 0..255,
+    "chroma": 0..255 or None}. Absent keys keep the old behaviour: the sprite's
+    top-left colour, per-channel tolerance 8, an alpha channel winning when the
+    art has one. `chroma` matches the colour CAST instead, as a texture page does.
 
     A black tyre on a black backdrop is the STP case: `sprite_mask` keys every
     near-black texel, so the whole tyre becomes transparent. This flood-fills
@@ -1391,19 +1397,32 @@ def wheel_sprite_mask(texels, alpha, width, height):
     border-connected backdrop is masked and a black tyre that does not touch
     the edge stays opaque.
     """
-    if alpha is not None and any(a < 128 for a in alpha):
-        return [a < 128 for a in alpha]
+    opts = opts or {}
+    mode = opts.get("transparent")
+    tolerance = opts.get("tolerance")
+    tolerance = 8 if tolerance is None else tolerance
+    chroma = opts.get("chroma")
 
     if not texels or width <= 0 or height <= 0:
         return []
 
-    key = texels[0]
+    key, explicit = _parse_key("auto" if mode is None else str(mode), texels, alpha)
+
+    if explicit is not None:        # "alpha", or "auto" on art that has alpha
+        return explicit
+
     mask = [False] * (width * height)
     seen = [False] * (width * height)
     stack = []
 
     def matches(index):
-        return max(abs(texels[index][c] - key[c]) for c in range(3)) <= 8
+        p = texels[index]
+
+        if chroma is not None:
+            return (abs((p[0] - p[1]) - (key[0] - key[1])) <= chroma
+                    and abs((p[2] - p[1]) - (key[2] - key[1])) <= chroma)
+
+        return max(abs(p[c] - key[c]) for c in range(3)) <= tolerance
 
     def push(x, y):
         index = y * width + x

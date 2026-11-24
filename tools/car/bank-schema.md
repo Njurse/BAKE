@@ -109,9 +109,9 @@ Every path in an inline car object is relative to the folder holding `bank.json`
 
 ### Portrait
 
-Optional. Put `portrait` on the car in `cars/<id>/handling.json`. That is the author-facing field. An inline car object in `bank.json` accepts the same key and goes through the same packer; prefer the handling file, which is where the rest of that car already lives.
+Optional. Put `portrait` on the car in `cars/<id>/handling.json`, **under `textures`** (`"textures": {"portrait": ...}`). A top-level `portrait` is the older spelling: it still loads, and the next bake moves it under `textures`. That is the author-facing field. An inline car object in `bank.json` accepts the same key and goes through the same packer; prefer the handling file, which is where the rest of that car already lives.
 
-The value is a path, relative to the handling file (or to `bank.json` when the car object is inline). A source under `work/`, `pages/` or `build/` is refused, same as a texture.
+The value is a path, or an object `{"png": path, "transparent": ..., "transparent_tolerance": ..., "transparent_chroma": ...}`. The backdrop keys are the page ones (below) and apply to a `.png`/`.tga`/`.bmp` portrait only: every keyed texel is written as palette index 0, the stock car-select CLUT's dark/transparent entry (`auto` = the top-left texel, `alpha` = the PNG's alpha channel; per-channel tolerance defaults to 8). A pre-packed page that names a key is refused. The path is relative to the handling file (or to `bank.json` when the car object is inline). A source under `work/`, `pages/` or `build/` is refused, same as a texture.
 
 A name that does not end in `.png`, `.tga`, or `.bmp` is a pre-packed page. It must be exactly `32768` bytes of 4bpp indices, and it is copied unchanged — the bake does not quantise it, and `fourbpp.py` RGB555 rounding is not involved. A `<same-name>.clut` of `32` bytes beside that file is optional and is copied too.
 
@@ -166,6 +166,15 @@ bake writes `-1` for them.
 | `portrait` | no | a car-select portrait, usually in `handling.json`. See *Portrait* above. A pre-packed page is copied; a `.png`, `.tga`, or `.bmp` is encoded onto the CARBACK portrait CLUT. The bake packs the page into `<stem>.RAW` and writes the loose page |
 
 ### `textures`
+
+`textures` is the one block for everything the bake turns into texels. Numeric keys are page set ids; two reserved names sit beside them:
+
+| key | meaning |
+| --- | --- |
+| `wheels` | `{clean, damaged, fast}`: each a path or `{png, set, island, transparent, transparent_tolerance, transparent_chroma}`. The wheel's backdrop is flood-filled inward from the sprite's border, so a black tyre on a black backdrop stays solid. With no key declared: the sprite's top-left colour, per-channel tolerance 8, alpha winning when the art has any. `transparent`/`_tolerance`/`_chroma` mean what they do on a page, see below |
+| `portrait` | the car-select portrait, see *Portrait* |
+
+A top-level `wheels` or `portrait` in `handling.json` is the older spelling. It still loads; the bake moves it under `textures` (and says so). Declaring both spellings is refused.
 
 A declared page or sprite may NOT live under `work/`, `pages/` or `build/`: those are
 what the bake writes, so a source there is a previous bake's output - and its

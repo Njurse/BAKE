@@ -1255,11 +1255,19 @@ def _page_source_hash(page, setid, sprites=None, uv_islands=None):
               "max_error": getattr(page, "max_error", None)}
 
     if sprites:
-        record["wheels"] = [{"variant": variant,
-                             "image": os.path.basename(path),
-                             "sha256": _file_sha256(path),
-                             "island": [int(v) for v in island]}
-                            for variant, path, island in sprites]
+        record["wheels"] = []
+
+        for rec in sprites:
+            variant, path, island = rec
+            item = {"variant": variant,
+                    "image": os.path.basename(path),
+                    "sha256": _file_sha256(path),
+                    "island": [int(v) for v in island]}
+
+            if getattr(rec, "key", None):       # only a declared key changes the hash
+                item["key"] = dict(rec.key)
+
+            record["wheels"].append(item)
 
     if page.protect:
         record["protect"] = ["%02x%02x%02x" % tuple(c) for c in page.protect]
@@ -1449,6 +1457,16 @@ def _check_wheel_clashes(bank, car_wheels):
                 (carname, spec["variant"], rect, png))
 
 
+class SpriteRec(tuple):
+    """(variant, image path, island) - a plain 3-tuple to every caller - that also
+    carries the wheel's own transparency declaration as `.key` (None = default)."""
+
+    def __new__(cls, rec, key=None):
+        self = tuple.__new__(cls, rec)
+        self.key = key
+        return self
+
+
 def wheel_islands(bank, car_wheels=None):
     """{set: [(variant, image path, island)]} for every wheel sprite on a page.
 
@@ -1485,7 +1503,8 @@ def wheel_islands(bank, car_wheels=None):
                 continue
 
             islands.setdefault(spec["set"], []).append(
-                (spec["variant"], wheel.path, tuple(spec["island"])))
+                SpriteRec((spec["variant"], wheel.path, tuple(spec["island"])),
+                          getattr(wheel, "key", None)))
 
     return islands
 
@@ -1562,14 +1581,16 @@ def _sync_declared_pages(manifest, bank, bank_dir, warnings, out_dir=None,
 
             carved = set()
 
-            for variant, sprite_path, island in sprites:
+            for rec in sprites:
+                variant, sprite_path, island = rec
+
                 if tuple(island) in carved:
                     continue        # a shared damaged/fast island: carve once
 
                 carved.add(tuple(island))
                 sw, sh, sprite, sprite_alpha = carbank_page.load_pixels(sprite_path)
                 transparent = carbank_page.wheel_sprite_mask(
-                    sprite, sprite_alpha, sw, sh)
+                    sprite, sprite_alpha, sw, sh, getattr(rec, "key", None))
                 masked = carbank_page.composite(
                     pixels, fourbpp.PAGE_W, fourbpp.PAGE_H, sprite, sw, sh,
                     island, transparent, key if key is not None else sprite[0])
@@ -2574,7 +2595,8 @@ def main(argv=None):
         default_page = (int(s_), int(i_))
 
     for path in bankjson.stamp_transparent(args.bank):
-        print("carbank_bake: added a transparent colour (000000) to %s" % path)
+        print("carbank_bake: updated %s (transparent colour stamped / wheels and "
+              "portrait moved under textures)" % path)
 
     if not args.out:
         args.out = bank_layout(bankjson.load(args.bank))[1]

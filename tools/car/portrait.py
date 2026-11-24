@@ -258,10 +258,36 @@ def _size_error(label, size):
         % (label, width, height, PAGE_W, SHOWN_H, PAGE_W, PAGE_H))
 
 
-def encode_image(im, path=None):
+def _key_mask(im, key):
+    """Texels the portrait declares transparent: [bool] in image order.
+
+    ``key`` is the declaration (textures.portrait): {"transparent": "auto" |
+    "alpha" | "rrggbb", "tolerance", "chroma"}. Same colour rules as a texture
+    page, so a portrait and a page keyed the same way agree on what is backdrop.
+    """
+    import carbank_page
+
+    rgba = im.convert("RGBA")
+    data = list(rgba.getdata())
+    texels = [(p[0], p[1], p[2]) for p in data]
+    alpha = [p[3] for p in data] if (im.mode in ("RGBA", "LA", "PA")
+                                      or "transparency" in im.info) else None
+    colour, explicit = carbank_page._parse_key(
+        str(key.get("transparent") or "auto"), texels, alpha)
+
+    if explicit is not None:
+        return explicit
+
+    tolerance = key.get("tolerance")
+    return carbank_page.key_mask(texels, colour, 8 if tolerance is None else tolerance,
+                                 key.get("chroma"))
+
+
+def encode_image(im, path=None, key=None):
     """One raster -> 32768 bytes of 4bpp. Auto: pack when the palette matches.
 
-    ``path`` is only there so a size error can name the file.
+    ``path`` is only there so a size error can name the file. ``key`` (optional)
+    sends the keyed texels to index 0, the stock CLUT's dark/transparent entry.
     """
     label = os.path.basename(path) if path else "portrait"
     height = im.size[1]
@@ -278,13 +304,20 @@ def encode_image(im, path=None):
     else:
         indices = remap_indices(image_rgb(im), clut)
 
+    if key:
+        indices = list(indices)
+
+        for i, hit in enumerate(_key_mask(im, key)):
+            if hit:
+                indices[i] = 0
+
     if height == SHOWN_H:
         indices = list(indices) + [0] * (PAGE_W * (PAGE_H - SHOWN_H))
 
     return fourbpp.encode_indices(bytes(indices))
 
 
-def encode_path(path):
+def encode_path(path, key=None):
     """Open a PNG, TGA, or BMP with Pillow and encode it.
 
     Pillow is the loader car texture pages already use (``carbank_page``).
@@ -303,6 +336,6 @@ def encode_path(path):
             raise _size_error(name, im.size)
 
         im.load()
-        return encode_image(im, path)
+        return encode_image(im, path, key)
     finally:
         im.close()

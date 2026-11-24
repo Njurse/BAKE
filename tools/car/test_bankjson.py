@@ -706,5 +706,86 @@ class WriteBackTests(BankFixture):
         self.assertEqual(raw["declare"], decl)
 
 
+class TexturesBlockTests(BankFixture):
+    """wheels and portrait live under `textures` and take the page backdrop keys."""
+
+    def load_car(self, **over):
+        car = {"clean": "clean.obj", "low": "low.obj", "atlas": "atlas.png"}
+        car.update(over)
+        return bankjson.load(self.write(self.declare(car=car))).cars["car1"]
+
+    def test_wheels_under_textures_carry_their_own_key(self):
+        car = self.load_car(textures={"wheels": {"clean": {
+            "png": "wheel.png", "set": 21, "island": [192, 64, 256, 128],
+            "transparent": "#FF00FF", "transparent_tolerance": 40,
+            "transparent_chroma": 12}}})
+
+        self.assertEqual(car.textures, [])
+        self.assertEqual(car.wheels["clean"].key,
+                         {"transparent": "ff00ff", "tolerance": 40, "chroma": 12})
+
+    def test_an_undeclared_key_stays_the_old_default(self):
+        car = self.load_car(wheels={"clean": "wheel.png"})
+        self.assertIsNone(car.wheels["clean"].key)
+
+    def test_top_level_and_textures_spelling_together_is_refused(self):
+        with self.assertRaises(bankjson.BankError):
+            self.load_car(wheels={"clean": "wheel.png"},
+                          textures={"wheels": {"clean": "wheel.png"}})
+
+    def test_a_bad_key_names_its_field(self):
+        with self.assertRaises(bankjson.BankError) as caught:
+            self.load_car(textures={"wheels": {"clean": {
+                "png": "wheel.png", "transparent_tolerance": 999}}})
+
+        self.assertIn("textures.wheels.clean.transparent_tolerance",
+                      str(caught.exception))
+
+    def test_migrate_moves_the_old_blocks_under_textures(self):
+        data = {"portrait": "p.png", "wheels": {"clean": "w.png"},
+                "textures": {"21": "page.png"}}
+
+        self.assertEqual(bankjson.migrate_car_data(data), ["wheels", "portrait"])
+        self.assertNotIn("wheels", data)
+        self.assertNotIn("portrait", data)
+        self.assertEqual(data["textures"]["wheels"], {"clean": "w.png"})
+        self.assertEqual(data["textures"]["portrait"], "p.png")
+        self.assertEqual(bankjson.migrate_car_data(data), [])
+
+    def test_wheel_mask_honours_colour_tolerance_and_chroma(self):
+        import carbank_page
+
+        # 4x1: backdrop, a near-backdrop, grey art, backdrop - the border row floods
+        texels = [(255, 0, 255), (240, 20, 240), (128, 128, 128), (255, 0, 255)]
+        flat = carbank_page.wheel_sprite_mask(texels, None, 4, 1,
+                                              {"transparent": "ff00ff", "tolerance": 0})
+        wide = carbank_page.wheel_sprite_mask(texels, None, 4, 1,
+                                              {"transparent": "ff00ff", "tolerance": 30})
+        cast = carbank_page.wheel_sprite_mask(texels, None, 4, 1,
+                                              {"transparent": "ff00ff", "chroma": 40})
+
+        self.assertEqual(flat, [True, False, False, True])
+        self.assertEqual(wide, [True, True, False, True])
+        self.assertEqual(cast, [True, True, False, True])
+
+    def test_portrait_key_sends_backdrop_texels_to_index_zero(self):
+        from PIL import Image
+
+        import portrait
+        import fourbpp
+
+        clut, _raw = portrait.portrait_clut()
+        im = Image.new("RGB", (portrait.PAGE_W, portrait.SHOWN_H), clut[10])
+        im.paste((255, 0, 255), (0, 0, 16, 16))
+
+        plain = fourbpp.decode_indices(portrait.encode_image(im))
+        keyed = fourbpp.decode_indices(portrait.encode_image(
+            im, None, {"transparent": "ff00ff", "tolerance": 8, "chroma": None}))
+
+        self.assertNotEqual(plain[0], 0)
+        self.assertEqual(keyed[0], 0)
+        self.assertEqual(keyed[portrait.PAGE_W * 20 + 20], plain[portrait.PAGE_W * 20 + 20])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
