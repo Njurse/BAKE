@@ -2297,6 +2297,79 @@ def _load_order(manifest, manifest_dir, order_path):
     return sorted(out)
 
 
+def _stock_levels_dirs(start):
+    """Folders a stock LEVELS/<CITY>.DEN and .LEV may be in, nearest first."""
+    out = []
+    game = os.environ.get("JERICHO_GAME")
+    if game:
+        out += [os.path.join(game, "DRIVER2", "LEVELS"), os.path.join(game, "LEVELS")]
+    d = os.path.abspath(start)
+    while True:
+        out += [os.path.join(d, "src_rebuild", "bin", "Release_dev", "DRIVER2", "LEVELS"),
+                os.path.join(d, "src_rebuild", "bin", "Release", "DRIVER2", "LEVELS"),
+                os.path.join(d, "DRIVER2", "LEVELS"), os.path.join(d, "LEVELS")]
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return out
+
+
+_STOCK_CACHE = {}
+
+
+def _stock_damage_source(spec, start, warnings, car_id):
+    """handling.damage {"stock", "model"} -> what dentgen's stock mode needs, or
+    "auto" (with a warning) when the stock car cannot be read."""
+    import dentgen
+
+    city, model = spec["stock"], spec["model"]
+
+    if city not in _STOCK_CACHE:
+        found = None
+        for d in _stock_levels_dirs(start):
+            lev = os.path.join(d, city + ".LEV")
+            den = os.path.join(d, city + ".DEN")
+            if os.path.isfile(lev) and os.path.isfile(den):
+                found = (lev, den)
+                break
+        entry = None
+        if found:
+            try:
+                with open(found[0], "rb") as f:
+                    blob = f.read()
+                got = d2_lump(blob, LUMP_CAR_MODELS)
+                if not got:
+                    raise ValueError("no LUMP_CAR_MODELS")
+                with open(found[1], "rb") as f:
+                    den_bytes = f.read()
+                entry = (dentgen.decode_clean_models(blob[got[0]:got[0] + got[1]]),
+                         den_bytes, found[1])
+            except Exception as e:      # a damage table never blocks a bake
+                warnings.append("%s: damage from stock %s: %s could not be read (%s)"
+                                % (car_id, city, found[0], e))
+        _STOCK_CACHE[city] = entry
+
+    entry = _STOCK_CACHE[city]
+
+    if entry is None:
+        warnings.append("%s: damage from stock %s model %d - %s.LEV/.DEN not found "
+                        "(set JERICHO_GAME to the game folder); using \"auto\""
+                        % (car_id, city, model, city))
+        return "auto"
+
+    models, den_bytes, den_path = entry
+    block = dentgen.stock_block_for(den_bytes, model)
+
+    if models.get(model) is None or block is None:
+        warnings.append("%s: damage from stock %s model %d - %s has no such car; "
+                        "using \"auto\"" % (car_id, city, model, os.path.basename(den_path)))
+        return "auto"
+
+    return {"stock_model": models[model], "stock_block": block,
+            "name": "%s %d" % (city, model)}
+
+
 def build_bank(manifest, manifest_path, out_dir, order_path):
     """Build <CITY>.LEV + <CITY>.LCF from a manifest and its raw blocks."""
     manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
@@ -2464,6 +2537,8 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     for slot, car_id in order:
         handling = (cars.get(car_id) or {}).get("handling") or {}
         m = bankjson.damage_mode(car_id, "cars", handling)
+        if isinstance(m, dict):
+            m = _stock_damage_source(m, manifest_dir, warnings, car_id)
         if m is not None:
             _dent_modes[slot] = m
     try:

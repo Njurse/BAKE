@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### `handling.damage: {"stock": CITY, "model": N}` - a repackaged stock car keeps the stock damage
+
+- A bank car built from a stock Driver 2 car can name it. The bake reads that car's table from `LEVELS/<CITY>.DEN` and carries it onto the baked mesh by geometry, so it dents and changes texture exactly as the original did. Added parts (light bars) never shift.
+- Measured on Cops n Robbers: every one of the eight cars contains 100% of its stock car's polys (e.g. the BelAir 252 of 252 plus 7 light-bar polys). The stock tables are mostly D=0 (no change at light damage); the old `d1` bake gave all of them D=1, which is the "damage still inaccurate on the cop pack" report.
+- Stock `.DEN` blocks are 975 bytes apart, one short of the 976 the bake writes; the last model's block is read and padded.
+
 ### Damage UV shifts are probed, not assumed (`handling.damage` defaults to `auto`)
 
 - `handling.damage` now defaults to `"auto"`: the bake probes each baked page and gives a poly a damage UV shift only where art it would land on actually exists. `"d1"` (shift every textured poly by +64/+128 whether or not there is art there) is still available by naming it.

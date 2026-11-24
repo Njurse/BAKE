@@ -121,19 +121,37 @@ DRIVE_WHEELS = {"front": 1, "rear": 2, "all": 3}
 # "d1"  - every textured denting poly uses D=1 (+64 light, +128 heavy) whether
 #        or not there is art there. The vanilla assumption; use it when a page
 #        carries the strips but the probe cannot see them.
+# {"stock": "<CITY>", "model": N} - the car is a stock Driver 2 car (repackaged:
+#        a cop car with a light bar, say). Its damage table is the one the original
+#        game ships for <CITY> model N (LEVELS/<CITY>.DEN), carried onto the baked
+#        mesh by geometry (dentgen._stock_table). The closest thing to the original
+#        damage progression there is; falls back to "auto" when the stock files are
+#        not found or the meshes turn out not to be the same car.
 DAMAGE_MODES = {"d1", "auto"}
+STOCK_DAMAGE_KEYS = {"stock", "model"}
 
 
 def damage_mode(where, field, handling):
-    """handling.damage as a string ("d1" or "auto"), or None when absent."""
+    """handling.damage: "d1", "auto", {"stock": city, "model": n}, or None."""
     if handling is None:
         return None
     v = handling.get("damage")
     if v is None:
         return None
+    if isinstance(v, dict):
+        _check_keys(where, field + ".handling.damage", v, STOCK_DAMAGE_KEYS,
+                    "damage")
+        city, model = v.get("stock"), v.get("model")
+        if not isinstance(city, str) or not city.strip().isalnum():
+            _fail(where, field + ".handling.damage.stock",
+                  "must name a Driver 2 city, e.g. \"HAVANA\"")
+        if isinstance(model, bool) or not isinstance(model, int) or not 0 <= model <= 12:
+            _fail(where, field + ".handling.damage.model", "must be a model number 0..12")
+        return {"stock": city.strip().upper(), "model": model}
     if v not in DAMAGE_MODES:
         _fail(where, field + ".handling.damage",
-              "must be one of: " + ", ".join(sorted(DAMAGE_MODES)))
+              "must be one of: " + ", ".join(sorted(DAMAGE_MODES))
+              + ", or {\"stock\": CITY, \"model\": N}")
     return v
 
 

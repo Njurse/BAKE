@@ -146,6 +146,134 @@ def decode_clean_models(models_body):
     return out
 
 
+# A bank car built FROM a stock Driver 2 car (a repackaged cop car, say) has a
+# better damage table than either mode can derive: the one the original game
+# ships for that car. Its poly indices describe the stock mesh, so it is carried
+# across by GEOMETRY: each baked vertex is matched to the stock vertex at the same
+# position, each baked poly to the stock poly over the same vertices (or the stock
+# quad a triangle was split from). Matched polys take the stock level byte and zone
+# membership verbatim; new parts (a light bar, an extra panel) never shift and
+# dent with the zone their position puts them in.
+STOCK_VERTEX_TOLERANCE = 4      # model units; an OBJ round trip moves a vertex by 1-2
+STOCK_MIN_MATCHED = 0.7         # share of the STOCK car's polys that must be found in
+                                # the baked one: added parts do not count against it
+
+
+def stock_block_for(den_bytes, model):
+    """The 976-byte block of stock .DEN `den_bytes` for model `model`, or None."""
+    if den_bytes is None or not 0 <= model < MAX_CAR_MODELS:
+        return None
+    off = struct.unpack_from("<i", den_bytes, model * 4)[0]
+    # The stock files space their blocks 975 bytes apart (255 level bytes are
+    # stored; the engine reads 256 and the last one is the next block's first),
+    # so the final model's block ends one byte short of BLOCK_BYTES. Pad that
+    # byte with 2 (never moves).
+    if off <= 0 or off + BLOCK_BYTES - 1 > len(den_bytes):
+        return None
+    blk = den_bytes[off:off + BLOCK_BYTES]
+    return blk + b"\x02" * (BLOCK_BYTES - len(blk))
+
+
+def _match_stock(m, stock):
+    """({baked vertex: stock vertex}, {baked poly: stock poly})."""
+    exact = {}
+    for j, w in enumerate(stock.vertices):
+        exact.setdefault(tuple(w), j)
+
+    vmap = {}
+    for i, v in enumerate(m.vertices):
+        j = exact.get(tuple(v))
+        if j is None:
+            best, bd = None, STOCK_VERTEX_TOLERANCE + 1
+            for k, w in enumerate(stock.vertices):
+                d = max(abs(v[0] - w[0]), abs(v[1] - w[1]), abs(v[2] - w[2]))
+                if d < bd:
+                    best, bd = k, d
+            j = best if bd <= STOCK_VERTEX_TOLERANCE else None
+        if j is not None:
+            vmap[i] = j
+
+    keyed = {}
+    for j, q in enumerate(stock.polys):
+        if q.v:
+            keyed.setdefault(frozenset(q.v), j)
+
+    pmap = {}
+    for i, p in enumerate(m.polys):
+        if not p.v or any(x not in vmap for x in p.v):
+            continue
+        key = frozenset(vmap[x] for x in p.v)
+        j = keyed.get(key)
+        if j is None:
+            # a stock quad the bake split into triangles
+            for jj, q in enumerate(stock.polys):
+                if q.v and key <= frozenset(q.v):
+                    j = jj
+                    break
+        if j is not None:
+            pmap[i] = j
+
+    return vmap, pmap
+
+
+def _stock_table(m, stock, block, half):
+    """(zv, zp, levels, summary) for baked model `m` from stock model + block, or
+    None when too few polys match for the two to be the same car."""
+    vmap, pmap = _match_stock(m, stock)
+
+    if not m.polys or not stock.polys or \
+            len(set(pmap.values())) < STOCK_MIN_MATCHED * len(stock.polys):
+        return None
+
+    s_zv = block[:NUM_ZONES * ZONE_VERTS]
+    s_zp = block[NUM_ZONES * ZONE_VERTS:NUM_ZONES * (ZONE_VERTS + ZONE_POLYS)]
+    s_lv = block[NUM_ZONES * (ZONE_VERTS + ZONE_POLYS):]
+
+    levels = bytearray([2] * LEVELS)
+    counts = {}
+    for i in range(min(len(m.polys), LEVELS)):
+        j = pmap.get(i)
+        d = s_lv[j] if j is not None and j < LEVELS else 2
+        levels[i] = d
+        counts[d] = counts.get(d, 0) + 1
+
+    inv_v, inv_p = {}, {}
+    for i, j in sorted(vmap.items()):
+        inv_v.setdefault(j, []).append(i)
+    for i, j in sorted(pmap.items()):
+        inv_p.setdefault(j, []).append(i)
+
+    zv = bytearray([0xFF] * (NUM_ZONES * ZONE_VERTS))
+    zp = bytearray([0xFF] * (NUM_ZONES * ZONE_POLYS))
+    placed_v = set()
+    for z in range(NUM_ZONES):
+        out = []
+        for k in range(ZONE_VERTS):
+            j = s_zv[z * ZONE_VERTS + k]
+            if j == 0xFF:
+                break
+            out.extend(i for i in inv_v.get(j, ()) if i < 255)
+        # new vertices (no stock counterpart) dent with their position's zone
+        out.extend(i for i, v in enumerate(m.vertices[:255])
+                   if i not in vmap and zone_of(v[0], v[2], half) == z)
+        out = out[:ZONE_VERTS - 1]
+        placed_v.update(out)
+        zv[z * ZONE_VERTS:z * ZONE_VERTS + len(out)] = bytes(out)
+
+        outp = []
+        for k in range(ZONE_POLYS):
+            j = s_zp[z * ZONE_POLYS + k]
+            if j == 0xFF:
+                break
+            outp.extend(i for i in inv_p.get(j, ()) if i < 255 and levels[i] != 2)
+        outp = outp[:ZONE_POLYS - 1]
+        zp[z * ZONE_POLYS:z * ZONE_POLYS + len(outp)] = bytes(outp)
+
+    summary = {"matched_polys": len(pmap), "new_polys": len(m.polys) - len(pmap),
+               "matched_vertices": len(vmap), "levels": {str(k): v for k, v in sorted(counts.items())}}
+    return zv, zp, levels, summary
+
+
 def build_dent_body(models_body, pages_by_set, damage_modes=None):
     """(LUMP_CAR_DENTING body or None, {slot: summary}).
 
@@ -194,9 +322,27 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
             continue
         half = max(abs(v[2]) for v in verts) or 1
 
+        mode = damage_modes.get(slot, "auto")
+
+        if isinstance(mode, dict):
+            # {"stock_model": lev1 Model, "stock_block": 976 bytes, "name": "HAVANA 2"}
+            got = None
+            if mode.get("stock_model") is not None and mode.get("stock_block"):
+                got = _stock_table(m, mode["stock_model"], mode["stock_block"], half)
+            if got is not None:
+                zv, zp, levels, summary = got
+                blocks[slot] = bytes(zv) + bytes(zp) + bytes(levels)
+                summary.update({"polys": len(m.polys),
+                                "mode": "stock %s" % mode.get("name", "?")})
+                report[slot] = summary
+                continue
+            # not the same car after all (or the stock files were not found):
+            # probe the page instead, and say so in the report
+            mode = "auto"
+            report.setdefault(slot, {})["stock_fallback"] = True
+
         levels = bytearray([2] * LEVELS)
         counts = {0: 0, 1: 0, 2: 0, 3: 0}
-        mode = damage_modes.get(slot, "auto")
         for pi, p in enumerate(m.polys[:LEVELS]):
             tx = poly_texels.get((slot, pi))
             d = 2
@@ -237,10 +383,10 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
                 zp[z * ZONE_POLYS + k] = pi
 
         blocks[slot] = bytes(zv) + bytes(zp) + bytes(levels)
-        report[slot] = {"polys": len(m.polys), "mode": mode,
+        report[slot] = dict(report.get(slot, {}), **{"polys": len(m.polys), "mode": mode,
                         "shift_64_128": counts[1],
                         "shift_128": counts[0], "shift_64": counts[3],
-                        "still": counts[2]}
+                        "still": counts[2]})
 
     if not blocks:
         return None, report
