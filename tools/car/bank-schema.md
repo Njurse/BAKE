@@ -636,8 +636,10 @@ shift for each body poly when the car is dented.
 
 | value | behaviour |
 |-------|----------|
-| `"d1"` (default, key absent) | every textured denting poly gets D=1: **+64 px at light damage, +128 px at heavy**. This is the vanilla D1/D2 behaviour. The bank author is responsible for placing damage art at those offsets on the texture page. |
-| `"auto"` | probe the baked page for each poly. A shift is only used when enough of the poly's texels land on drawable art that no other poly already occupies. Use for unusual page layouts where the damage strip is not at the standard +64/+128 position. |
+| `"auto"` (default, key absent) | probe the baked page for each poly. A shift is only used when enough of the poly's texels land on drawable art that no other poly already occupies, so a page carrying damage strips at +64/+128 gets the vanilla progression and a poly with nothing beside it keeps its texture when hit. |
+| `"d1"` | every textured denting poly gets D=1: **+64 px at light damage, +128 px at heavy**, whether or not there is art there. The vanilla D1/D2 *assumption* rather than a measurement; the bank author is then responsible for the art at those offsets. Use it when a page does carry the strips but the probe cannot see them (art the palette row draws as `0x0000`, or a strip another poly also covers). |
+
+`"d1"` was the default up to this release. On a custom page without damage strips it shifted **every** panel 64 texels sideways into whatever art happened to sit there, which is the "the damage UVs are wrong instead of following the original progression" report. The probe is the safer default: at worst a panel does not change texture, where the other way round wrecks the paintwork. A re-bake prints the per-car counts (`shift_64_128`, `shift_128`, `shift_64`, `still`), so you can see which polys the probe left alone and reach for `"d1"` if your page really does carry strips everywhere.
 
 Example:
 

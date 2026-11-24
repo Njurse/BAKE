@@ -114,11 +114,13 @@ DRIVE_WHEELS = {"front": 1, "rear": 2, "all": 3}
 
 # handling.damage -> dentgen.py damage_modes: how the bake decides which
 # texture UV shift (0, +64, +128) each poly gets when the car is dented.
-# "d1"  (default, omitting the key) - every textured denting poly uses D=1:
-#        +64 at light damage, +128 at heavy. Matches vanilla D1/D2 behaviour
-#        where every painted body panel has a damage strip at those offsets.
-# "auto" - probe the baked page and assign D based on where drawable art
-#        actually lands. Use for unusual page layouts.
+# "auto" (default, omitting the key) - probe the baked page and assign D from
+#        where drawable art actually lands, so a page WITH damage strips at
+#        +64/+128 gets the vanilla progression and a page without them keeps
+#        its texture when hit.
+# "d1"  - every textured denting poly uses D=1 (+64 light, +128 heavy) whether
+#        or not there is art there. The vanilla assumption; use it when a page
+#        carries the strips but the probe cannot see them.
 DAMAGE_MODES = {"d1", "auto"}
 
 

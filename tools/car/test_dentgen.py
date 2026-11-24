@@ -53,9 +53,9 @@ class DentgenTest(unittest.TestCase):
             dentgen.page_from_entry = orig_page
         return body, report
 
-    def test_levels_d1_mode_default(self):
-        """Default "d1" mode: every textured poly gets D=1 (+64 light, +128 heavy)."""
-        body, report = self._build()   # no damage_modes = "d1" default
+    def test_levels_d1_mode_asked_for_shifts_every_textured_poly(self):
+        """"d1" mode: every textured poly gets D=1, art or no art."""
+        body, report = self._build(damage_modes={1: "d1"})
         off = struct.unpack_from("<13i", body, 8)[1]
         block = body[off:off + dentgen.BLOCK_BYTES]
         levels = block[dentgen.NUM_ZONES * (dentgen.ZONE_VERTS + dentgen.ZONE_POLYS):]
@@ -64,10 +64,11 @@ class DentgenTest(unittest.TestCase):
         self.assertEqual(levels[1], 1)   # D=1: even though no art at +64/+128
         self.assertEqual(report[1]["shift_64_128"], 2)
         self.assertEqual(report[1]["still"], 0)
+        self.assertEqual(report[1]["mode"], "d1")
 
-    def test_levels_auto_mode_follows_art(self):
-        """Explicit "auto" mode: D is chosen by probing the page."""
-        body, report = self._build(damage_modes={1: "auto"})
+    def test_levels_auto_mode_is_the_default(self):
+        """The default mode probes the page: no damage art, no UV shift."""
+        body, report = self._build()   # no damage_modes = "auto" default
         off = struct.unpack_from("<13i", body, 8)[1]
         block = body[off:off + dentgen.BLOCK_BYTES]
         levels = block[dentgen.NUM_ZONES * (dentgen.ZONE_VERTS + dentgen.ZONE_POLYS):]
@@ -76,6 +77,7 @@ class DentgenTest(unittest.TestCase):
         polys_zone0 = block[dentgen.NUM_ZONES * dentgen.ZONE_VERTS:][:dentgen.ZONE_POLYS]
         self.assertEqual(polys_zone0[0], 0)   # poly A is front, x > 0
         self.assertEqual(report[1]["still"], 1)
+        self.assertEqual(report[1]["mode"], "auto")
 
 
 if __name__ == "__main__":

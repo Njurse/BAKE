@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Damage UV shifts are probed, not assumed (`handling.damage` defaults to `auto`)
+
+- `handling.damage` now defaults to `"auto"`: the bake probes each baked page and gives a poly a damage UV shift only where art it would land on actually exists. `"d1"` (shift every textured poly by +64/+128 whether or not there is art there) is still available by naming it.
+- `"d1"` was the old default, so a custom page with no damage strips had every panel shifted sideways into unrelated art when the car was hit. Measured on the NICE bank: `d1` shifts all 244 polys, `auto` leaves the 64 with nothing beside them alone and still gives 104 the full light/heavy progression.
+- Re-bake to pick this up; the per-car dent report now also names the mode used.
+
 ### Wheels and portrait live under `textures`, with the page backdrop keys
 
 - `wheels` and `portrait` now sit in the car's `textures` block next to the page ids. A top-level `wheels`/`portrait` still loads and is moved under `textures` the next time the bake stamps the car json; declaring both is an error.

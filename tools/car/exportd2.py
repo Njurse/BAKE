@@ -2459,7 +2459,7 @@ def build_bank(manifest, manifest_path, out_dir, order_path):
     voice_body = build_voice_body(order, cars)
 
     import dentgen
-    # Collect per-slot damage modes from handling.damage (default "d1").
+    # Collect per-slot damage modes from handling.damage (default "auto").
     _dent_modes = {}
     for slot, car_id in order:
         handling = (cars.get(car_id) or {}).get("handling") or {}

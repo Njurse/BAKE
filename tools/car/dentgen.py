@@ -23,13 +23,22 @@ the poly's OWN palette row draws opaque. Everything else is D=2, so a car with
 no damage art drawn simply does not change texture when hit.
 
 Damage modes (handling.damage in the bank JSON, per slot):
-  "d1"   (default) every textured poly that could dent gets D=1:
-         +64 at light damage, +128 at heavy. This matches vanilla
-         D1/D2 behaviour where every painted body panel has a damage
-         strip at those offsets on the texture page.
-  "auto"  probe the baked page for each poly: a shift is only used
-         when enough of its texels land on drawable art that no other
-         poly already occupies. Use for non-standard layouts.
+  "auto" (default) probe the baked page for each poly: a shift is only used
+         when enough of its texels land on drawable art that no other poly
+         already occupies. A page with damage strips at +64/+128 gets the
+         vanilla progression; a page without them simply does not change
+         texture when hit, which is what an undamaged-looking panel should do.
+  "d1"   every textured poly that could dent gets D=1: +64 at light damage,
+         +128 at heavy, whether or not there is art there. This is the vanilla
+         ASSUMPTION rather than a measurement - use it when a page carries the
+         strips but the probe cannot see them (art the palette row draws as
+         0x0000, or strips another poly also covers).
+
+"d1" used to be the default, and on a custom page with no damage strips it
+shifted every panel 64 texels sideways into whatever art sat there: the
+"damage UVs are messed up instead of following the original progression"
+report. Probing is the safer default - the worst it can do is leave a car
+undented-looking, where the other way round wrecks the paintwork.
 
 Block layout (one .DEN model block, 976 bytes): u8 zone_verts[6][50],
 u8 zone_polys[6][70], u8 levels[256]; 0xFF ends a zone list.
@@ -141,9 +150,9 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
     """(LUMP_CAR_DENTING body or None, {slot: summary}).
 
     `pages_by_set` is {set: baked page entry bytes}.
-    `damage_modes` is {slot: "d1"|"auto"}; absent slots default to "d1".
-    "d1": D=1 for all textured denting polys (vanilla: +64 light, +128 heavy).
-    "auto": probe page art to pick D per poly."""
+    `damage_modes` is {slot: "d1"|"auto"}; absent slots default to "auto".
+    "auto": probe page art to pick D per poly (see the module docstring).
+    "d1": D=1 for all textured denting polys (vanilla: +64 light, +128 heavy)."""
     if damage_modes is None:
         damage_modes = {}
     models = decode_clean_models(models_body)
@@ -187,7 +196,7 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
 
         levels = bytearray([2] * LEVELS)
         counts = {0: 0, 1: 0, 2: 0, 3: 0}
-        mode = damage_modes.get(slot, "d1")
+        mode = damage_modes.get(slot, "auto")
         for pi, p in enumerate(m.polys[:LEVELS]):
             tx = poly_texels.get((slot, pi))
             d = 2
@@ -197,9 +206,9 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
                     h64, h128 = hit(p, tx, 64), hit(p, tx, 128)
                     d = 1 if (h64 and h128) else 0 if h128 else 3 if h64 else 2
                 else:
-                    # "d1" mode (default): assume damage art at +64/+128,
-                    # matching vanilla D1/D2 behavior. Every textured
-                    # denting poly shifts progressively: +64 light, +128 heavy.
+                    # "d1" mode: ASSUME damage art at +64/+128, the vanilla
+                    # D1/D2 layout, without looking at the page. Every
+                    # textured denting poly shifts: +64 light, +128 heavy.
                     d = 1
             levels[pi] = d
             counts[d] += 1
@@ -228,7 +237,8 @@ def build_dent_body(models_body, pages_by_set, damage_modes=None):
                 zp[z * ZONE_POLYS + k] = pi
 
         blocks[slot] = bytes(zv) + bytes(zp) + bytes(levels)
-        report[slot] = {"polys": len(m.polys), "shift_64_128": counts[1],
+        report[slot] = {"polys": len(m.polys), "mode": mode,
+                        "shift_64_128": counts[1],
                         "shift_128": counts[0], "shift_64": counts[3],
                         "still": counts[2]}
 
