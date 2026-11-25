@@ -1444,6 +1444,7 @@ class Bank(object):
             self.cars[name].police_lights = lights
 
         seen = set()
+        seen_cars = set()
 
         for entry in decl.get("order") or []:
             if not isinstance(entry, dict) or set(entry) - {"slot", "car"}:
@@ -1466,6 +1467,13 @@ class Bank(object):
                       "%r is not declared in cars (it has: %s)"
                       % (carname, ", ".join(sorted(self.cars)) or "none"))
 
+            # A bank that lists the same car in two slots would bake it twice
+            # under two model ids; refuse it rather than ship a duplicate.
+            if carname in seen_cars:
+                _fail(where, "declare.order.car",
+                      "car %r is listed more than once" % carname)
+
+            seen_cars.add(carname)
             self.order.append((slot, carname))
 
         # Police radio chatter: a complete replacement phrase bank in phrase
