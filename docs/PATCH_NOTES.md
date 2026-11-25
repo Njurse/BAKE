@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### `rebuild_damaged.py`: a damaged OBJ must match its clean OBJ vertex for vertex
+
+- The bake writes a damaged model as vertices only and reuses the CLEAN polygon table, so the damaged OBJ needs the same vertices in the same order. When the clean OBJ is edited afterwards (a light bar, a fixed panel) and the damaged one is not, every vertex after the first difference is dented toward its neighbour's position and the dent table names vertices the damaged mesh does not have. `checks.ok` stays true: the bake does not compare the counts.
+- `python rebuild_damaged.py <bank.json> [--car ID] [--check] [--all]` matches each damaged vertex to the clean vertex it came from (position, the panel's material/UV corners, and file order) and writes `<name>_damaged.rebuilt.obj`: the clean OBJ verbatim with every vertex moved to its damaged position. A part with no damaged counterpart stays undented. Nothing is overwritten; rename the result over the old file to use it. `--check` writes nothing and exits 1 on any count mismatch.
+- On the COPSNRBRS bank this found the Benz SL, pickup, GSX and limo out of line (137/136, 137/136, 140/141, 142/130). The Benz SL and pickup were moving vertices up to 1.8 half-lengths; rebuilt, the largest move is 0.13. The other four cars reproduce their damaged OBJ exactly.
+
+### Vehicle previewer (`preview_car.py`)
+
+- **1 / 2 / 3 / Tab** switch between the clean, damaged and low OBJ; the title names the model and flags a vertex count that differs from the clean one. `--variant`, `--cycle S` and `--rebuilt` (show `*_damaged.rebuilt.obj`) are the matching options.
+- **Road scene:** `test_scenes/vegas.glb` is drawn as an endless road (the new glTF reader handles any node transform and embedded PNGs). The car holds its lane while the road scrolls at the speed of the rev cycle. **G** toggles back to the turntable; `--turntable`, `--scene PATH`, `--scene-scale`, `--scene-period`, `--scene-lane`, `--road-speed`.
+- **Orientation:** the bank's OBJs are engine space (-Y up), so the previewer now flips them upright by default; it was drawing them upside down unless `--flip-y` was passed. `--flip-y` is still accepted (the generated `preview.bat` / `rebake.bat` pass it); `--y-up` is for a bank baked with `flipy` / `full` / `flipfull`.
+- **Orbit:** drag with the left button (or the arrow keys) to pan around the car, mouse wheel / PgUp / PgDn to zoom, **R** for the automatic camera again. The road scene is drawn with back faces culled, so a wall between the camera and the car is see-through from behind and the car stays visible (`--no-cull` for the old double-sided look).
+- **Camera** is closer and lower: `--cam-dist` 3.3 (was 4.2), `--cam-pitch` 7 (was 18).
+- **Wheels were missing** for every bank that keeps them under `textures.wheels` (the newer spelling); the previewer only read a top-level `wheels`. Both are read now.
+- **Ride height and suspension.** The default rest compression was 30; the engine settles at gravity / (4 x spring), 7456 / (4 x 130) = 14.3, which is also what `handling.c` seeds. The body now also squats under throttle, dives on the coast and bobs over the road on the engine's spring rate (masses and damping ratio are chosen, not measured). `--ride`, `--no-suspension`, `--susp-gain` (exaggerate).
+- Textures are uploaded before a display list is compiled, not inside it (an upload inside `glNewList` is only recorded and re-runs every frame).
+- Falls back to `glFrustum` where GLU is not installed.
+
 ### Colour variants: one list per car, colour names, measured body, previews
 
 - `"textures": {"paints": ["red", "blue", "silver"]}` in a car's `handling.json` gives every page in the car's own folder those variants. Shared pages are skipped (a page's colour columns are every car's that draws it) and the bake names them. A page's own `paints` still wins.
